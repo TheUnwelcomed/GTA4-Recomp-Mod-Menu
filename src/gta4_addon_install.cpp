@@ -18,6 +18,7 @@
 #include "gta4_addon_install.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <array>
 #include <cstdint>
@@ -38,6 +39,11 @@
 namespace gta4::addons {
 namespace {
 namespace fs = std::filesystem;
+
+// Shadow state for this launch (see the header).
+std::atomic<bool> g_shadows_active{false};
+fs::path g_launch_marker;
+bool g_shadows_skipped = false;
 
 constexpr uint32_t kImgMagic = 0xA94E2A52u;
 constexpr uint32_t kRscMagicLE = 0x05435352u;  // 'RSC\x05' as PC stores it
@@ -1669,8 +1675,23 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
       REXLOG_WARN("gta4-addons: {} has no aes_key.bin; only a plain archive can be edited",
                   game.string());
   }
-  // The data files the game actually reads: in common.rpf.
-  const auto shadows = BuildShadows(game, key, addons, game.parent_path() / "addon_cache");
+  // The data files the game actually reads: in common.rpf. (Not this launch
+  // if the last one that used them never reached the city.)
+  const fs::path cache = game.parent_path() / "addon_cache";
+  std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, cache);
+  if (!shadows.empty()) {
+    const fs::path marker = cache / "launch-pending.txt";
+    g_launch_marker = marker;
+    if (fs::exists(marker, ec)) {
+      fs::remove(marker, ec);
+      g_shadows_skipped = true;
+      shadows.clear();
+      REXLOG_WARN("gta4-addons: the last launch with the add-ons' data never reached the game; "
+                  "this launch starts without it (the next one tries again)");
+    } else {
+      std::ofstream(marker, std::ios::trunc) << "launched with the add-ons' shadow archive\n";
+    }
+  }
   // Every vehicles.img in the installed tree: base, title update, episodes.
   // Whichever the game streams from must carry the cars, so all of them get
   // them, and each is named in the log with its size for diagnosis.
@@ -1731,4 +1752,18 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
   return shadows;
 }
 
+void SetShadowsActive(bool active) { g_shadows_active.store(active, std::memory_order_relaxed); }
+bool ShadowsActive() { return g_shadows_active.load(std::memory_order_relaxed); }
+
+void MarkLaunchHealthy() {
+  static bool s_done = false;
+  if (s_done || g_launch_marker.empty())
+    return;
+  s_done = true;
+  std::error_code ec;
+  if (fs::remove(g_launch_marker, ec))
+    REXLOG_INFO("gta4-addons: reached the city with the add-ons' data; launch marker cleared");
+}
+
+bool ShadowsSkippedThisLaunch() { return g_shadows_skipped; }
 }  // namespace gta4::addons

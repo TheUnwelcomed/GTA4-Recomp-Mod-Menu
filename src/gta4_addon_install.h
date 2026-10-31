@@ -26,4 +26,17 @@ struct ShadowArchive {
 };
 std::vector<ShadowArchive> InstallBundled(const std::filesystem::path& app_addons,
                                           const std::filesystem::path& user_data_root);
+
+// Set by the app once a shadow is mounted. The game checks some data files
+// (vehicles.ide, handling.dat...) against built-in checksums as it opens them
+// and stops on a mismatch; the trainer skips that check while this is set.
+void SetShadowsActive(bool active);
+bool ShadowsActive();
+
+// Launch guard: a launch that mounts the shadows leaves a marker until the
+// game reaches the city (the trainer calls MarkLaunchHealthy then). A marker
+// still there at the next launch means that launch never got in, so this one
+// starts without the shadows - the stock game - and the one after tries again.
+void MarkLaunchHealthy();
+bool ShadowsSkippedThisLaunch();
 }  // namespace gta4::addons

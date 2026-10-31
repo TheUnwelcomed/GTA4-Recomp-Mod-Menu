@@ -4,6 +4,7 @@
 // follows gta4_quicksave_hooks.cpp, the one proven way this port calls
 // natives from host code.
 #include "gta4_trainer.h"
+#include "gta4_addon_install.h"
 
 #include <algorithm>
 #include <array>
@@ -2176,8 +2177,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     return;
   }
   ++g_pass;
+  gta4::addons::MarkLaunchHealthy();
   if (!g_addons_probed) {
     g_addons_probed = true;
+    if (gta4::addons::ShadowsSkippedThisLaunch())
+      Toast(s, "Add-on cars are off this launch: the last launch with them did not start. "
+               "Details in the log.", 8000);
     auto installed = [&](std::string_view model) {
       const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {ModelHash(model)});
       return known && known->r0() != 0;
@@ -2431,4 +2436,17 @@ extern "C" void sub_821C83C0(PPCContext& ctx, uint8_t* base) {
     }
   }
   __imp__sub_821C83C0(ctx, base);
+}
+
+// As the game opens certain data files (vehicles.ide, handling.dat and the
+// like) it checks their contents against built-in checksums (sub_821B5538,
+// called from the data-file open, sub_821B5600) and, on a mismatch, stops for
+// good - the console log 043 crash was that check failing on vehicles.ide.
+// The add-ons' lines are exactly such a change, so while their shadow
+// common.rpf is in use the check is skipped; without it the game checks as
+// it always did.
+extern "C" void sub_821B5538(PPCContext& ctx, uint8_t* base) {
+  if (gta4::addons::ShadowsActive())
+    return;
+  __imp__sub_821B5538(ctx, base);
 }

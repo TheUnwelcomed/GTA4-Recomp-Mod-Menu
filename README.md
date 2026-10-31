@@ -88,6 +88,16 @@ network session.
   The app redirects `game:\common.rpf` to it, the way the port already swaps in
   its own `xbox360.rpf` for the PS5 button prompts. The installed archive is
   never modified; deleting `addon_cache` restores the stock data.
+- **Data-file checksums**: as the game opens some data files (`vehicles.ide`,
+  `handling.dat`...) it compares them with built-in checksums
+  (`sub_821B5538`, from the data-file open `sub_821B5600`) and stops on a
+  mismatch. The add-ons' lines are such a change, so the trainer skips that
+  check while the shadow archive is mounted; without it the game checks as
+  always.
+- **Launch guard**: a launch that mounts the shadow leaves
+  `addon_cache/launch-pending.txt` until the game reaches the city. If it is
+  still there at the next launch, that launch starts without the shadow (the
+  stock data) and says so, and the one after tries again.
 - **Self-measurement**: every 10 seconds the log gets a
   `gta4-trainer: cost over 10.0 s` line with the trainer's own time per frame.
 

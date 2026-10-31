@@ -51,7 +51,7 @@ index 9945830..e9e272c 100644
    auto* registration = gta4::FindRegistration(return_address);
    if (!registration) {
 diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
-index a9b2c2a..a06bc18 100644
+index a9b2c2a..4b628ee 100644
 --- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
 +++ b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
 @@ -8,6 +8,8 @@
@@ -80,7 +80,7 @@ index a9b2c2a..a06bc18 100644
  }  // namespace
  
  void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate, const rex::PathConfig& paths,
-@@ -87,9 +92,38 @@ void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate,
+@@ -87,9 +92,39 @@ void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate,
    });
  }
  
@@ -107,6 +107,7 @@ index a9b2c2a..a06bc18 100644
 +      file_system->RegisterSymbolicLink("d:" + s.guest_path.substr(5), target);
 +    REXLOG_INFO("gta4-addons: {} now reads {}", s.guest_path, s.shadow.string());
 +  }
++  gta4::addons::SetShadowsActive(true);
 +}
 +
  void OnGameSetUp(rex::ui::ImGuiDrawer* drawer, rex::Runtime* runtime, const fs::path& user_data) {
