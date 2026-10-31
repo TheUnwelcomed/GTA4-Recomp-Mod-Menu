@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include <zlib.h>
+
 #include <rex/logging.h>
 #include <rijndael-alg-fst.h>
 
@@ -102,13 +104,40 @@ bool ReadAll(const fs::path& path, std::vector<uint8_t>& out) {
   return bool(in);
 }
 
+// A plain read-and-write copy. v1.7.1's index copied no files at all on the
+// console with the standard library's copy and directory-entry sizes, so the
+// copy and the size below are done by hand.
+bool CopyBytes(const fs::path& from, const fs::path& to) {
+  std::vector<uint8_t> data;
+  if (!ReadAll(from, data))
+    return false;
+  std::ofstream out(to, std::ios::binary | std::ios::trunc);
+  out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+  return bool(out);
+}
+
+// The size of a file, by opening it when the file system will not say.
+uint64_t SizeOf(const fs::path& path) {
+  std::error_code ec;
+  const auto size = fs::file_size(path, ec);
+  if (!ec)
+    return size;
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in)
+    return UINT64_MAX;
+  const std::streamoff end = in.tellg();
+  return end < 0 ? UINT64_MAX : uint64_t(end);
+}
+
 bool BackupOnce(const fs::path& file) {
   std::error_code ec;
   const fs::path bak = file.string() + ".stock-bak";
   if (fs::exists(bak, ec)) return true;
-  fs::copy_file(file, bak, ec);
-  if (ec) REXLOG_WARN("gta4-addons: could not back up {}: {}", file.string(), ec.message());
-  return !ec;
+  if (!CopyBytes(file, bak)) {
+    REXLOG_WARN("gta4-addons: could not back up {}", file.string());
+    return false;
+  }
+  return true;
 }
 
 // The game's text data files (vehicles.ide, handling.dat, carcols.dat,
@@ -235,6 +264,25 @@ bool InsertAfterDonor(const fs::path& file, std::string_view donor, std::string_
                       const char* what) {
   const std::string name = FirstToken(line);
   return EditText(file, what, [&](std::vector<std::string>& lines) {
+    // Already right: exactly one line for the name, identical, and in the
+    // donor's section (no "end" between them) - leave it where it is.
+    std::vector<size_t> mine;
+    size_t donor_at = lines.size();
+    for (size_t i = 0; i < lines.size(); ++i) {
+      const std::string token = FirstToken(lines[i]);
+      if (token == name)
+        mine.push_back(i);
+      else if (token == donor && donor_at == lines.size())
+        donor_at = i;
+    }
+    if (mine.size() == 1 && donor_at < lines.size() && Tokens(lines[mine[0]]) == Tokens(line)) {
+      const size_t from = std::min(mine[0], donor_at), to = std::max(mine[0], donor_at);
+      bool split = false;
+      for (size_t i = from + 1; i < to; ++i)
+        split |= FirstToken(lines[i]) == "end";
+      if (!split)
+        return true;
+    }
     std::erase_if(lines, [&](const std::string& l) { return FirstToken(l) == name; });
     for (size_t i = 0; i < lines.size(); ++i) {
       if (FirstToken(lines[i]) == donor) {
@@ -253,21 +301,43 @@ bool InsertAfterDonor(const fs::path& file, std::string_view donor, std::string_
 // it, the name written in the donor's case.
 bool CloneDonorLines(const fs::path& file, std::string_view donor, std::string_view model,
                      const char* what) {
+  auto twin_of = [&](const std::string& line) {
+    size_t at = 0, len = 0;
+    FirstToken(line, &at, &len);
+    const std::string original = line.substr(at, len);
+    const bool upper = std::none_of(original.begin(), original.end(),
+                                    [](char c) { return std::islower(static_cast<unsigned char>(c)); });
+    std::string name(model);
+    for (char& c : name)
+      c = char(upper ? std::toupper(static_cast<unsigned char>(c)) : c);
+    std::string twin = line;
+    twin.replace(at, len, name);
+    return twin;
+  };
   return EditText(file, what, [&](std::vector<std::string>& lines) {
+    // Already right: one twin per donor line, identical, each after its donor
+    // line in the same section (other add-ons' twins may sit between).
+    std::vector<size_t> donors, mine;
+    for (size_t i = 0; i < lines.size(); ++i) {
+      const std::string token = FirstToken(lines[i]);
+      if (token == donor)
+        donors.push_back(i);
+      else if (token == model)
+        mine.push_back(i);
+    }
+    bool right = !donors.empty() && donors.size() == mine.size();
+    for (size_t k = 0; right && k < donors.size(); ++k) {
+      right = mine[k] > donors[k] && lines[mine[k]] == twin_of(lines[donors[k]]);
+      for (size_t x = donors[k] + 1; right && x < mine[k]; ++x)
+        right = FirstToken(lines[x]) != "end" && FirstToken(lines[x]) != donor;
+    }
+    if (right)
+      return true;
     std::erase_if(lines, [&](const std::string& l) { return FirstToken(l) == model; });
     for (size_t i = 0; i < lines.size(); ++i) {
-      size_t at = 0, len = 0;
-      if (FirstToken(lines[i], &at, &len) != donor)
+      if (FirstToken(lines[i]) != donor)
         continue;
-      const std::string original = lines[i].substr(at, len);
-      const bool upper = std::none_of(original.begin(), original.end(),
-                                      [](char c) { return std::islower(static_cast<unsigned char>(c)); });
-      std::string name(model);
-      for (char& c : name)
-        c = char(upper ? std::toupper(static_cast<unsigned char>(c)) : c);
-      std::string twin = lines[i];
-      twin.replace(at, len, name);
-      lines.insert(lines.begin() + std::ptrdiff_t(i + 1), std::move(twin));
+      lines.insert(lines.begin() + std::ptrdiff_t(i + 1), twin_of(lines[i]));
       ++i;
     }
     return true;
@@ -807,13 +877,109 @@ bool ListImg(const fs::path& img, const std::vector<uint8_t>& key, std::ostream&
   return true;
 }
 
+// RPF2 (the game's other archive format) for the index: every entry's path,
+// and the small text data files inside copied out - the title update or an
+// episode may carry its own vehicles.ide / handling.dat in one.
+bool IsTextData(std::string ext) {
+  for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return ext == ".dat" || ext == ".ide" || ext == ".csv" || ext == ".txt" || ext == ".xml" ||
+         ext == ".ipl" || ext == ".ini";
+}
+
+int ListRpf(const fs::path& rpf, const std::vector<uint8_t>& key, std::ostream& listing,
+            const fs::path& data_out, const std::string& prefix) {
+  std::ifstream in(rpf, std::ios::binary);
+  std::array<uint8_t, 20> header{};
+  if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
+    return 0;
+  auto le32 = [](const uint8_t* p) {
+    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+  };
+  if (le32(header.data()) != 0x32465052u)  // 'RPF2'
+    return 0;
+  const uint32_t toc_size = le32(header.data() + 4), count = le32(header.data() + 8);
+  const bool encrypted = le32(header.data() + 16) != 0;
+  if (!count || count > 1000000 || uint64_t(count) * 16 > toc_size || toc_size > (64u << 20) ||
+      (encrypted && key.size() != 32))
+    return 0;
+  std::vector<uint8_t> toc(toc_size);
+  in.seekg(0x800);
+  if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
+    return 0;
+  if (encrypted)
+    CryptBlocks(toc.data(), toc.size(), key, false);
+  const size_t names = size_t(count) * 16;
+  auto name_of = [&](uint32_t i) {
+    const uint32_t at = le32(toc.data() + i * 16);
+    if (names + at >= toc.size()) return std::string("?");
+    return std::string(reinterpret_cast<const char*>(toc.data() + names + at),
+                       strnlen(reinterpret_cast<const char*>(toc.data() + names + at),
+                               toc.size() - names - at));
+  };
+  listing << "# " << rpf.string() << " entries=" << count << "\n";
+  int copied = 0;
+  // Walk directories from the root (entry 0).
+  std::vector<std::pair<uint32_t, std::string>> pending = {{0, ""}};
+  size_t guard = 0;
+  while (!pending.empty() && ++guard < 200000) {
+    auto [dir, path] = pending.back();
+    pending.pop_back();
+    const uint8_t* d = toc.data() + dir * 16;
+    const uint32_t first = le32(d + 8) & 0x7FFFFFFF, n = le32(d + 12) & 0x0FFFFFFF;
+    if (uint64_t(first) + n > count)
+      continue;
+    for (uint32_t i = first; i < first + n; ++i) {
+      const uint8_t* e = toc.data() + i * 16;
+      const std::string child = path + "/" + name_of(i);
+      if (le32(e + 8) & 0x80000000u) {
+        pending.emplace_back(i, child);
+        continue;
+      }
+      const uint32_t size = le32(e + 4), w2 = le32(e + 8), w3 = le32(e + 12);
+      const bool resource = (w3 & 0xC0000000u) == 0xC0000000u;
+      listing << child << " " << size << (resource ? " rsc" : "") << "\n";
+      if (resource || size > (2u << 20) || !IsTextData(fs::path(child).extension().string()))
+        continue;
+      const bool compressed = (w3 & 0x40000000u) != 0;
+      const uint32_t stored = w3 & 0xBFFFFFFFu;
+      std::vector<uint8_t> raw(compressed ? stored : size);
+      in.clear();
+      in.seekg(std::streamoff(w2));
+      if (!in.read(reinterpret_cast<char*>(raw.data()), std::streamsize(raw.size())))
+        continue;
+      std::vector<uint8_t> text(size);
+      if (compressed) {
+        z_stream z{};
+        if (inflateInit2(&z, -MAX_WBITS) != Z_OK)
+          continue;
+        z.next_in = raw.data();
+        z.avail_in = uInt(raw.size());
+        z.next_out = text.data();
+        z.avail_out = uInt(text.size());
+        const int status = inflate(&z, Z_FINISH);
+        inflateEnd(&z);
+        if (status != Z_STREAM_END)
+          continue;
+      } else {
+        text = std::move(raw);
+      }
+      std::string flat = prefix + child;
+      std::replace(flat.begin(), flat.end(), '/', '_');
+      std::ofstream(data_out / flat, std::ios::binary | std::ios::trunc)
+          .write(reinterpret_cast<const char*>(text.data()), std::streamsize(text.size()));
+      ++copied;
+    }
+  }
+  return copied;
+}
+
 // The game's layout for the converter (logs/export/index on the console):
 // every file under the install with its size, every archive's table of
 // contents, and copies of the small text data files (timecycle, materials,
 // weather, handling...). Once per version of this list.
 void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, const fs::path& out) {
   std::error_code ec;
-  constexpr std::string_view kVersion = "index v1\n";
+  constexpr std::string_view kVersion = "index v2\n";
   {
     std::vector<uint8_t> marker;
     if (ReadAll(out / "done.txt", marker) && std::string(marker.begin(), marker.end()) == kVersion)
@@ -835,7 +1001,7 @@ void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, cons
       if (!it->is_regular_file(fec))
         continue;
       const auto& path = it->path();
-      const uint64_t size = it->file_size(fec);
+      const uint64_t size = SizeOf(path);
       files << fs::relative(path, game.parent_path(), fec).string() << " " << size << "\n";
       std::string ext = path.extension().string();
       for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -844,13 +1010,17 @@ void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, cons
         std::replace(flat.begin(), flat.end(), '/', '_');
         std::ofstream listing(out / "toc" / (flat + ".txt"), std::ios::trunc);
         archives += ListImg(path, key, listing) ? 1 : 0;
-      } else if ((ext == ".dat" || ext == ".ide" || ext == ".csv" || ext == ".txt" ||
-                  ext == ".xml" || ext == ".ipl") && size < (2u << 20) &&
+      } else if (ext == ".rpf") {
+        std::string flat = fs::relative(path, game.parent_path(), fec).string();
+        std::replace(flat.begin(), flat.end(), '/', '_');
+        std::ofstream listing(out / "toc" / (flat + ".txt"), std::ios::trunc);
+        copied += ListRpf(path, key, listing, out / "data", flat);
+        ++archives;
+      } else if (IsTextData(ext) && size < (2u << 20) &&
                  path.string().find(".stock-bak") == std::string::npos) {
         std::string flat = fs::relative(path, game.parent_path(), fec).string();
         std::replace(flat.begin(), flat.end(), '/', '_');
-        fs::copy_file(path, out / "data" / flat, fs::copy_options::overwrite_existing, fec);
-        copied += fec ? 0 : 1;
+        copied += CopyBytes(path, out / "data" / flat) ? 1 : 0;
       }
     }
   }
@@ -1033,52 +1203,66 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       "fbi,\t\tfbi,\t\tcar,\t\tFBI,\t\tFBI,\t\tVEH@STD,\tVEH@STD_LO4_LO4,\t100,\t999,\t\t"
       "0.2622, 0.2622,\t\t0,\t5,\t1.0\t,0,\t-";
   bool ok = true;
-  // The base game and, when installed, each episode: the episodes read
-  // their own copies of these files.
-  std::vector<fs::path> data_roots = {game / "common" / "data"};
-  // The title update mounts OVER the base at runtime, so a data file that
-  // exists under game/update is the one the game reads: it gets the lines
-  // too, or the base edit is shadowed.
-  if (fs::exists(game / "update", ec)) {
-    for (const char* sub : {"common/data", "update/common/data"}) {
-      const fs::path extra = game / "update" / sub;
-      if (fs::exists(extra / "vehicles.ide", ec) || fs::exists(extra / "handling.dat", ec))
-        data_roots.push_back(extra);
+  // Every copy of the data files the game might read - base, title update,
+  // episodes - found by name in any letter case (the update's files keep the
+  // case of the package they came from; this file system minds case).
+  std::vector<fs::path> data_files;
+  {
+    // Where data files live (the models and maps folders, thousands of
+    // files, are left out of the walk).
+    std::vector<fs::path> roots;
+    for (const fs::path& root : {game / "common", game / "update", game.parent_path() / "dlc"})
+      if (fs::exists(root, ec))
+        roots.push_back(root);
+    for (const auto& root : roots) {
+      std::error_code wec;
+      for (auto it = fs::recursive_directory_iterator(
+               root, fs::directory_options::skip_permission_denied, wec);
+           !wec && it != fs::recursive_directory_iterator(); it.increment(wec)) {
+        if (it.depth() > 8) { it.disable_recursion_pending(); continue; }
+        std::error_code fec;
+        if (!it->is_regular_file(fec))
+          continue;
+        const std::string name = Lower(it->path().filename().string());
+        if (name == "vehicles.ide" || name == "handling.dat" || name == "carcols.dat" ||
+            name == "vehoff.csv")
+          data_files.push_back(it->path());
+      }
     }
+    std::sort(data_files.begin(), data_files.end());
+    for (const auto& f : data_files)
+      REXLOG_INFO("gta4-addons: data file {}", f.string());
   }
-  for (const char* episode : {"TLAD", "TBOGT"}) {
-    const fs::path extra = game.parent_path() / "dlc" / episode / "common" / "data";
-    if (fs::exists(extra / "vehicles.ide", ec))
-      data_roots.push_back(extra);
-  }
-  for (const auto& data : data_roots) {
-    if (fs::exists(data / "handling.dat", ec))
-      ok &= RestoreDonorLine(data / "handling.dat", "fbi", legacy_handling, kStockFbiHandling,
-                             "stock FBI handling");
-    if (fs::exists(data / "vehicles.ide", ec))
-      ok &= RestoreDonorLine(data / "vehicles.ide", "fbi", legacy_ide, kStockFbiIde,
-                             "stock FBI vehicle");
+  for (const auto& file : data_files) {
+    const std::string name = Lower(file.filename().string());
+    // Only the base game's own copies must take every edit; another copy (an
+    // update's or an episode's, perhaps partial) takes what applies to it.
+    std::error_code eq_ec;
+    const bool base_copy = fs::equivalent(file.parent_path(), game / "common" / "data", eq_ec);
+    bool fine = true;
+    if (name == "handling.dat")
+      fine &= RestoreDonorLine(file, "fbi", legacy_handling, kStockFbiHandling, "stock FBI handling");
+    if (name == "vehicles.ide")
+      fine &= RestoreDonorLine(file, "fbi", legacy_ide, kStockFbiIde, "stock FBI vehicle");
     for (const auto& a : addons) {
       const std::string label = a.model;
-      if (fs::exists(data / "handling.dat", ec))
-        ok &= InsertAfterDonor(data / "handling.dat", a.donor, a.handling,
-                               (label + " handling").c_str());
-      if (fs::exists(data / "vehicles.ide", ec))
-        ok &= InsertAfterDonor(data / "vehicles.ide", a.donor, a.ide, (label + " vehicle").c_str());
-      if (fs::exists(data / "carcols.dat", ec)) {
+      if (name == "handling.dat")
+        fine &= InsertAfterDonor(file, a.donor, a.handling, (label + " handling").c_str());
+      if (name == "vehicles.ide")
+        fine &= InsertAfterDonor(file, a.donor, a.ide, (label + " vehicle").c_str());
+      if (name == "carcols.dat") {
         // Its own colour row when it brought one and the section exists;
         // otherwise a copy of a stock car's rows.
         if (a.carcols_row.empty() ||
-            !InsertIntoSection(data / "carcols.dat", a.carcols_section, a.carcols_row,
-                               (label + " colours").c_str()))
-          ok &= CloneDonorLines(data / "carcols.dat", a.colours, a.model,
-                                (label + " colours").c_str());
+            !InsertIntoSection(file, a.carcols_section, a.carcols_row, (label + " colours").c_str()))
+          fine &= CloneDonorLines(file, a.colours, a.model, (label + " colours").c_str());
       }
       // Camera offsets: the donor's (the converted car keeps its physics).
-      if (fs::exists(data / "vehOff.csv", ec))
-        ok &= CloneDonorLines(data / "vehOff.csv", a.donor, a.model,
-                              (label + " camera offsets").c_str());
+      if (name == "vehoff.csv")
+        fine &= CloneDonorLines(file, a.donor, a.model, (label + " camera offsets").c_str());
     }
+    if (base_copy)
+      ok &= fine;
   }
 
   const fs::path img = FindVehiclesImg(game);

@@ -15,13 +15,16 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include <fmt/format.h>
 #include <imgui.h>
 #include <rex/cvar.h>
 #include <rex/input/input.h>
 #include <rex/input/input_system.h>
 #include <rex/logging.h>
+#include <rex/logging/api.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/kernel_state.h>
@@ -158,6 +161,10 @@ std::array g_natives = {
     // Grotti Deimos pop-up headlights (vehicle extras).
     NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"GET_TIME_OF_DAY"},
     NativeEntry{"GET_CURRENT_WEATHER"},
+    // Bring Your Own Ride: the checks it answers and the vehicle kinds.
+    NativeEntry{"IS_CHAR_IN_MODEL"}, NativeEntry{"IS_CAR_MODEL"},
+    NativeEntry{"IS_THIS_MODEL_A_CAR"}, NativeEntry{"IS_THIS_MODEL_A_BIKE"},
+    NativeEntry{"IS_THIS_MODEL_A_HELI"}, NativeEntry{"IS_THIS_MODEL_A_BOAT"},
 };
 std::mutex g_native_mutex;
 
@@ -318,6 +325,158 @@ GameContext ReadContext(PPCContext& ctx, uint8_t* base) {
 }
 
 // ---------------------------------------------------------------------------
+// Bring Your Own Ride. A mission that wants a particular vehicle checks for it
+// with IS_CHAR_IN_MODEL ("is the player in a <model>?") or IS_CAR_MODEL ("is
+// this car a <model>?"), and the police computer with
+// IS_CHAR_IN_ANY_POLICE_VEHICLE. With the option on, those answer yes for the
+// vehicle the player is in whenever it is the same kind as the one asked
+// about (anything on wheels for anything on wheels, a helicopter for a
+// helicopter, a boat for a boat), so no script ever treats a car as a
+// helicopter. The replacements are registered in the game's place at boot,
+// through the thunks the motion hooks use, and pass straight through while
+// the option is off. A mission's own story vehicle (the van it hands you) is
+// a different check and still counts.
+// ---------------------------------------------------------------------------
+std::atomic<bool> g_any_ride{false};
+
+enum class Kind : uint8_t { kOther, kRoad, kHeli, kBoat };
+
+struct Ride {
+  uint64_t at = 0;  // when it was looked up (NowMs)
+  uint32_t ped = 0, car = 0, model = 0;
+  Kind kind = Kind::kOther;
+};
+Ride g_ride;
+std::unordered_map<uint32_t, Kind> g_model_kinds;
+
+Kind ModelKind(PPCContext& ctx, uint8_t* base, uint32_t model) {
+  if (const auto it = g_model_kinds.find(model); it != g_model_kinds.end())
+    return it->second;
+  auto is = [&](std::string_view native) {
+    const auto r = Invoke(ctx, base, native, {model});
+    return r && r->r0() != 0;
+  };
+  Kind kind = Kind::kOther;
+  if (is("IS_THIS_MODEL_A_CAR") || is("IS_THIS_MODEL_A_BIKE"))
+    kind = Kind::kRoad;
+  else if (is("IS_THIS_MODEL_A_HELI"))
+    kind = Kind::kHeli;
+  else if (is("IS_THIS_MODEL_A_BOAT"))
+    kind = Kind::kBoat;
+  if (g_model_kinds.size() < 2048)
+    g_model_kinds.emplace(model, kind);
+  return kind;
+}
+
+// The player's ped and vehicle, looked up at most every 100 ms (scripts ask
+// many times a frame), never in a network session.
+const Ride& PlayerRide(PPCContext& ctx, uint8_t* base) {
+  const uint64_t now = NowMs();
+  if (now - g_ride.at < 100)
+    return g_ride;
+  g_ride = Ride{};
+  g_ride.at = now;
+  if (!WorldAlive(base))
+    return g_ride;
+  const auto online = Invoke(ctx, base, "IS_NETWORK_GAME_RUNNING");
+  if (!online || online->r0())
+    return g_ride;
+  const auto player = Invoke(ctx, base, "GET_PLAYER_ID");
+  if (!player)
+    return g_ride;
+  const auto ped = Invoke(ctx, base, "GET_PLAYER_CHAR", {player->r0(), 0}, 1);
+  if (!ped || !ped->words[0])
+    return g_ride;
+  g_ride.ped = ped->words[0];
+  const auto in_car = Invoke(ctx, base, "IS_CHAR_IN_ANY_CAR", {g_ride.ped});
+  if (!in_car || !in_car->r0())
+    return g_ride;
+  const auto car = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {g_ride.ped, 0}, 1);
+  if (!car || !car->words[0])
+    return g_ride;
+  const auto model = Invoke(ctx, base, "GET_CAR_MODEL", {car->words[0], 0}, 1);
+  if (!model || !model->words[0])
+    return g_ride;
+  g_ride.car = car->words[0];
+  g_ride.model = model->words[0];
+  g_ride.kind = ModelKind(ctx, base, g_ride.model);
+  return g_ride;
+}
+
+enum RideHookId : size_t { kHookCharInModel, kHookCarModel, kHookPoliceVehicle, kRideHookCount };
+struct RideHook {
+  std::string_view name;
+  PPCFunc* replacement;
+  uint32_t original = 0;          // the game's handler
+  PPCFunc* original_fn = nullptr;
+  uint32_t thunk = 0;             // ours, registered in its place
+};
+void RideCharInModel(PPCContext& ctx, uint8_t* base);
+void RideCarModel(PPCContext& ctx, uint8_t* base);
+void RidePoliceVehicle(PPCContext& ctx, uint8_t* base);
+std::array<RideHook, kRideHookCount> g_ride_hooks = {{
+    {"IS_CHAR_IN_MODEL", RideCharInModel},
+    {"IS_CAR_MODEL", RideCarModel},
+    {"IS_CHAR_IN_ANY_POLICE_VEHICLE", RidePoliceVehicle},
+}};
+
+bool RideHooksInstalled() {
+  return g_ride_hooks[kHookCharInModel].thunk || g_ride_hooks[kHookCarModel].thunk;
+}
+
+// The native call context: +0 the address of the result slot, +8 the
+// arguments, four bytes each.
+uint32_t NativeArg(uint8_t* base, uint32_t native, uint32_t i) {
+  return Read(base, Read(base, native + 8) + i * 4);
+}
+void NativeSayYes(uint8_t* base, uint32_t native) {
+  if (const uint32_t slot = Read(base, native))
+    Write(base, slot, 1);
+}
+// Runs the game's own handler; true when the option is on and it said no.
+bool GameSaidNo(RideHookId id, PPCContext& ctx, uint8_t* base) {
+  const uint32_t native = ctx.r3.u32;
+  if (auto* original = g_ride_hooks[id].original_fn)
+    original(ctx, base);
+  if (!g_any_ride.load(std::memory_order_relaxed))
+    return false;
+  const uint32_t slot = Read(base, native);
+  return slot && Read(base, slot) == 0;
+}
+
+void RideCharInModel(PPCContext& ctx, uint8_t* base) {
+  const uint32_t native = ctx.r3.u32;
+  if (!GameSaidNo(kHookCharInModel, ctx, base))
+    return;
+  const uint32_t ped = NativeArg(base, native, 0), model = NativeArg(base, native, 1);
+  const Ride& ride = PlayerRide(ctx, base);
+  if (ped && ped == ride.ped && ride.car && ride.kind != Kind::kOther &&
+      ModelKind(ctx, base, model) == ride.kind)
+    NativeSayYes(base, native);
+}
+
+void RideCarModel(PPCContext& ctx, uint8_t* base) {
+  const uint32_t native = ctx.r3.u32;
+  if (!GameSaidNo(kHookCarModel, ctx, base))
+    return;
+  const uint32_t car = NativeArg(base, native, 0), model = NativeArg(base, native, 1);
+  const Ride& ride = PlayerRide(ctx, base);
+  if (car && car == ride.car && ride.kind != Kind::kOther &&
+      ModelKind(ctx, base, model) == ride.kind)
+    NativeSayYes(base, native);
+}
+
+void RidePoliceVehicle(PPCContext& ctx, uint8_t* base) {
+  const uint32_t native = ctx.r3.u32;
+  if (!GameSaidNo(kHookPoliceVehicle, ctx, base))
+    return;
+  const uint32_t ped = NativeArg(base, native, 0);
+  const Ride& ride = PlayerRide(ctx, base);
+  if (ped && ped == ride.ped && ride.car && ride.kind == Kind::kRoad)
+    NativeSayYes(base, native);
+}
+
+// ---------------------------------------------------------------------------
 // The menu: Simple Native Trainer's categories, sized for a pad.
 // ---------------------------------------------------------------------------
 struct VehicleChoice {
@@ -384,7 +543,7 @@ enum class Action {
   kToggleGod, kToggleNeverWanted, kWantedUp, kWantedDown, kWantedApply,
   kMoney, kHeal,
   kToggleVehicleGod, kRepair, kToggleWarpIn, kToggleGadgets, kToggleJet,
-  kCyclePopups, kTogglePopupTilt,
+  kCyclePopups, kTogglePopupTilt, kToggleAnyRide,
   kSpawnVehicle, kTeleportWaypoint, kTeleportPreset, kSavePosition, kLoadPosition,
   kHourUp, kHourDown, kMinuteUp, kMinuteDown, kTimeApply,
   kWeatherNext, kWeatherPrevious, kWeatherApply, kWeatherRelease,
@@ -407,6 +566,7 @@ struct State {
   bool gadgets = false;
   bool jet = true;  // F-16 flight and weapons, active only in the jet
   bool raining = false, gravity_off = false;
+  bool any_ride = false;     // Bring Your Own Ride: missions take the player's vehicle
   int popup_mode = 0;        // Deimos pop-ups: 0 with the lights, 1 always up, 2 always down
   bool popup_flip = false;   // which way they tilt up (the model's two up poses)
   int wanted_target = 0;
@@ -416,6 +576,9 @@ struct State {
   uint32_t pending_hash = 0;
   int pending_ticks = 0;
   uint64_t pending_since = 0;
+  uint64_t pending_loaded_at = 0, pending_ready_since = 0;  // the guard's settle wait
+  int pending_stable = 0;
+  bool pending_logged = false;
   // Saved position.
   bool have_saved = false;
   float saved[3]{};
@@ -465,6 +628,12 @@ uint64_t g_last_gun_ms = 0;
 // Cheap gate for the script-thread hook: only when the trainer actually has
 // something to do does RunActions run (set by Poll, recomputed after a run).
 std::atomic<bool> g_has_work{false};
+// When the script-thread hook last ran a full pass (it fires once per script
+// thread, dozens of times a frame; one pass per frame is plenty).
+uint64_t g_last_run_ms = 0;
+// Which bundled add-ons this install has, looked up once (IS_MODEL_IN_CDIMAGE)
+// so their watchers cost nothing on installs without them.
+bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false;
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
 std::atomic<uint32_t> g_pad_adjust{0};
@@ -478,6 +647,14 @@ constexpr uint32_t kExecutingThread = 0x8319277C;
 void Toast(State& s, std::string text, uint64_t ms = 2500) {
   s.toast = std::move(text);
   s.toast_until = NowMs() + ms;
+}
+
+// Whether the script-stage pass has anything to do. Nothing switched on and
+// no add-on watchers needed means the trainer costs nothing per frame.
+bool WantsWork(const State& s) {
+  return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
+         s.raining || s.pending_model >= 0 || !g_addons_probed || (s.jet && g_have_f16) ||
+         g_have_deimos;
 }
 
 std::vector<Item> PageItems(const State& s) {
@@ -517,7 +694,9 @@ std::vector<Item> PageItems(const State& s) {
                                     : "Deimos Pop-up Lights: Always Down",
                 Action::kCyclePopups},
                {s.popup_flip ? "Deimos Pop-up Tilt: B" : "Deimos Pop-up Tilt: A",
-                Action::kTogglePopupTilt}};
+                Action::kTogglePopupTilt},
+               {s.any_ride ? "Bring Your Own Ride: ON" : "Bring Your Own Ride: OFF",
+                Action::kToggleAnyRide}};
       break;
     case Page::kSpawn:
       for (int i = 0; i < int(kVehicles.size()); ++i)
@@ -578,6 +757,33 @@ std::optional<uint32_t> CurrentVehicle(PPCContext& ctx, uint8_t* base, const Gam
   return car->words[0];
 }
 
+// The player's vehicle and its model, looked up at most once per pass and
+// shared by the watchers (jet, gadgets, pop-ups).
+// Whether the player was in a vehicle at the last look: with the menu open,
+// the game still gets the throttle (R2) then, so the car keeps going.
+std::atomic<bool> g_in_vehicle{false};
+
+struct PassVehicle {
+  uint64_t pass = ~0ull;
+  std::optional<uint32_t> car;
+  uint32_t model = 0;
+};
+PassVehicle g_pass_vehicle;
+uint64_t g_pass = 0;
+
+const PassVehicle& PlayerVehicle(PPCContext& ctx, uint8_t* base, const GameContext& game) {
+  if (g_pass_vehicle.pass != g_pass) {
+    g_pass_vehicle = PassVehicle{};
+    g_pass_vehicle.pass = g_pass;
+    g_pass_vehicle.car = CurrentVehicle(ctx, base, game);
+    g_in_vehicle.store(g_pass_vehicle.car.has_value(), std::memory_order_relaxed);
+    if (g_pass_vehicle.car)
+      if (const auto m = Invoke(ctx, base, "GET_CAR_MODEL", {*g_pass_vehicle.car, 0}, 1))
+        g_pass_vehicle.model = m->words[0];
+  }
+  return g_pass_vehicle;
+}
+
 void Teleport(PPCContext& ctx, uint8_t* base, const GameContext& game, float x, float y,
               std::optional<float> z_hint, State& s) {
   float z = z_hint.value_or(60.0f);
@@ -622,76 +828,310 @@ void StartSpawn(State& s, int model_index, PPCContext& ctx, uint8_t* base) {
     Toast(s, std::string(choice.label) + ": not installed or not in this episode.");
     return;
   }
+  // A spawn still waiting gives way to the new one (and lets its model go).
+  if (s.pending_model >= 0 && s.pending_hash != hash)
+    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {s.pending_hash});
   REXLOG_INFO("gta4-trainer: spawning {} (hash {:08X})", std::string(choice.model), hash);
+  rex::FlushLogging();
   Invoke(ctx, base, "REQUEST_MODEL", {hash});
   s.pending_model = model_index;
   s.pending_hash = hash;
   s.pending_ticks = 0;
   s.pending_since = NowMs();
+  s.pending_loaded_at = s.pending_ready_since = 0;
+  s.pending_stable = 0;
+  s.pending_logged = false;
   Toast(s, std::string("Loading ") + std::string(choice.label) + "...", 20000);
 }
 
 // ---------------------------------------------------------------------------
-// Spawn guard. The game's vehicle creation reads the model's vehicle
-// structure (model info +196; taken from the 50-entry VehicleStruct pool when
-// the model's fragment is attached at +8) without a null check, so a model
-// whose fragment never attached - an add-on file the engine did not accept -
-// crashed CREATE_CAR (console logs 030/032: sub_82380220 reading 0x164). The
-// trainer looks first and refuses instead. Model infos are found in the table
-// the game indexes by model index (0x82B3A1A0, signed 16-bit index); the
-// name-hash field inside them is located once from three stock models.
+// Spawn guard. CREATE_CAR trusts a model completely: it reads the model's
+// vehicle structure (model info +196, an entry of the 50-entry VehicleStruct
+// pool) and, for each of the model's extras, the parent of that extra's bone,
+// with no null checks. Console logs 030/032 crashed on a missing structure
+// (reading 0x164) and log 036 on an extra whose bone had no parent (reading
+// 0x14), so the trainer checks all of it first, waits while the game is still
+// setting the model up, and refuses (with a full report in the log) instead.
 // ---------------------------------------------------------------------------
 constexpr uint32_t kModelInfoTable = 0x82B3A1A0;
-constexpr uint32_t kModelInfoCount = 32768;
+constexpr uint32_t kModelInfoCount = 31000;  // the table's size (the model info init)
 constexpr uint32_t kModelInfoFragType = 8, kModelInfoVehicleStructure = 196;
 constexpr uint32_t kVehicleStructPool = 0x8303206C;
+// The CVehicleModelInfo store: +0 capacity, +4 count, +8 the array of 976-byte
+// entries. sub_821C83C0 builds it at boot; the vehicles.ide loader adds each
+// car with sub_821CA5F0, which has no capacity check.
+constexpr uint32_t kVehicleModelStore = 0x82A9305C, kVehicleModelInfoSize = 976;
+constexpr uint32_t kExtraVehicleModels = 64;
+// vehicles.ide's cars-line formats (sub_8256DC70), reported for reference.
+constexpr uint32_t kCarsLineFormat = 0x820263F8, kCarsLineFormatAlt = 0x820263CC;
+// The vehicle structure holds one bone index per vehicle component;
+// components 89-98 are extra_1 to extra_10.
+constexpr uint32_t kFirstExtraComponent = 89, kExtraComponents = 10;
+constexpr uint32_t kFragDrawable = 0xB4, kDrawableSkeleton = 12, kSkeletonBoneCount = 20;
+constexpr uint32_t kBoneSize = 0xE0, kBoneParent = 0x10;
 int g_hash_field = -2;  // -2: not looked for yet, -1: not found
+
+uint32_t Read16(uint8_t* base, uint32_t address) {
+  uint16_t v;
+  std::memcpy(&v, rex::memory::GuestPtr(base, address), sizeof(v));
+  return __builtin_bswap16(v);
+}
+
+// Readability for a scan, remembering the 4 KB pages already checked: each
+// check takes the heap's lock, and a table scan would otherwise take it tens
+// of thousands of times.
+struct ReadableCache {
+  std::array<uint32_t, 16> pages{};  // page number + 1 (0 = empty)
+  size_t next = 0;
+  bool Check(uint8_t* base, uint32_t address, uint32_t size) {
+    const uint32_t first = address >> 12;
+    const uint32_t last = uint32_t((uint64_t(address) + size - 1) >> 12);
+    if (first == last)
+      for (const uint32_t p : pages)
+        if (p == first + 1)
+          return true;
+    if (!Span(base, address, size))
+      return false;
+    if (first == last) {
+      pages[next] = first + 1;
+      next = (next + 1) % pages.size();
+    }
+    return true;
+  }
+};
 
 template <typename Visit>
 void ForEachModelInfo(uint8_t* base, Visit&& visit) {
-  constexpr uint32_t kChunk = 1024;
+  constexpr uint32_t kChunk = 1000;
   for (uint32_t first = 0; first < kModelInfoCount; first += kChunk) {
-    if (!Span(base, kModelInfoTable + first * 4, kChunk * 4))
+    const uint32_t n = std::min(kChunk, kModelInfoCount - first);
+    if (!Span(base, kModelInfoTable + first * 4, n * 4))
       continue;
-    for (uint32_t i = first; i < first + kChunk; ++i) {
+    for (uint32_t i = first; i < first + n; ++i) {
       const uint32_t info = Read(base, kModelInfoTable + i * 4);
-      if (info && Span(base, info, 256) && visit(info))
+      if (info && visit(i, info))
         return;
     }
   }
 }
 
-uint32_t FindModelInfo(uint8_t* base, uint32_t hash) {
-  if (g_hash_field == -2) {
-    g_hash_field = -1;
-    const uint32_t probes[3] = {ModelHash("POLICE"), ModelHash("TAXI"), ModelHash("ADMIRAL")};
+// The name-hash field: +60 on this build, confirmed from three stock models;
+// otherwise searched for in the first 64 words.
+void DiscoverHashField(uint8_t* base) {
+  g_hash_field = -1;
+  const uint32_t probes[3] = {ModelHash("POLICE"), ModelHash("TAXI"), ModelHash("ADMIRAL")};
+  ReadableCache readable;
+  for (const int known : {60, -1}) {
     std::array<uint8_t, 64> hits{};
-    ForEachModelInfo(base, [&](uint32_t info) {
-      for (uint32_t k = 0; k < 64; ++k) {
+    ForEachModelInfo(base, [&](uint32_t, uint32_t info) {
+      const uint32_t from = known >= 0 ? uint32_t(known) / 4 : 0, to = known >= 0 ? from + 1 : 64;
+      if (!readable.Check(base, info + from * 4, (to - from) * 4))
+        return false;
+      for (uint32_t k = from; k < to; ++k) {
         const uint32_t v = Read(base, info + k * 4);
         for (int p = 0; p < 3; ++p)
           if (v == probes[p])
             hits[k] |= uint8_t(1u << p);
       }
-      return false;
+      return known >= 0 && hits[from] == 7;
     });
     for (int k = 0; k < 64; ++k)
       if (hits[size_t(k)] == 7) {
         g_hash_field = k * 4;
         break;
       }
-    REXLOG_INFO("gta4-trainer: model info name-hash field at +{}", g_hash_field);
+    if (g_hash_field >= 0)
+      break;
   }
+  REXLOG_INFO("gta4-trainer: model info name-hash field at +{}", g_hash_field);
+}
+
+// Name hash -> model info, built in one pass and kept; a stale or missing
+// entry rebuilds it (at most every two seconds).
+std::unordered_map<uint32_t, uint32_t> g_model_index;
+uint64_t g_model_index_built = 0;
+
+void BuildModelIndex(uint8_t* base) {
+  g_model_index.clear();
+  g_model_index_built = NowMs();
+  ReadableCache readable;
+  const uint32_t field = uint32_t(g_hash_field);
+  ForEachModelInfo(base, [&](uint32_t, uint32_t info) {
+    if (readable.Check(base, info + field, 4))
+      g_model_index.emplace(Read(base, info + field), info);  // the first one wins
+    return false;
+  });
+}
+
+uint32_t FindModelInfo(uint8_t* base, uint32_t hash) {
+  if (g_hash_field == -2)
+    DiscoverHashField(base);
   if (g_hash_field < 0)
     return 0;
-  uint32_t found = 0;
-  ForEachModelInfo(base, [&](uint32_t info) {
-    if (Read(base, info + uint32_t(g_hash_field)) != hash)
+  const uint32_t field = uint32_t(g_hash_field);
+  auto lookup = [&]() -> uint32_t {
+    const auto it = g_model_index.find(hash);
+    if (it == g_model_index.end())
+      return 0;
+    return Span(base, it->second + field, 4) && Read(base, it->second + field) == hash ? it->second
+                                                                                       : 0;
+  };
+  if (g_model_index.empty())
+    BuildModelIndex(base);
+  if (const uint32_t info = lookup())
+    return info;
+  if (NowMs() - g_model_index_built < 2000)
+    return 0;
+  BuildModelIndex(base);
+  return lookup();
+}
+
+// Everything CREATE_CAR will read, checked.
+struct ModelCheck {
+  uint32_t info = 0, vtable = 0, fragment = 0, structure = 0;
+  std::string problem;  // empty when the model is ready
+};
+uint32_t g_vehicle_vtable = 0;  // a stock car's model info vtable (ADMIRAL's)
+
+ModelCheck CheckModel(uint8_t* base, uint32_t hash) {
+  ModelCheck c;
+  c.info = FindModelInfo(base, hash);
+  if (!c.info) {
+    c.problem = "no model info";
+    return c;
+  }
+  if (!g_vehicle_vtable)
+    if (const uint32_t admiral = FindModelInfo(base, ModelHash("ADMIRAL")))
+      if (Span(base, admiral, 4))
+        g_vehicle_vtable = Read(base, admiral);
+  if (!Span(base, c.info, kModelInfoVehicleStructure + 4)) {
+    c.problem = "model info unreadable";
+    return c;
+  }
+  c.vtable = Read(base, c.info);
+  c.fragment = Read(base, c.info + kModelInfoFragType);
+  c.structure = Read(base, c.info + kModelInfoVehicleStructure);
+  if (g_vehicle_vtable && c.vtable != g_vehicle_vtable) {
+    c.problem = "not a vehicle model info";
+    return c;
+  }
+  if (!c.fragment) {
+    c.problem = "fragment not attached";
+    return c;
+  }
+  if (!c.structure) {
+    c.problem = "no vehicle structure";
+    return c;
+  }
+  if (Span(base, kVehicleStructPool, 4)) {
+    const uint32_t pool = Read(base, kVehicleStructPool);
+    if (pool && Span(base, pool, 16)) {
+      const uint32_t storage = Read(base, pool), size = Read(base, pool + 8),
+                     stride = Read(base, pool + 12);
+      if (stride && (c.structure < storage || c.structure >= storage + size * stride ||
+                     (c.structure - storage) % stride)) {
+        c.problem = "vehicle structure outside its pool";
+        return c;
+      }
+    }
+  }
+  if (!Span(base, c.structure + kFirstExtraComponent * 4, kExtraComponents * 4) ||
+      !Span(base, c.fragment + kFragDrawable, 4)) {
+    c.problem = "vehicle data unreadable";
+    return c;
+  }
+  const uint32_t drawable = Read(base, c.fragment + kFragDrawable);
+  const uint32_t skeleton =
+      drawable && Span(base, drawable + kDrawableSkeleton, 4) ? Read(base, drawable + kDrawableSkeleton) : 0;
+  if (!skeleton || !Span(base, skeleton, kSkeletonBoneCount + 2)) {
+    // Nothing to check the extras against: let it through (the stock cars
+    // must never be held back by this check), noted once.
+    static uint32_t s_noted = 0;
+    if (s_noted != hash) {
+      s_noted = hash;
+      REXLOG_INFO("gta4-trainer: model {:08X}: skeleton not found (drawable {:08X}), extras "
+                  "not checked", hash, drawable);
+    }
+    return c;
+  }
+  const uint32_t bones = Read(base, skeleton), bone_count = Read16(base, skeleton + kSkeletonBoneCount);
+  for (uint32_t k = 0; k < kExtraComponents; ++k) {
+    const uint32_t bone = Read(base, c.structure + (kFirstExtraComponent + k) * 4);
+    if (bone == 0xFFFFFFFFu)
+      continue;
+    const uint32_t parent_at = bones + bone * kBoneSize + kBoneParent;
+    if (bone >= bone_count || !Span(base, parent_at, 4) || !Read(base, parent_at)) {
+      c.problem = fmt::format("extra_{} is bone {} with no parent ({} bones)", k + 1, bone,
+                              bone_count);
+      return c;
+    }
+  }
+  return c;
+}
+
+// The full report for a model the guard turned away: where the game keeps it,
+// how it compares with a stock car, and the store it should live in.
+void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const ModelCheck& c) {
+  if (Span(base, kVehicleModelStore, 12)) {
+    const uint32_t capacity = Read(base, kVehicleModelStore);
+    const uint32_t count = Read(base, kVehicleModelStore + 4);
+    const uint32_t array = Read(base, kVehicleModelStore + 8);
+    std::string where = "outside it";
+    if (array && c.info >= array && c.info < array + capacity * kVehicleModelInfoSize)
+      where = fmt::format("entry {}{}", (c.info - array) / kVehicleModelInfoSize,
+                          (c.info - array) % kVehicleModelInfoSize ? " (misaligned)" : "");
+    REXLOG_WARN("gta4-trainer: report: vehicle model store capacity {} count {} array {:08X}; "
+                "{} model info {:08X} is {}",
+                capacity, count, array, std::string(name), c.info, where);
+  }
+  int index = -1, admiral_index = -1, same_name = 0;
+  uint32_t admiral = 0;
+  const uint32_t admiral_hash = ModelHash("ADMIRAL");
+  if (g_hash_field >= 0) {
+    const uint32_t field = uint32_t(g_hash_field);
+    ReadableCache readable;
+    ForEachModelInfo(base, [&](uint32_t i, uint32_t info) {
+      if (info == c.info)
+        index = int(i);
+      if (readable.Check(base, info + field, 4)) {
+        const uint32_t v = Read(base, info + field);
+        same_name += v == hash;
+        if (v == admiral_hash && !admiral) {
+          admiral = info;
+          admiral_index = int(i);
+        }
+      }
       return false;
-    found = info;
-    return true;
-  });
-  return found;
+    });
+  }
+  REXLOG_WARN("gta4-trainer: report: {} is model {} ({} model infos carry its name), vtable "
+              "{:08X}; ADMIRAL {:08X} is model {}, vtable {:08X}",
+              std::string(name), index, same_name, c.vtable, admiral, admiral_index,
+              g_vehicle_vtable);
+  if (Span(base, kVehicleStructPool, 4)) {
+    const uint32_t pool = Read(base, kVehicleStructPool);
+    if (pool && Span(base, pool, 24))
+      REXLOG_WARN("gta4-trainer: report: VehicleStruct pool {:08X}: {:08X} {:08X} {} {} {} {}", pool,
+                  Read(base, pool), Read(base, pool + 4), Read(base, pool + 8), Read(base, pool + 12),
+                  Read(base, pool + 16), Read(base, pool + 20));
+  }
+  auto words = [&](std::string label, uint32_t at, uint32_t bytes) {
+    if (!at || !Span(base, at, bytes))
+      return;
+    for (uint32_t row = 0; row < bytes; row += 64) {
+      std::string line;
+      for (uint32_t k = row; k < row + 64 && k < bytes; k += 4)
+        line += fmt::format(" {:08X}", Read(base, at + k));
+      REXLOG_WARN("gta4-trainer: report: {} +{:03X}:{}", label, row, line);
+    }
+  };
+  words(std::string(name), c.info, kVehicleModelInfoSize);
+  words("ADMIRAL", admiral, kVehicleModelInfoSize);
+  words(std::string(name) + " vtable", c.vtable, 256);
+  words("ADMIRAL vtable", g_vehicle_vtable, 256);
+  REXLOG_WARN("gta4-trainer: report: vehicles.ide cars-line formats \"{}\" / \"{}\"",
+              String(base, kCarsLineFormat, 200), String(base, kCarsLineFormatAlt, 200));
+  rex::FlushLogging();
 }
 
 // The Grotti Deimos's pop-up headlights: the model carries its lamp pods in
@@ -705,9 +1145,6 @@ struct PopupState {
   uint64_t next_probe = 0, next_check = 0;
 };
 PopupState g_popup;
-// The pop-ups need the player's car watched always (a cheap look every 250 ms
-// until the player sits in a Deimos), so the trainer stays awake for it.
-constexpr bool kWatchPopups = true;
 constexpr std::array<int, 3> kPopupExtras = {1, 2, 5};
 
 bool HeadlightsWanted(PPCContext& ctx, uint8_t* base) {
@@ -735,25 +1172,26 @@ void SetPopupPose(PPCContext& ctx, uint8_t* base, uint32_t car, int pose) {
 }
 
 void PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const State& s) {
+  if (!g_have_deimos)
+    return;
   const uint64_t now = NowMs();
   if (!g_popup.in_car && now < g_popup.next_probe)
     return;
-  g_popup.next_probe = now + 250;
+  g_popup.next_probe = now + 400;
   if (g_popup.in_car && now < g_popup.next_check)
     return;
   g_popup.next_check = now + 250;
-  const auto car = CurrentVehicle(ctx, base, game);
-  std::optional<InvokeResult> model;
-  if (car)
-    model = Invoke(ctx, base, "GET_CAR_MODEL", {*car, 0}, 1);
-  if (!car || !model || model->words[0] != ModelHash("DEIMOS")) {
+  static const uint32_t kDeimos = ModelHash("DEIMOS");
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  if (!vehicle.car || vehicle.model != kDeimos) {
     g_popup.in_car = false;
     return;
   }
+  const uint32_t car = *vehicle.car;
   const int pose = WantedPopupPose(ctx, base, s);
-  if (!g_popup.in_car || g_popup.car != *car || g_popup.pose != pose) {
-    SetPopupPose(ctx, base, *car, pose);
-    g_popup.car = *car;
+  if (!g_popup.in_car || g_popup.car != car || g_popup.pose != pose) {
+    SetPopupPose(ctx, base, car, pose);
+    g_popup.car = car;
     g_popup.pose = pose;
   }
   g_popup.in_car = true;
@@ -762,6 +1200,14 @@ void PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
 void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s) {
   if (s.pending_model < 0)
     return;
+  const auto& choice = kVehicles[size_t(s.pending_model)];
+  const std::string model(choice.model);
+  const uint64_t now = NowMs();
+  auto give_up = [&](std::string toast) {
+    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {s.pending_hash});
+    s.pending_model = -1;
+    Toast(s, std::move(toast), 6000);
+  };
   const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {s.pending_hash});
   if (!loaded) {
     s.pending_model = -1;
@@ -770,48 +1216,52 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   if (!loaded->r0()) {
     ++s.pending_ticks;
     // Big models (the Batmobile is ~10 MB) can take a while to stream in.
-    if (NowMs() - s.pending_since > 20000) {
-      REXLOG_WARN("gta4-trainer: {} (hash {:08X}) did not load within 20 s",
-                  std::string(kVehicles[size_t(s.pending_model)].model), s.pending_hash);
-      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {s.pending_hash});
-      s.pending_model = -1;
-      Toast(s, "The model did not load.");
+    if (now - s.pending_since > 20000) {
+      REXLOG_WARN("gta4-trainer: {} (hash {:08X}) did not load within 20 s", model, s.pending_hash);
+      rex::FlushLogging();
+      give_up("The model did not load.");
     }
     return;
   }
-  // The guard: no car from a model whose vehicle data did not attach.
-  if (const uint32_t info = FindModelInfo(base, s.pending_hash)) {
-    const uint32_t fragment = Read(base, info + kModelInfoFragType);
-    const uint32_t structure = Read(base, info + kModelInfoVehicleStructure);
-    if (!fragment || !structure) {
-      uint32_t pool_words[6] = {};
-      if (Span(base, kVehicleStructPool, 4)) {
-        const uint32_t pool = Read(base, kVehicleStructPool);
-        if (pool && Span(base, pool, 24))
-          for (uint32_t k = 0; k < 6; ++k)
-            pool_words[k] = Read(base, pool + k * 4);
-      }
-      REXLOG_WARN("gta4-trainer: {} loaded without its vehicle data (model info {:08X}, "
-                  "fragment {:08X}, structure {:08X}; VehicleStruct pool +8={} +16={} +20={}); "
-                  "not spawning it",
-                  std::string(kVehicles[size_t(s.pending_model)].model), info, fragment, structure,
-                  pool_words[2], pool_words[4], pool_words[5]);
-      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {s.pending_hash});
-      Toast(s, std::string(kVehicles[size_t(s.pending_model)].label) +
-                   " did not load properly, so it was not spawned (details in the log).",
-            6000);
-      s.pending_model = -1;
-      return;
+  if (!s.pending_loaded_at)
+    s.pending_loaded_at = now;
+  // The guard. The game can finish setting a model up a moment after it
+  // reports it loaded, so everything must be in place, and stay so, first.
+  const ModelCheck check = CheckModel(base, s.pending_hash);
+  if (!check.problem.empty()) {
+    s.pending_ready_since = 0;
+    s.pending_stable = 0;
+    if (!s.pending_logged) {
+      s.pending_logged = true;
+      REXLOG_INFO("gta4-trainer: {} loaded, waiting: {} (model info {:08X}, fragment {:08X}, "
+                  "structure {:08X})",
+                  model, check.problem, check.info, check.fragment, check.structure);
     }
-  } else {
-    REXLOG_INFO("gta4-trainer: no model info found for {:08X}; spawning without the guard",
-                s.pending_hash);
+    if (now - s.pending_loaded_at < 8000)
+      return;
+    REXLOG_WARN("gta4-trainer: {} not spawned: {} after 8 s (model info {:08X}, vtable {:08X}, "
+                "fragment {:08X}, structure {:08X})",
+                model, check.problem, check.info, check.vtable, check.fragment, check.structure);
+    ReportModel(base, model, s.pending_hash, check);
+    give_up(std::string(choice.label) +
+            " did not load properly, so it was not spawned (details in the log).");
+    return;
   }
+  if (!s.pending_ready_since) {
+    s.pending_ready_since = now;
+    if (s.pending_logged)
+      REXLOG_INFO("gta4-trainer: {} ready {} ms after it loaded", model, now - s.pending_loaded_at);
+  }
+  if (++s.pending_stable < 3 || now - s.pending_ready_since < 250)
+    return;
   // In front of the player (further for the long ones), slightly raised.
-  const float ahead = kVehicles[size_t(s.pending_model)].distance;
+  const float ahead = choice.distance;
   const float x = game.position[0] + game.forward[0] * ahead;
   const float y = game.position[1] + game.forward[1] * ahead;
   const float z = game.position[2] + 1.0f;
+  REXLOG_INFO("gta4-trainer: creating {} (model info {:08X}, structure {:08X})", model, check.info,
+              check.structure);
+  rex::FlushLogging();
   const auto car =
       Invoke(ctx, base, "CREATE_CAR", {s.pending_hash, Bits(x), Bits(y), Bits(z), 0, 1}, 4);
   if (car && car->words[0]) {
@@ -823,7 +1273,8 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
       Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, handle});
     // Hand the car to the world so it cleans up like traffic.
     Invoke(ctx, base, "MARK_CAR_AS_NO_LONGER_NEEDED", {0}, 0, handle);
-    Toast(s, std::string(kVehicles[size_t(s.pending_model)].label) + " spawned.");
+    REXLOG_INFO("gta4-trainer: {} spawned", model);
+    Toast(s, std::string(choice.label) + " spawned.");
   } else {
     Toast(s, "The car could not be created here.");
   }
@@ -839,12 +1290,11 @@ bool Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
              uint16_t buttons, uint16_t previous) {
   if (!s.gadgets)
     return false;
-  const auto car = CurrentVehicle(ctx, base, game);
-  if (!car)
+  static const uint32_t kBatmobile = ModelHash("BATMOBILE");
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  if (!vehicle.car || vehicle.model != kBatmobile)
     return false;
-  const auto model = Invoke(ctx, base, "GET_CAR_MODEL", {*car, 0}, 1);
-  if (!model || model->words[0] != ModelHash("BATMOBILE"))
-    return false;
+  const auto car = vehicle.car;
   const float* f = game.forward;
   const float* p = game.position;
   // Front guns: a short explosive volley ahead of the car.
@@ -1075,7 +1525,7 @@ void RainCars(PPCContext& ctx, uint8_t* base, const GameContext& game) {
   for (size_t tries = 0; tries < kRainModels.size(); ++tries) {
     const uint32_t hash = ModelHash(kRainModels[g_rain_turn++ % kRainModels.size()]);
     const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
-    if (!loaded || !loaded->r0())
+    if (!loaded || !loaded->r0() || !CheckModel(base, hash).problem.empty())
       continue;
     const float x = game.position[0] + (next() - 0.5f) * 44.0f;
     const float y = game.position[1] + (next() - 0.5f) * 44.0f;
@@ -1101,12 +1551,11 @@ bool JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   // second otherwise.
   if (!j.in_jet && now < j.next_probe)
     return false;
-  j.next_probe = now + 250;
-  const auto car = CurrentVehicle(ctx, base, game);
-  std::optional<InvokeResult> model;
-  if (car)
-    model = Invoke(ctx, base, "GET_CAR_MODEL", {*car, 0}, 1);
-  const bool in_jet = car && model && model->words[0] == ModelHash("F16");
+  j.next_probe = now + 400;
+  static const uint32_t kF16 = ModelHash("F16");
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  const auto car = vehicle.car;
+  const bool in_jet = car && vehicle.model == kF16;
   if (!in_jet) {
     if (j.in_jet && j.rocket_requested) {
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
@@ -1280,6 +1729,17 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       g_popup.in_car = false;
       Toast(s, "Deimos pop-ups tilt the other way.");
       break;
+    case Action::kToggleAnyRide:
+      if (!RideHooksInstalled()) {
+        Toast(s, "Bring Your Own Ride is not available in this game version.");
+        break;
+      }
+      s.any_ride = !s.any_ride;
+      g_any_ride.store(s.any_ride, std::memory_order_relaxed);
+      Toast(s, s.any_ride ? "Bring Your Own Ride: missions take whatever you're driving."
+                          : "Missions want their own vehicles again.",
+            4000);
+      break;
     case Action::kToggleJet:
       s.jet = !s.jet;
       Toast(s, s.jet ? "F-16 flight and weapons on." : "F-16 flight and weapons off.");
@@ -1450,12 +1910,36 @@ void ObserveNativeRegistration(PPCContext& context, uint8_t* base) {
   const auto name = String(base, context.r3.u32);
   if (name.empty())
     return;
-  std::lock_guard lock(g_native_mutex);
-  for (auto& entry : g_natives)
-    if (entry.name == name) {
-      entry.handler = context.r4.u32;
-      return;
+  {
+    std::lock_guard lock(g_native_mutex);
+    for (auto& entry : g_natives)
+      if (entry.name == name) {
+        entry.handler = context.r4.u32;  // the game's own handler
+        break;
+      }
+  }
+  // Bring Your Own Ride: our replacement is registered in the game's place.
+  for (auto& hook : g_ride_hooks) {
+    if (hook.name != name)
+      continue;
+    if (!hook.thunk) {
+      auto* runtime = rex::Runtime::instance();
+      auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
+      hook.original = context.r4.u32;
+      hook.original_fn = dispatcher ? dispatcher->GetFunction(hook.original) : nullptr;
+      if (hook.original_fn)
+        hook.thunk = dispatcher->AllocateThunk(hook.replacement, static_cast<uint32_t>(context.lr));
+      if (hook.thunk)
+        REXLOG_INFO("gta4-trainer: {} answered through thunk {:08X} (game handler {:08X})", name,
+                    hook.thunk, hook.original);
+      else
+        REXLOG_WARN("gta4-trainer: {} could not be hooked (game handler {:08X})", name,
+                    hook.original);
     }
+    if (hook.thunk && context.r4.u32 == hook.original)
+      context.r4.u32 = hook.thunk;
+    return;
+  }
 }
 
 bool InputOwned() { return g_input_owned.load(std::memory_order_relaxed); }
@@ -1580,8 +2064,7 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   }
   g_pad.last = buttons;
   g_input_owned.store(s.open, std::memory_order_relaxed);
-  if (!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets || s.jet ||
-      s.raining || s.pending_model >= 0 || kWatchPopups)
+  if (WantsWork(s))
     g_has_work.store(true, std::memory_order_relaxed);
 
   // Publishing builds strings; while the menu is shut and nothing is on
@@ -1601,21 +2084,35 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   auto& s = g_state;
   ++s.tick;
   const uint64_t now = NowMs();
-  // The script hook fires once per script thread per frame; one full pass
-  // per frame is plenty.
-  static uint64_t s_last_run = 0;
-  if (now - s_last_run < 8)
-    return;
-  s_last_run = now;
-  // The F-16's controls alone keep the trainer awake: until the player is in
-  // the jet (or a missile is flying) that costs a look a few times a second,
-  // not a full pass every frame.
+  // (The hook calling this runs it at most once per frame.) The add-on
+  // watchers keep the trainer awake only on installs that have the add-ons,
+  // and until the player is in one of them they cost a look a few times a
+  // second, not a full pass every frame.
   const bool missiles_live = std::any_of(g_jet.missiles.begin(), g_jet.missiles.end(),
                                          [](const Missile& m) { return m.live; });
-  const bool jet_due = s.jet && (g_jet.in_jet || missiles_live || now >= g_jet.next_probe);
-  const bool popup_due = g_popup.in_car || now >= g_popup.next_probe;
-  if (g_pending.empty() && !s.god && !s.never_wanted && !s.vehicle_god && !s.gadgets &&
-      s.pending_model < 0 && !jet_due && !s.raining && !popup_due)
+  const bool jet_due =
+      s.jet && g_have_f16 && (g_jet.in_jet || missiles_live || now >= g_jet.next_probe);
+  const bool popup_due = g_have_deimos && (g_popup.in_car || now >= g_popup.next_probe);
+  // With the menu open: whether the player is driving (R2 then still reaches
+  // the game), looked at four times a second.
+  static uint64_t s_next_drive_look = 0;
+  const bool drive_due = s.open && now >= s_next_drive_look;
+  // The toggles on their own clocks: a full pass (with its natives) runs only
+  // when one of them is due, not every frame because one is switched on.
+  static uint64_t s_next_god = 0, s_next_wanted = 0, s_next_car = 0, s_next_gadget_look = 0;
+  static bool s_in_batmobile = false;
+  const bool god_due = s.god && now >= s_next_god;
+  const bool wanted_due = s.never_wanted && now >= s_next_wanted;
+  const bool car_god_due = s.vehicle_god && now >= s_next_car;
+  const bool gadgets_due = s.gadgets && (s_in_batmobile || now >= s_next_gadget_look);
+  const bool rain_due = s.raining && now >= g_next_rain;
+  if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due &&
+      s.pending_model < 0 && !jet_due && !rain_due && !popup_due && !drive_due &&
+      g_addons_probed)
+    return;
+  // No world yet (menus, loading): look again in half a second, not every frame.
+  static uint64_t s_world_retry = 0;
+  if (now < s_world_retry && g_pending.empty())
     return;
 
   const GameContext game = ReadContext(ctx, base);
@@ -1624,11 +2121,26 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     if (game.online) {
       // Nothing of the trainer survives into a network session.
       s.god = s.never_wanted = s.vehicle_god = s.gadgets = s.jet = s.raining = false;
+      s.any_ride = false;
+      g_any_ride.store(false, std::memory_order_relaxed);
     }
     g_pending.clear();
     s.pending_model = -1;
     g_vehicle_mask.store(0, std::memory_order_relaxed);
+    s_world_retry = now + 500;
     return;
+  }
+  ++g_pass;
+  if (!g_addons_probed) {
+    g_addons_probed = true;
+    auto installed = [&](std::string_view model) {
+      const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {ModelHash(model)});
+      return known && known->r0() != 0;
+    };
+    g_have_deimos = installed("DEIMOS");
+    g_have_f16 = installed("F16");
+    REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}",
+                installed("BATMOBILE"), g_have_f16, g_have_deimos);
   }
 
   bool acted = false;
@@ -1638,35 +2150,43 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   }
   g_pending.clear();
 
-  // Continuous effects, throttled by time: this hook can fire more than
-  // once per frame (two script-stage sites drive it, as with quicksave).
-  static uint64_t s_next_god = 0, s_next_wanted = 0, s_next_car = 0;
-  if (s.god && now >= s_next_god) {
+  // Continuous effects, each on its own clock.
+  if (god_due) {
     s_next_god = now + 500;
     ApplyGod(ctx, base, game, true);
   }
-  if (s.never_wanted && now >= s_next_wanted) {
+  if (wanted_due) {
     s_next_wanted = now + 250;
     const auto wanted = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, 0});
     if (wanted && wanted->r0())
       Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
   }
-  if (s.vehicle_god && now >= s_next_car) {
+  if (car_god_due) {
     s_next_car = now + 500;
     if (const auto car = CurrentVehicle(ctx, base, game))
       Invoke(ctx, base, "SET_CAR_PROOFS", {*car, 1, 1, 1, 1, 1});
   }
   FinishSpawn(ctx, base, game, s);
+  if (drive_due) {
+    s_next_drive_look = now + 250;
+    PlayerVehicle(ctx, base, game);
+  }
   uint32_t vehicle_mask = 0;
-  if (s.gadgets) {
+  if (gadgets_due) {
+    // Every frame in the Batmobile (its buttons), a look a few times a
+    // second otherwise.
+    s_next_gadget_look = now + 400;
     const uint16_t buttons = g_gadget_buttons.load(std::memory_order_relaxed);
     const uint16_t previous = g_gadget_previous.load(std::memory_order_relaxed);
-    if (Gadgets(ctx, base, game, s, buttons, previous))
+    s_in_batmobile = Gadgets(ctx, base, game, s, buttons, previous);
+    if (s_in_batmobile)
       vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT;
     // Consume the edge so the second script-stage site cannot double-fire.
     g_gadget_previous.store(buttons, std::memory_order_relaxed);
+  } else if (!s.gadgets) {
+    s_in_batmobile = false;
   }
-  if (s.jet) {
+  if (jet_due) {
     DrivePad pad, previous;
     {
       std::lock_guard lock(g_drive_mutex);
@@ -1678,16 +2198,15 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT;
   }
   g_vehicle_mask.store(vehicle_mask, std::memory_order_relaxed);
-  if (s.raining)
+  if (rain_due)
     RainCars(ctx, base, game);
-  PopupLights(ctx, base, game, s);
+  if (popup_due)
+    PopupLights(ctx, base, game, s);
   if (acted || s.toast_until > now) {
     const auto missing = MissingNatives();
     PublishDraw(s, g_natives.size(), missing.size(), missing);
   }
-  g_has_work.store(!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god ||
-                       s.gadgets || s.jet || s.raining || s.pending_model >= 0 || kWatchPopups,
-                   std::memory_order_relaxed);
+  g_has_work.store(WantsWork(s), std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1803,6 +2322,13 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateOverlay(rex::ui::ImGuiDrawer* drawer
 
 extern "C" bool GTA4_TrainerOwnsGuestPad() { return gta4::trainer::InputOwned(); }
 
+// With the menu open the game sees a cleared pad, except the throttle (R2)
+// while the player is in a vehicle, so a car keeps going (xam_input.cpp).
+extern "C" bool GTA4_TrainerPassesThrottle() {
+  return gta4::trainer::InputOwned() &&
+         gta4::trainer::g_in_vehicle.load(std::memory_order_relaxed);
+}
+
 extern "C" uint32_t GTA4_TrainerPadButtonAdjust() {
   return gta4::trainer::g_pad_adjust.load(std::memory_order_relaxed);
 }
@@ -1818,12 +2344,42 @@ extern "C" void sub_82844200(PPCContext& ctx, uint8_t* base) {
   using namespace gta4::trainer;
   if (!g_has_work.load(std::memory_order_relaxed))
     return;
-  if (!Span(base, kExecutingThread, 4, true) || !thread || !Span(base, thread, 116))
+  // At most one pass per frame, decided before any memory query: this hook
+  // fires once per script thread, dozens of times a frame, and each query
+  // takes the heap's lock.
+  const uint64_t now = NowMs();
+  if (now - g_last_run_ms < 8)
     return;
+  static const bool executing_global_ok = Span(base, kExecutingThread, 4, true);
+  if (!executing_global_ok || !thread || !Span(base, thread, 116))
+    return;
+  g_last_run_ms = now;
   const uint32_t previous = Read(base, kExecutingThread);
   if (!previous)
     Write(base, kExecutingThread, thread);
   RunActions(ctx, base);
   if (!previous)
     Write(base, kExecutingThread, previous);
+}
+
+// The vehicle model store is sized once at boot (sub_821C83C0) and the
+// vehicles.ide loader adds every car to it with no capacity check
+// (sub_821CA5F0), so each add-on car needs a free entry: like the PC game's
+// limit adjusters, make room for more (64 more entries, about 61 KB).
+extern "C" void sub_821C83C0(PPCContext& ctx, uint8_t* base) {
+  using namespace gta4::trainer;
+  static bool s_raised = false;
+  if (ctx.r3.u32 == kVehicleModelStore && !s_raised && Span(base, kVehicleModelStore, 12, true)) {
+    const uint32_t capacity = Read(base, kVehicleModelStore);
+    if (capacity >= 16 && capacity <= 4096) {
+      s_raised = true;
+      Write(base, kVehicleModelStore, capacity + kExtraVehicleModels);
+      REXLOG_INFO("gta4-trainer: vehicle model store raised from {} to {} entries", capacity,
+                  capacity + kExtraVehicleModels);
+    } else {
+      REXLOG_WARN("gta4-trainer: vehicle model store capacity {} looks wrong; left alone",
+                  capacity);
+    }
+  }
+  __imp__sub_821C83C0(ctx, base);
 }

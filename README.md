@@ -19,13 +19,19 @@ survives reinstalls of the game data and works in GTA IV, TLAD and TBoGT alike.
 | B (Circle) | back / close |
 
 While the menu is open the game sees no controller input (the same rule the system
-dialogs use), so you won't punch anyone while navigating.
+dialogs use), so you won't punch anyone while navigating. The one exception is
+**R2 while you're in a vehicle**: the throttle still reaches the game, so the car
+keeps going while you browse.
 
 ## Features (Simple Native Trainer's core set)
 
 - **Player** — God mode, Never Wanted, set wanted level 0–6, +$100,000, heal & armor
 - **Vehicle**: vehicle god mode, repair, warp-into-spawned-car toggle, Batmobile
-  gadgets, F-16 flight and weapons
+  gadgets, F-16 flight and weapons, Deimos pop-up lights, and **Bring Your Own
+  Ride**: a mission that wants a particular vehicle accepts the one you're in, as
+  long as it's the same kind (anything on wheels for a car or bike, a helicopter
+  for a helicopter, a boat for a boat). A mission's own story vehicle is a
+  different check and still counts
 - **Car Spawning**: 29 stock cars, bikes and helicopters plus three bundled
   **add-on vehicles**, spawned in front of you. Episode-only vehicles are
   detected and refused outside their episode
@@ -56,6 +62,21 @@ network session.
   feature uses, and the same natives Simple Native Trainer called on PC.
 - The overlay is drawn with the port's ImGui layer, beside the FPS counter.
 - A `gta4_trainer` cvar (on by default) gates the whole thing.
+- **Bring Your Own Ride** replaces three natives at registration (through the
+  same thunks the port's motion-control hooks use): `IS_CHAR_IN_MODEL`,
+  `IS_CAR_MODEL` and `IS_CHAR_IN_ANY_POLICE_VEHICLE`. Each runs the game's own
+  handler first and, with the option on, turns a "no" into "yes" only for the
+  player's own vehicle of the same kind. Off, they pass straight through.
+- **Cost per frame**: nothing, when nothing is switched on. The script-stage
+  hook decides on a time stamp before touching memory, and each toggle (god
+  mode, never wanted, the add-on watchers...) runs on its own clock.
+- **Spawn guard**: before `CREATE_CAR`, the trainer checks what the game will
+  read (the model is a vehicle model info, its fragment and vehicle structure
+  are in place, every extra's bone has a parent), waits while the game is still
+  setting the model up, and refuses with a full report in the log otherwise.
+- **Vehicle model store**: the game sizes it once at boot and adds cars without
+  a capacity check, so the trainer gives it 64 more entries (`sub_821C83C0`),
+  as the PC game's limit adjusters do.
 
 ## Files
 

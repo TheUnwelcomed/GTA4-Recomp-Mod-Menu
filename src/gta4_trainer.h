@@ -4,7 +4,8 @@
 // weather and weapons, driven with the pad.
 //
 // Open and close it with L3 + R3. While it is open the game sees no pad input
-// (the same ownership rule the system dialogs use). Navigation: D-pad up and
+// (the same ownership rule the system dialogs use), except the throttle (R2)
+// while the player is in a vehicle, so a car keeps going. Navigation: D-pad up and
 // down to move, left and right to change a value, A (Cross) to pick, B
 // (Circle) to go back.
 //

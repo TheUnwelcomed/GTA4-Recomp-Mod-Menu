@@ -83,10 +83,10 @@ index a9b2c2a..9d3b614 100644
  
  }  // namespace gta4ps5
 diff --git a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
-index 887ab28..5537cc6 100644
+index 887ab28..e766894 100644
 --- a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
 +++ b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
-@@ -24,6 +24,17 @@
+@@ -24,6 +24,20 @@
  
  #pragma GCC diagnostic ignored "-Wunused-parameter"
  
@@ -99,12 +99,15 @@ index 887ab28..5537cc6 100644
 +// pressed into it (a tap replayed after an early release). Weak like the
 +// owner check.
 +extern "C" uint32_t GTA4_TrainerPadButtonAdjust() __attribute__((weak));
++// [ps5 port] True while the open trainer menu lets the throttle (R2) through
++// because the player is driving, so the car keeps going. Weak like the rest.
++extern "C" bool GTA4_TrainerPassesThrottle() __attribute__((weak));
 +#endif
 +
  namespace rex {
  namespace kernel {
  namespace xam {
-@@ -122,9 +133,36 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
+@@ -122,9 +136,41 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
      std::memset(static_cast<X_INPUT_STATE*>(input_state), 0, sizeof(X_INPUT_STATE));
      return X_ERROR_SUCCESS;
    }
@@ -119,6 +122,11 @@ index 887ab28..5537cc6 100644
 +      X_INPUT_STATE real{};
 +      is->GetState(actual_user_index, &real);
 +      std::memset(static_cast<X_INPUT_STATE*>(input_state), 0, sizeof(X_INPUT_STATE));
++      if (&GTA4_TrainerPassesThrottle && GTA4_TrainerPassesThrottle()) {
++        auto* state = static_cast<X_INPUT_STATE*>(input_state);
++        state->packet_number = real.packet_number;
++        state->gamepad.right_trigger = real.gamepad.right_trigger;
++      }
 +      return X_ERROR_SUCCESS;
 +    }
 +  }
