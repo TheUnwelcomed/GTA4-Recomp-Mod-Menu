@@ -116,7 +116,10 @@ bool AppendLineIfMissing(const fs::path& file, std::string_view token, std::stri
     return false;
   }
   const std::string_view text(reinterpret_cast<const char*>(raw.data()), raw.size());
-  if (text.find(token) != std::string_view::npos) return true;  // already installed
+  if (text.find(token) != std::string_view::npos) {
+    REXLOG_INFO("gta4-addons: {} already registered in {}", what, file.string());
+    return true;
+  }
   if (!BackupOnce(file)) return false;
   const fs::path tmp = file.string() + ".new";
   {
@@ -434,12 +437,21 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   const std::string handling = ReadLineFile(batmobile / "handling.txt");
   const std::string ide = ReadLineFile(batmobile / "vehicles_ide.txt");
   bool ok = true;
-  if (!handling.empty())
-    ok &= AppendLineIfMissing(game / "common" / "data" / "handling.dat", "BATMOBILE", handling,
-                              "Batmobile handling");
-  if (!ide.empty())
-    ok &= AppendLineIfMissing(game / "common" / "data" / "vehicles.ide", "batmobile,", ide,
-                              "Batmobile vehicle");
+  // The base game and, when installed, each episode: the episodes read
+  // their own copies of these files.
+  std::vector<fs::path> data_roots = {game / "common" / "data"};
+  for (const char* episode : {"TLAD", "TBOGT"}) {
+    const fs::path extra = game.parent_path() / "dlc" / episode / "common" / "data";
+    if (fs::exists(extra / "vehicles.ide", ec))
+      data_roots.push_back(extra);
+  }
+  for (const auto& data : data_roots) {
+    if (!handling.empty() && fs::exists(data / "handling.dat", ec))
+      ok &= AppendLineIfMissing(data / "handling.dat", "BATMOBILE", handling,
+                                "Batmobile handling");
+    if (!ide.empty())
+      ok &= AppendLineIfMissing(data / "vehicles.ide", "batmobile,", ide, "Batmobile vehicle");
+  }
 
   const fs::path img = FindVehiclesImg(game);
   if (img.empty()) {

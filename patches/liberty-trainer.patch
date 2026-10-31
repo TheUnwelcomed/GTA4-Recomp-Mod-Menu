@@ -83,10 +83,10 @@ index a9b2c2a..9d3b614 100644
  
  }  // namespace gta4ps5
 diff --git a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
-index 887ab28..76cf818 100644
+index 887ab28..5537cc6 100644
 --- a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
 +++ b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
-@@ -24,6 +24,12 @@
+@@ -24,6 +24,17 @@
  
  #pragma GCC diagnostic ignored "-Wunused-parameter"
  
@@ -94,12 +94,17 @@ index 887ab28..76cf818 100644
 +// [ps5 port] The GTA IV trainer's pad ownership (gta4_trainer.h). Weak: hosts
 +// that do not link the trainer leave it null and the check below skips it.
 +extern "C" bool GTA4_TrainerOwnsGuestPad() __attribute__((weak));
++// [ps5 port] Button adjustment while the trainer watches a long-press:
++// the low 16 bits are cleared from the game's view, the high 16 bits are
++// pressed into it (a tap replayed after an early release). Weak like the
++// owner check.
++extern "C" uint32_t GTA4_TrainerPadButtonAdjust() __attribute__((weak));
 +#endif
 +
  namespace rex {
  namespace kernel {
  namespace xam {
-@@ -122,6 +128,20 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
+@@ -122,9 +133,36 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
      std::memset(static_cast<X_INPUT_STATE*>(input_state), 0, sizeof(X_INPUT_STATE));
      return X_ERROR_SUCCESS;
    }
@@ -120,3 +125,19 @@ index 887ab28..76cf818 100644
  #endif
    auto* is = input_system();
    const u32 result = is->GetState(actual_user_index, input_state);
++#if REX_PLATFORM_PS5
++  // [ps5 port] The trainer's long-press watch: hide the held toggle button
++  // from the game, or replay a tap it withheld (gta4_trainer.cpp).
++  if (result == X_ERROR_SUCCESS && input_state && &GTA4_TrainerPadButtonAdjust) {
++    const uint32_t adjust = GTA4_TrainerPadButtonAdjust();
++    if (adjust) {
++      auto* state = static_cast<X_INPUT_STATE*>(input_state);
++      uint16_t buttons = state->gamepad.buttons;
++      buttons = uint16_t((buttons & ~uint16_t(adjust & 0xFFFFu)) | uint16_t(adjust >> 16));
++      state->gamepad.buttons = buttons;
++    }
++  }
++#endif
+   const uint64_t causal_sequence = rex::input::InputTraceCausalSequence();
+   if (rex::input::IsInputTraceEnabled() && causal_sequence != 0) {
+     REXLOG_INFO(

@@ -427,6 +427,9 @@ uint64_t g_last_gun_ms = 0;
 // Cheap gate for the script-thread hook: only when the trainer actually has
 // something to do does RunActions run (set by Poll, recomputed after a run).
 std::atomic<bool> g_has_work{false};
+// Pad adjustment for the XAM path: low 16 bits masked from the game, high
+// 16 bits pressed into it (the replayed tap).
+std::atomic<uint32_t> g_pad_adjust{0};
 // The script thread currently (or just) run by sub_82844200, and the
 // executing-thread global the VM keeps while scripts call natives
 // (gta4_quicksave_hooks.cpp). CREATE_CAR and friends read it to attach the
@@ -563,9 +566,12 @@ void StartSpawn(State& s, int model_index, PPCContext& ctx, uint8_t* base) {
   const uint32_t hash = ModelHash(choice.model);
   const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {hash});
   if (!known || !known->r0()) {
+    REXLOG_INFO("gta4-trainer: spawn refused, model {} hash {:08X} unknown to the game",
+                std::string(choice.model), hash);
     Toast(s, std::string(choice.label) + ": not installed or not in this episode.");
     return;
   }
+  REXLOG_INFO("gta4-trainer: spawning {} (hash {:08X})", std::string(choice.model), hash);
   Invoke(ctx, base, "REQUEST_MODEL", {hash});
   s.pending_model = model_index;
   s.pending_hash = hash;
@@ -889,6 +895,7 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   (void)ctx;
   if (!REXCVAR_GET(gta4_trainer)) {
     g_input_owned.store(false, std::memory_order_relaxed);
+    g_pad_adjust.store(0, std::memory_order_relaxed);
     return;
   }
   auto& s = g_state;
@@ -899,6 +906,7 @@ void Poll(PPCContext& ctx, uint8_t* base) {
     const bool was_open = s.open;
     s.open = false;
     g_input_owned.store(false, std::memory_order_relaxed);
+    g_pad_adjust.store(0, std::memory_order_relaxed);
     g_gadget_buttons.store(0, std::memory_order_relaxed);
     g_gadget_previous.store(0, std::memory_order_relaxed);
     if (was_open || s.toast_until > now)
@@ -915,25 +923,46 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   if (input && input->TryGetLastState(0, &pad))
     buttons = pad.gamepad.buttons;
 
-  // The DualSense touchpad click opens and closes the menu (the PS5 pad
-  // driver maps it to BACK). The game also uses BACK (camera), so the pad
-  // stays owned until the click is released after closing - the game never
-  // sees the press that worked the menu.
+  // A three-second hold of the DualSense touchpad (BACK in this port's pad
+  // mapping) opens and closes the menu. The game also uses BACK for the
+  // camera, so while the hold is being watched the button is hidden from
+  // the game, and an early release replays the tap - camera changes work
+  // exactly as stock, and never fire from working the menu.
   constexpr uint16_t kToggle = X_INPUT_GAMEPAD_BACK;
-  static uint64_t s_last_toggle = 0;
-  static bool s_swallow_release = false;
-  if ((buttons & kToggle) && !(g_pad.last & kToggle) && now - s_last_toggle > 300) {
-    s_last_toggle = now;
+  constexpr uint64_t kHoldMs = 3000;
+  static uint64_t s_hold_started = 0;
+  static int s_replay_frames = 0;
+  const bool held = buttons & kToggle;
+  const bool was_held = g_pad.last & kToggle;
+  if (held && !was_held)
+    s_hold_started = now;
+  if (held && s_hold_started && now - s_hold_started >= kHoldMs) {
+    s_hold_started = 0;
     s.open = !s.open;
     if (s.open) {
       s.page = Page::kMain;
       s.selected = 0;
-    } else {
-      s_swallow_release = true;
+    }
+  } else if (!held && was_held && s_hold_started) {
+    if (!s.open && now - s_hold_started < kHoldMs)
+      s_replay_frames = 3;  // a tap: give the game its camera change
+    s_hold_started = 0;
+  }
+  // The hold's progress, so the hold does not feel dead.
+  if (!s.open && held && s_hold_started && now - s_hold_started > 600)
+    Toast(s, "Keep holding to open Liberty Trainer (" +
+                 std::to_string((kHoldMs - (now - s_hold_started) + 999) / 1000) + ")",
+          300);
+  uint32_t adjust = 0;
+  if (!s.open) {
+    if (held)
+      adjust |= kToggle;  // hidden while the hold is watched
+    else if (s_replay_frames > 0) {
+      adjust |= uint32_t(kToggle) << 16;
+      --s_replay_frames;
     }
   }
-  if (s_swallow_release && !(buttons & kToggle))
-    s_swallow_release = false;
+  g_pad_adjust.store(adjust, std::memory_order_relaxed);
 
   if (s.open) {
     const auto items = PageItems(s);
@@ -978,7 +1007,7 @@ void Poll(PPCContext& ctx, uint8_t* base) {
     g_gadget_buttons.store(buttons, std::memory_order_relaxed);
   }
   g_pad.last = buttons;
-  g_input_owned.store(s.open || s_swallow_release, std::memory_order_relaxed);
+  g_input_owned.store(s.open, std::memory_order_relaxed);
   if (!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
       s.pending_model >= 0)
     g_has_work.store(true, std::memory_order_relaxed);
@@ -1173,6 +1202,10 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateOverlay(rex::ui::ImGuiDrawer* drawer
 }  // namespace gta4::trainer
 
 extern "C" bool GTA4_TrainerOwnsGuestPad() { return gta4::trainer::InputOwned(); }
+
+extern "C" uint32_t GTA4_TrainerPadButtonAdjust() {
+  return gta4::trainer::g_pad_adjust.load(std::memory_order_relaxed);
+}
 
 // The script-thread run function: its r3 is the thread about to run. The
 // trainer acts right after the thread ran, with the VM's executing-thread
