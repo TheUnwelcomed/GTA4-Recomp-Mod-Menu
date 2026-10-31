@@ -35,6 +35,7 @@ namespace gta4::trainer {
 using rex::input::X_INPUT_STATE;
 using rex::input::X_INPUT_GAMEPAD_A;
 using rex::input::X_INPUT_GAMEPAD_B;
+using rex::input::X_INPUT_GAMEPAD_BACK;
 using rex::input::X_INPUT_GAMEPAD_DPAD_DOWN;
 using rex::input::X_INPUT_GAMEPAD_DPAD_LEFT;
 using rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT;
@@ -423,6 +424,15 @@ std::vector<PendingItem> g_pending;
 std::atomic<uint16_t> g_gadget_buttons{0}, g_gadget_previous{0};
 std::atomic<bool> g_online{false};
 uint64_t g_last_gun_ms = 0;
+// Cheap gate for the script-thread hook: only when the trainer actually has
+// something to do does RunActions run (set by Poll, recomputed after a run).
+std::atomic<bool> g_has_work{false};
+// The script thread currently (or just) run by sub_82844200, and the
+// executing-thread global the VM keeps while scripts call natives
+// (gta4_quicksave_hooks.cpp). CREATE_CAR and friends read it to attach the
+// new entity to the calling script, so acting with it null was the spawn
+// crash: the shim below sets it the way the VM itself does.
+constexpr uint32_t kExecutingThread = 0x8319277C;
 
 void Toast(State& s, std::string text, uint64_t ms = 2500) {
   s.toast = std::move(text);
@@ -838,8 +848,8 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }
-      model.footer = s.page == Page::kMain ? "A: open   B: close   L3+R3: close"
-                                           : "A: select   B: back   left/right: change";
+      model.footer = s.page == Page::kMain ? "X select    O close    touchpad close"
+                                           : "X select    O back    < > change";
     }
   }
   std::lock_guard lock(g_draw_mutex);
@@ -905,16 +915,25 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   if (input && input->TryGetLastState(0, &pad))
     buttons = pad.gamepad.buttons;
 
-  constexpr uint16_t kToggle = X_INPUT_GAMEPAD_LEFT_THUMB | X_INPUT_GAMEPAD_RIGHT_THUMB;
+  // The DualSense touchpad click opens and closes the menu (the PS5 pad
+  // driver maps it to BACK). The game also uses BACK (camera), so the pad
+  // stays owned until the click is released after closing - the game never
+  // sees the press that worked the menu.
+  constexpr uint16_t kToggle = X_INPUT_GAMEPAD_BACK;
   static uint64_t s_last_toggle = 0;
-  if ((buttons & kToggle) == kToggle && now - s_last_toggle > 400) {
+  static bool s_swallow_release = false;
+  if ((buttons & kToggle) && !(g_pad.last & kToggle) && now - s_last_toggle > 300) {
     s_last_toggle = now;
     s.open = !s.open;
     if (s.open) {
       s.page = Page::kMain;
       s.selected = 0;
+    } else {
+      s_swallow_release = true;
     }
   }
+  if (s_swallow_release && !(buttons & kToggle))
+    s_swallow_release = false;
 
   if (s.open) {
     const auto items = PageItems(s);
@@ -959,7 +978,10 @@ void Poll(PPCContext& ctx, uint8_t* base) {
     g_gadget_buttons.store(buttons, std::memory_order_relaxed);
   }
   g_pad.last = buttons;
-  g_input_owned.store(s.open, std::memory_order_relaxed);
+  g_input_owned.store(s.open || s_swallow_release, std::memory_order_relaxed);
+  if (!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
+      s.pending_model >= 0)
+    g_has_work.store(true, std::memory_order_relaxed);
 
   // Publishing builds strings; while the menu is shut and nothing is on
   // screen there is nothing to draw, so skip it (one trailing publish clears
@@ -978,6 +1000,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   auto& s = g_state;
   ++s.tick;
   const uint64_t now = NowMs();
+  // The script hook fires once per script thread per frame; one full pass
+  // per frame is plenty.
+  static uint64_t s_last_run = 0;
+  if (now - s_last_run < 8)
+    return;
+  s_last_run = now;
 
   const GameContext game = ReadContext(ctx, base);
   g_online.store(game.online, std::memory_order_relaxed);
@@ -1028,6 +1056,9 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     const auto missing = MissingNatives();
     PublishDraw(s, g_natives.size(), missing.size(), missing);
   }
+  g_has_work.store(!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god ||
+                       s.gadgets || s.pending_model >= 0,
+                   std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,39 +1079,88 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
     }
     if (!model.open && model.toast.empty())
       return;
+    // The look leans on GTA IV's own menus: a dark sheet, an amber header
+    // band, a filled highlight bar on the selected row.
     const float scale = std::max(1.0f, io.DisplaySize.y / 1080.0f);
-    ImGui::SetNextWindowPos(ImVec2(48.0f * scale, 96.0f * scale), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.82f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * scale, 10 * scale));
+    const ImU32 kSheet = IM_COL32(12, 12, 14, 230);
+    const ImU32 kBand = IM_COL32(255, 159, 14, 255);
+    const ImU32 kBandText = IM_COL32(16, 12, 4, 255);
+    const ImU32 kText = IM_COL32(235, 235, 235, 255);
+    const ImU32 kDim = IM_COL32(150, 150, 150, 255);
+    const ImU32 kSelBar = IM_COL32(255, 159, 14, 235);
+    const ImU32 kSelText = IM_COL32(20, 14, 2, 255);
+    const ImU32 kToastText = IM_COL32(150, 240, 150, 255);
+    const ImU32 kEdge = IM_COL32(255, 159, 14, 90);
+
+    ImGui::SetNextWindowPos(ImVec2(56.0f * scale, 108.0f * scale), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
     if (ImGui::Begin("##liberty_trainer", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
-      ImGui::SetWindowFontScale(1.25f * scale);
+                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                         ImGuiWindowFlags_NoBackground)) {
+      ImGui::SetWindowFontScale(1.3f * scale);
+      const float pad = 16.0f * scale;
+      const float width = 440.0f * scale;
+      const float line_h = ImGui::GetTextLineHeight() + 7.0f * scale;
+      const float band_h = line_h + 10.0f * scale;
+      auto* draw = ImGui::GetWindowDrawList();
+      const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+      float body_h = 0;
       if (model.open) {
-        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.05f, 1.0f), "%s", model.title.c_str());
-        ImGui::Separator();
+        body_h = band_h + 8.0f * scale + float(model.lines.size()) * line_h +
+                 (model.footer.empty() ? 0.0f : line_h + 6.0f * scale) + pad;
+      }
+      const bool has_toast = !model.toast.empty();
+      const float toast_h = has_toast ? line_h + 8.0f * scale : 0.0f;
+      const float total_h = body_h + (model.open && has_toast ? 6.0f * scale : 0.0f) + toast_h;
+
+      if (model.open) {
+        // Sheet and edge.
+        draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + body_h), kSheet,
+                            8.0f * scale);
+        draw->AddRect(origin, ImVec2(origin.x + width, origin.y + body_h), kEdge, 8.0f * scale,
+                      0, 1.5f);
+        // Header band.
+        draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + band_h), kBand,
+                            8.0f * scale, ImDrawFlags_RoundCornersTop);
+        draw->AddText(ImVec2(origin.x + pad, origin.y + 5.0f * scale), kBandText,
+                      model.title.c_str());
+        // Rows.
+        float y = origin.y + band_h + 8.0f * scale;
         for (const auto& line : model.lines) {
           if (line.selected) {
-            ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.05f, 1.0f), "> %s", line.text.c_str());
-          } else if (line.dim) {
-            ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "  %s", line.text.c_str());
+            draw->AddRectFilled(ImVec2(origin.x + 6.0f * scale, y),
+                                ImVec2(origin.x + width - 6.0f * scale, y + line_h - 2.0f * scale),
+                                kSelBar, 4.0f * scale);
+            draw->AddText(ImVec2(origin.x + pad, y + 2.0f * scale), kSelText, line.text.c_str());
           } else {
-            ImGui::Text("  %s", line.text.c_str());
+            draw->AddText(ImVec2(origin.x + pad, y + 2.0f * scale),
+                          line.dim ? kDim : kText, line.text.c_str());
           }
+          y += line_h;
         }
         if (!model.footer.empty()) {
-          ImGui::Separator();
-          ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", model.footer.c_str());
+          draw->AddLine(ImVec2(origin.x + pad, y + 2.0f * scale),
+                        ImVec2(origin.x + width - pad, y + 2.0f * scale), kEdge, 1.0f);
+          draw->AddText(ImVec2(origin.x + pad, y + 7.0f * scale), kDim, model.footer.c_str());
         }
       }
-      if (!model.toast.empty()) {
-        if (model.open)
-          ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.55f, 0.95f, 0.55f, 1.0f), "%s", model.toast.c_str());
+      if (has_toast) {
+        const float ty = origin.y + body_h + (model.open ? 6.0f * scale : 0.0f);
+        const ImVec2 size = ImGui::CalcTextSize(model.toast.c_str());
+        draw->AddRectFilled(ImVec2(origin.x, ty),
+                            ImVec2(origin.x + size.x + pad * 2, ty + toast_h), kSheet,
+                            6.0f * scale);
+        draw->AddText(ImVec2(origin.x + pad, ty + 4.0f * scale), kToastText, model.toast.c_str());
       }
+      // Reserve the drawn area so auto-resize fits it.
+      ImGui::Dummy(ImVec2(width, total_h));
     }
     ImGui::End();
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar();
   }
 };
@@ -1093,3 +1173,24 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateOverlay(rex::ui::ImGuiDrawer* drawer
 }  // namespace gta4::trainer
 
 extern "C" bool GTA4_TrainerOwnsGuestPad() { return gta4::trainer::InputOwned(); }
+
+// The script-thread run function: its r3 is the thread about to run. The
+// trainer acts right after the thread ran, with the VM's executing-thread
+// global set the way the VM sets it while scripts call natives, so entity
+// creation attaches to a real script thread (the earlier spawn crash was
+// CREATE_CAR reading this global as null from a non-script hook).
+extern "C" void sub_82844200(PPCContext& ctx, uint8_t* base) {
+  const uint32_t thread = ctx.r3.u32;
+  __imp__sub_82844200(ctx, base);
+  using namespace gta4::trainer;
+  if (!g_has_work.load(std::memory_order_relaxed))
+    return;
+  if (!Span(base, kExecutingThread, 4, true) || !thread || !Span(base, thread, 116))
+    return;
+  const uint32_t previous = Read(base, kExecutingThread);
+  if (!previous)
+    Write(base, kExecutingThread, thread);
+  RunActions(ctx, base);
+  if (!previous)
+    Write(base, kExecutingThread, previous);
+}

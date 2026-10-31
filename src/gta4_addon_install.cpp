@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rijndael-alg-fst.h>
 
 namespace gta4::addons {
 namespace {
@@ -37,6 +38,31 @@ constexpr uint32_t kBlock = 0x800;
 
 uint32_t Swap32(uint32_t v) { return __builtin_bswap32(v); }
 uint16_t Swap16(uint16_t v) { return __builtin_bswap16(v); }
+
+// The console's archives keep their header and TOC under the same cipher
+// the RPFs use: AES-256-ECB applied 16 times (gta4_rpf_extractor.cpp). Only
+// whole 16-byte blocks are ciphered; a trailing partial block stays plain,
+// matching the reference tooling.
+void CryptBlocks(uint8_t* data, size_t size, const std::vector<uint8_t>& key, bool encrypt) {
+  const size_t whole = size & ~size_t(15);
+  if (!whole || key.size() != 32)
+    return;
+  std::array<uint32_t, 4 * (MAXNR + 1)> round_keys{};
+  const int rounds = encrypt ? rijndaelKeySetupEnc(round_keys.data(), key.data(), 256)
+                             : rijndaelKeySetupDec(round_keys.data(), key.data(), 256);
+  if (rounds <= 0)
+    return;
+  std::array<uint8_t, 16> output{};
+  for (int pass = 0; pass < 16; ++pass) {
+    for (size_t offset = 0; offset < whole; offset += 16) {
+      if (encrypt)
+        rijndaelEncrypt(round_keys.data(), rounds, data + offset, output.data());
+      else
+        rijndaelDecrypt(round_keys.data(), rounds, data + offset, output.data());
+      std::memcpy(data + offset, output.data(), output.size());
+    }
+  }
+}
 
 struct Endian {
   bool big = false;
@@ -156,7 +182,8 @@ struct TocEntry {
   std::string name;
 };
 
-bool InjectIntoImg(const fs::path& img, std::vector<NewFile> files) {
+bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
+                   const std::vector<fs::path>& rsc_paths) {
   std::ifstream in(img, std::ios::binary);
   if (!in) {
     REXLOG_WARN("gta4-addons: cannot open {}", img.string());
@@ -165,19 +192,30 @@ bool InjectIntoImg(const fs::path& img, std::vector<NewFile> files) {
   std::array<uint8_t, 0x14> header{};
   if (!in.read(reinterpret_cast<char*>(header.data()), header.size())) return false;
 
-  uint32_t magic_raw;
-  std::memcpy(&magic_raw, header.data(), 4);
-  Endian e{};
-  if (magic_raw == kImgMagic) {
-    e.big = false;
-  } else if (Swap32(magic_raw) == kImgMagic) {
-    e.big = true;
-  } else {
-    REXLOG_WARN(
-        "gta4-addons: {} magic {:02X}{:02X}{:02X}{:02X} is neither IMG3 byte order "
-        "(encrypted archive?); leaving it alone",
-        img.filename().string(), header[0], header[1], header[2], header[3]);
+  // Plain, either byte order - or encrypted, which the first 16 bytes
+  // decrypted with the game's own RPF key reveal.
+  auto match = [](const uint8_t* p, Endian& e) {
+    uint32_t magic;
+    std::memcpy(&magic, p, 4);
+    if (magic == kImgMagic) { e.big = false; return true; }
+    if (Swap32(magic) == kImgMagic) { e.big = true; return true; }
     return false;
+  };
+  Endian e{};
+  bool encrypted = false;
+  if (!match(header.data(), e)) {
+    std::array<uint8_t, 0x14> trial = header;
+    CryptBlocks(trial.data(), 16, key, false);
+    if (!key.empty() && match(trial.data(), e)) {
+      encrypted = true;
+      header = trial;
+    } else {
+      REXLOG_WARN(
+          "gta4-addons: {} magic {:02X}{:02X}{:02X}{:02X} is neither plain nor "
+          "RPF-key-encrypted IMG3; leaving it alone",
+          img.filename().string(), header[0], header[1], header[2], header[3]);
+      return false;
+    }
   }
   const uint32_t version = e.R32(header.data() + 4);
   const uint32_t count = e.R32(header.data() + 8);
@@ -191,6 +229,19 @@ bool InjectIntoImg(const fs::path& img, std::vector<NewFile> files) {
   }
   std::vector<uint8_t> toc(toc_size);
   if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size()))) return false;
+  if (encrypted)
+    CryptBlocks(toc.data(), toc.size(), key, false);
+
+  // The byte order is known only now, so the resources load here, their
+  // headers matched to it.
+  std::vector<NewFile> files(rsc_paths.size());
+  for (size_t i = 0; i < rsc_paths.size(); ++i) {
+    if (!LoadRsc(rsc_paths[i], e.big, files[i])) {
+      REXLOG_WARN("gta4-addons: bundled file {} is missing or malformed",
+                  rsc_paths[i].filename().string());
+      return false;
+    }
+  }
 
   std::vector<TocEntry> entries(count);
   for (uint32_t i = 0; i < count; ++i) {
@@ -300,7 +351,12 @@ bool InjectIntoImg(const fs::path& img, std::vector<NewFile> files) {
       std::memcpy(new_toc.data() + name_at, all[i].name.c_str(), all[i].name.size() + 1);
       name_at += all[i].name.size() + 1;
     }
-    out.seekp(0x14);
+    if (encrypted) {
+      CryptBlocks(new_header.data(), 16, key, true);
+      CryptBlocks(new_toc.data(), new_toc.size(), key, true);
+    }
+    out.seekp(0);
+    out.write(reinterpret_cast<const char*>(new_header.data()), new_header.size());
     out.write(reinterpret_cast<const char*>(new_toc.data()), std::streamsize(new_toc.size()));
   }
   out.flush();
@@ -323,8 +379,9 @@ bool InjectIntoImg(const fs::path& img, std::vector<NewFile> files) {
     fs::remove(out_path, ec);
     return false;
   }
-  REXLOG_INFO("gta4-addons: {} rebuilt ({}-endian) with {} added file(s)",
-              img.filename().string(), e.big ? "big" : "little", files.size());
+  REXLOG_INFO("gta4-addons: {} rebuilt ({}-endian, {}) with {} added file(s)",
+              img.filename().string(), e.big ? "big" : "little",
+              encrypted ? "encrypted" : "plain", files.size());
   return true;
 }
 
@@ -389,28 +446,18 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
     REXLOG_WARN("gta4-addons: vehicles.img was not found under {}", game.string());
     return;
   }
-  // Byte order of the archive decides the byte order of the injected
-  // resource headers; probe it first so LoadRsc can match it.
-  bool big = false;
+  // The console's archives are usually encrypted with the game's own RPF
+  // key, which the installer leaves in the game root.
+  std::vector<uint8_t> key;
   {
-    std::ifstream probe(img, std::ios::binary);
-    uint32_t magic = 0;
-    if (!probe.read(reinterpret_cast<char*>(&magic), 4)) return;
-    if (magic == kImgMagic) big = false;
-    else if (Swap32(magic) == kImgMagic) big = true;
-    else {
-      REXLOG_WARN("gta4-addons: {} is not a plain IMG3 archive; model step skipped",
-                     img.filename().string());
-      return;
-    }
+    std::vector<uint8_t> raw;
+    if (ReadAll(game / "aes_key.bin", raw) && raw.size() == 32)
+      key = std::move(raw);
+    else
+      REXLOG_WARN("gta4-addons: {} has no aes_key.bin; only a plain archive can be edited",
+                  game.string());
   }
-  std::vector<NewFile> files(2);
-  if (!LoadRsc(batmobile / "batmobile.wft", big, files[0]) ||
-      !LoadRsc(batmobile / "batmobile.wtd", big, files[1])) {
-    REXLOG_WARN("gta4-addons: bundled Batmobile files are missing or malformed");
-    return;
-  }
-  if (InjectIntoImg(img, std::move(files)) && ok)
+  if (InjectIntoImg(img, key, {batmobile / "batmobile.wft", batmobile / "batmobile.wtd"}) && ok)
     REXLOG_INFO("gta4-addons: Batmobile add-on is installed");
 }
 

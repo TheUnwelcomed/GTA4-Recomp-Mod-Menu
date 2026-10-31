@@ -1,55 +1,122 @@
 diff --git a/glue/rexglue-sdk-main/gta4-recomp/CMakeLists.txt b/glue/rexglue-sdk-main/gta4-recomp/CMakeLists.txt
-index 55df078..8e0af10 100644
+index c2944f4..8e0af10 100644
 --- a/glue/rexglue-sdk-main/gta4-recomp/CMakeLists.txt
 +++ b/glue/rexglue-sdk-main/gta4-recomp/CMakeLists.txt
-@@ -23,6 +23,7 @@ set(GTA4_APP_SOURCES
+@@ -22,6 +22,8 @@ set(GTA4_APP_SOURCES
+     src/gta4_presentation_hooks.cpp
      src/gta4_aspect_hooks.cpp
      src/gta4_quicksave_hooks.cpp
-     src/gta4_trainer.cpp
++    src/gta4_trainer.cpp
 +    src/gta4_addon_install.cpp
      src/gta4_camera_hooks.cpp
      src/gta4_input_hooks.cpp
      src/gta4_sony_feedback.cpp
-diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_quicksave_hooks.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_quicksave_hooks.cpp
-index 532705c..2ec0b4f 100644
---- a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_quicksave_hooks.cpp
-+++ b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_quicksave_hooks.cpp
+diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_input_hooks.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_input_hooks.cpp
+index 82daa9e..643e66d 100644
+--- a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_input_hooks.cpp
++++ b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_input_hooks.cpp
+@@ -1,5 +1,6 @@
+ #include "gta4_init.h"
+ #include "gta4_frontend_hooks.h"
++#include "gta4_trainer.h"
+ #include "gta4_input_action_routing.h"
+ #include "gta4_map_pan_policy.h"
+ #include "gta4_pc_input_bridge.h"
+@@ -2103,6 +2104,9 @@ extern "C" void sub_828CCD60(PPCContext& ctx, uint8_t* base) {
+       gta4::input::ConfigureKeyboardControllerForPoll(ctx, base);
+   const uint64_t touch_epoch = gta4::input::ReadEpoch().sequence + 1;
+   GTA4_TouchConsumePoll(ctx, base, touch_epoch);
++  // The trainer menu runs on this poll, before retail reads the pad, so the
++  // frame that opens the menu is already owned by it (gta4_trainer.h).
++  gta4::trainer::Poll(ctx, base);
+   __imp__sub_828CCD60(ctx, base);
+   const gta4::input::InputEpoch epoch =
+       gta4::input::CaptureEpoch(ctx, base, caller, helicopter_controls);
+diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_motion_hooks.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_motion_hooks.cpp
+index 9945830..e9e272c 100644
+--- a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_motion_hooks.cpp
++++ b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_motion_hooks.cpp
 @@ -1,4 +1,5 @@
  #include "gta4_quicksave_hooks.h"
 +#include "gta4_trainer.h"
- #include "input/context_touch_activity.h"
- #include "gta4_quicksave_policy.h"
- #include "gta4_phone_quicksave_profiles.h"
-@@ -638,8 +639,10 @@ extern "C" void sub_82846780(PPCContext& ctx, uint8_t* base) {
- extern "C" void sub_825E87C8(PPCContext& ctx, uint8_t* base) {
-   __imp__sub_825E87C8(ctx, base);
-   gta4::quicksave::Poll(ctx, base);
-+  gta4::trainer::RunActions(ctx, base);
- }
- extern "C" void sub_82243260(PPCContext& ctx, uint8_t* base) {
-   __imp__sub_82243260(ctx, base);
-   gta4::quicksave::Poll(ctx, base);
-+  gta4::trainer::RunActions(ctx, base);
- }
+ #include "gta4_motion_bridge.h"
+ 
+ #include <array>
+@@ -149,6 +150,7 @@ MotionNativeRegistration* FindRegistration(uint32_t return_address) {
+ 
+ extern "C" void sub_82845600(PPCContext& ctx, uint8_t* base) {
+   gta4::quicksave::ObserveNativeRegistration(ctx, base);
++  gta4::trainer::ObserveNativeRegistration(ctx, base);
+   const uint32_t return_address = static_cast<uint32_t>(ctx.lr);
+   auto* registration = gta4::FindRegistration(return_address);
+   if (!registration) {
 diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
-index 3ea42a0..9d3b614 100644
+index a9b2c2a..9d3b614 100644
 --- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
 +++ b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,8 @@
  #include "../gta4_app.h"
  #include "game/ps5_display.h"
  #include "game/ps5_overlay.h"
 +#include "../gta4_addon_install.h"
- #include "../gta4_trainer.h"
++#include "../gta4_trainer.h"
  #include "game/save_import.h"
  #include "game/trophies_game.h"
-@@ -93,6 +94,9 @@ void OnGameSetUp(rex::ui::ImGuiDrawer* drawer, rex::Runtime* runtime, const fs::
+ #include "hub/hub_lang.h"
+@@ -36,6 +38,7 @@ namespace {
+ const fs::path kApp("/app0");
+ fs::path g_saves_root;
+ std::unique_ptr<GameOverlay> g_overlay;
++std::unique_ptr<rex::ui::ImGuiDialog> g_trainer_overlay;
+ }  // namespace
+ 
+ void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate, const rex::PathConfig& paths,
+@@ -90,6 +93,10 @@ void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate,
+ void OnGameSetUp(rex::ui::ImGuiDrawer* drawer, rex::Runtime* runtime, const fs::path& user_data) {
    WriteTrophyCatalog(runtime, user_data);
    g_overlay = std::make_unique<GameOverlay>(drawer);
-   g_trainer_overlay = gta4::trainer::CreateOverlay(drawer);
++  g_trainer_overlay = gta4::trainer::CreateOverlay(drawer);
 +  // Bundled add-ons (the Batmobile) install themselves into the game tree
 +  // here, before the game boots and indexes its archives.
 +  gta4::addons::InstallBundled(kApp / "addons", user_data);
  }
  
  }  // namespace gta4ps5
+diff --git a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
+index 887ab28..76cf818 100644
+--- a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
++++ b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
+@@ -24,6 +24,12 @@
+ 
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#if REX_PLATFORM_PS5
++// [ps5 port] The GTA IV trainer's pad ownership (gta4_trainer.h). Weak: hosts
++// that do not link the trainer leave it null and the check below skips it.
++extern "C" bool GTA4_TrainerOwnsGuestPad() __attribute__((weak));
++#endif
++
+ namespace rex {
+ namespace kernel {
+ namespace xam {
+@@ -122,6 +128,20 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
+     std::memset(static_cast<X_INPUT_STATE*>(input_state), 0, sizeof(X_INPUT_STATE));
+     return X_ERROR_SUCCESS;
+   }
++  // [ps5 port] The trainer menu owns the pad the same way while it is open
++  // (gta4_trainer.h). The real driver is still polled so the menu, which
++  // observes TryGetLastState at the poll boundary, keeps seeing buttons; the
++  // game gets a cleared pad. The symbol is weak: hosts without the trainer
++  // leave it unresolved.
++  if (input_state) {
++    if (&GTA4_TrainerOwnsGuestPad && GTA4_TrainerOwnsGuestPad()) {
++      auto* is = input_system();
++      X_INPUT_STATE real{};
++      is->GetState(actual_user_index, &real);
++      std::memset(static_cast<X_INPUT_STATE*>(input_state), 0, sizeof(X_INPUT_STATE));
++      return X_ERROR_SUCCESS;
++    }
++  }
+ #endif
+   auto* is = input_system();
+   const u32 result = is->GetState(actual_user_index, input_state);
