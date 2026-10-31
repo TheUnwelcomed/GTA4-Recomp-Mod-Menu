@@ -51,10 +51,19 @@ index 9945830..e9e272c 100644
    auto* registration = gta4::FindRegistration(return_address);
    if (!registration) {
 diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
-index a9b2c2a..9d3b614 100644
+index a9b2c2a..a06bc18 100644
 --- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
 +++ b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
-@@ -15,6 +15,8 @@
+@@ -8,6 +8,8 @@
+ #include <string>
+ 
+ #include <rex/cvar.h>
++#include <rex/filesystem/devices/host_path_device.h>
++#include <rex/filesystem/vfs.h>
+ #include <rex/logging.h>
+ #include <rex/runtime.h>
+ #include <rex/system/flags.h>
+@@ -15,6 +17,8 @@
  #include "../gta4_app.h"
  #include "game/ps5_display.h"
  #include "game/ps5_overlay.h"
@@ -63,7 +72,7 @@ index a9b2c2a..9d3b614 100644
  #include "game/save_import.h"
  #include "game/trophies_game.h"
  #include "hub/hub_lang.h"
-@@ -36,6 +38,7 @@ namespace {
+@@ -36,6 +40,7 @@ namespace {
  const fs::path kApp("/app0");
  fs::path g_saves_root;
  std::unique_ptr<GameOverlay> g_overlay;
@@ -71,14 +80,42 @@ index a9b2c2a..9d3b614 100644
  }  // namespace
  
  void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate, const rex::PathConfig& paths,
-@@ -90,6 +93,10 @@ void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate,
+@@ -87,9 +92,38 @@ void ShowHub(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate,
+   });
+ }
+ 
++// The add-ons' shadow archives (gta4_addon_install.h): each guest path
++// (game:\common.rpf) redirected to its edited copy, the way the button
++// prompts redirect xbox360.rpf.
++void MountShadows(rex::Runtime* runtime, const std::vector<gta4::addons::ShadowArchive>& shadows) {
++  auto* file_system = runtime ? runtime->file_system() : nullptr;
++  if (!file_system || shadows.empty())
++    return;
++  constexpr std::string_view kMount = "\\Device\\LibertyRecomp\\AddonData";
++  auto device = std::make_unique<rex::filesystem::HostPathDevice>(
++      kMount, shadows.front().shadow.parent_path(), true);
++  if (!device->Initialize() || !file_system->RegisterDevice(std::move(device))) {
++    REXLOG_WARN("gta4-addons: could not mount {}", shadows.front().shadow.parent_path().string());
++    return;
++  }
++  for (const auto& s : shadows) {
++    std::string target(kMount);
++    target.push_back('\\');
++    target.append(s.shadow.filename().string());
++    file_system->RegisterSymbolicLink(s.guest_path, target);
++    if (s.guest_path.rfind("game:", 0) == 0)
++      file_system->RegisterSymbolicLink("d:" + s.guest_path.substr(5), target);
++    REXLOG_INFO("gta4-addons: {} now reads {}", s.guest_path, s.shadow.string());
++  }
++}
++
  void OnGameSetUp(rex::ui::ImGuiDrawer* drawer, rex::Runtime* runtime, const fs::path& user_data) {
    WriteTrophyCatalog(runtime, user_data);
    g_overlay = std::make_unique<GameOverlay>(drawer);
 +  g_trainer_overlay = gta4::trainer::CreateOverlay(drawer);
-+  // Bundled add-ons (the Batmobile) install themselves into the game tree
-+  // here, before the game boots and indexes its archives.
-+  gta4::addons::InstallBundled(kApp / "addons", user_data);
++  // Bundled add-ons install themselves here, before the game boots and
++  // indexes its archives; their data lines come back as a shadow common.rpf.
++  MountShadows(runtime, gta4::addons::InstallBundled(kApp / "addons", user_data));
  }
  
  }  // namespace gta4ps5

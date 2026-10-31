@@ -1,3 +1,4 @@
 # Grotti Deimos GTS (harithd, ported by Milcin), converted for the 360 build
 model=deimos
 donor=fbi
+template=banshee

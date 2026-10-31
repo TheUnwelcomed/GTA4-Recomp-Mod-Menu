@@ -26,6 +26,7 @@
 #include <fstream>
 #include <ostream>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -108,12 +109,18 @@ bool ReadAll(const fs::path& path, std::vector<uint8_t>& out) {
 // console with the standard library's copy and directory-entry sizes, so the
 // copy and the size below are done by hand.
 bool CopyBytes(const fs::path& from, const fs::path& to) {
-  std::vector<uint8_t> data;
-  if (!ReadAll(from, data))
-    return false;
+  std::ifstream in(from, std::ios::binary);
   std::ofstream out(to, std::ios::binary | std::ios::trunc);
-  out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
-  return bool(out);
+  if (!in || !out)
+    return false;
+  std::vector<char> chunk(1u << 20);
+  while (in) {
+    in.read(chunk.data(), std::streamsize(chunk.size()));
+    const std::streamsize got = in.gcount();
+    if (got > 0 && !out.write(chunk.data(), got))
+      return false;
+  }
+  return in.eof() && bool(out);
 }
 
 // The size of a file, by opening it when the file system will not say.
@@ -229,6 +236,61 @@ std::string FirstToken(std::string_view line, size_t* at = nullptr, size_t* len 
   return token;
 }
 
+// The name a line is filed under: its first field, or the second on the
+// console's vehOff.csv lines ("VEHICLE <model> FIELD BONNET_FWD POS ...").
+std::string KeyToken(std::string_view line, size_t* at = nullptr, size_t* len = nullptr) {
+  size_t a = 0, l = 0;
+  std::string token = FirstToken(line, &a, &l);
+  if (token == "vehicle") {
+    size_t i = a + l;
+    while (i < line.size() && IsSeparator(line[i])) ++i;
+    a = i;
+    while (i < line.size() && !IsSeparator(line[i])) ++i;
+    l = i - a;
+    token = std::string(line.substr(a, l));
+    for (char& c : token) c = char(std::tolower(static_cast<unsigned char>(c)));
+  }
+  if (at) *at = a;
+  if (len) *len = l;
+  return token;
+}
+
+// A line's fields as written (case kept), split the way the game splits one:
+// on spaces, tabs and commas.
+std::vector<std::string> RawTokens(std::string_view line) {
+  std::vector<std::string> tokens;
+  size_t i = 0;
+  while (i < line.size()) {
+    while (i < line.size() && IsSeparator(line[i])) ++i;
+    const size_t start = i;
+    while (i < line.size() && !IsSeparator(line[i])) ++i;
+    if (i > start)
+      tokens.emplace_back(line.substr(start, i - start));
+  }
+  return tokens;
+}
+
+// The console's vehicles.ide has 15 fields a line where the PC's has 16 (an
+// extra number before the flags), and its own animation groups. An add-on's
+// PC line is rebuilt on its template car's console line: the template's type
+// and animation groups (the converted model has the template's seats and
+// doors), with the add-on's name, texture dictionary, handling, game name,
+// frequency, count, wheel sizes, dirt, swankness, LOD multiplier and flags.
+// Anything else (a PC-format template) leaves the add-on's line as it is.
+std::string ConsoleIdeLine(const std::string& addon_line, const std::string& template_line) {
+  const auto a = RawTokens(addon_line), t = RawTokens(template_line);
+  if (t.size() != 15 || a.size() < 15)
+    return addon_line;
+  std::vector<std::string> r = t;
+  for (const size_t i : {0, 1, 3, 4, 7, 8, 9, 10, 11, 12, 13})
+    r[i] = a[i];
+  r[14] = a.back();
+  std::string line;
+  for (size_t i = 0; i < 14; ++i)
+    line += r[i] + (i < 13 ? ", " : "");
+  return line + "\t" + r[14];
+}
+
 bool EditText(const fs::path& file, const char* what,
               const std::function<bool(std::vector<std::string>&)>& edit) {
   TextLines text;
@@ -303,7 +365,7 @@ bool CloneDonorLines(const fs::path& file, std::string_view donor, std::string_v
                      const char* what) {
   auto twin_of = [&](const std::string& line) {
     size_t at = 0, len = 0;
-    FirstToken(line, &at, &len);
+    KeyToken(line, &at, &len);
     const std::string original = line.substr(at, len);
     const bool upper = std::none_of(original.begin(), original.end(),
                                     [](char c) { return std::islower(static_cast<unsigned char>(c)); });
@@ -319,7 +381,7 @@ bool CloneDonorLines(const fs::path& file, std::string_view donor, std::string_v
     // line in the same section (other add-ons' twins may sit between).
     std::vector<size_t> donors, mine;
     for (size_t i = 0; i < lines.size(); ++i) {
-      const std::string token = FirstToken(lines[i]);
+      const std::string token = KeyToken(lines[i]);
       if (token == donor)
         donors.push_back(i);
       else if (token == model)
@@ -329,13 +391,13 @@ bool CloneDonorLines(const fs::path& file, std::string_view donor, std::string_v
     for (size_t k = 0; right && k < donors.size(); ++k) {
       right = mine[k] > donors[k] && lines[mine[k]] == twin_of(lines[donors[k]]);
       for (size_t x = donors[k] + 1; right && x < mine[k]; ++x)
-        right = FirstToken(lines[x]) != "end" && FirstToken(lines[x]) != donor;
+        right = FirstToken(lines[x]) != "end" && KeyToken(lines[x]) != donor;
     }
     if (right)
       return true;
-    std::erase_if(lines, [&](const std::string& l) { return FirstToken(l) == model; });
+    std::erase_if(lines, [&](const std::string& l) { return KeyToken(l) == model; });
     for (size_t i = 0; i < lines.size(); ++i) {
-      if (FirstToken(lines[i]) != donor)
+      if (KeyToken(lines[i]) != donor)
         continue;
       lines.insert(lines.begin() + std::ptrdiff_t(i + 1), twin_of(lines[i]));
       ++i;
@@ -877,100 +939,176 @@ bool ListImg(const fs::path& img, const std::vector<uint8_t>& key, std::ostream&
   return true;
 }
 
-// RPF2 (the game's other archive format) for the index: every entry's path,
-// and the small text data files inside copied out - the title update or an
-// episode may carry its own vehicles.ide / handling.dat in one.
+// RPF2, the archive format the game reads its data from (common.rpf holds
+// vehicles.ide, handling.dat and the rest). Read here for the index and for
+// the add-ons' shadow archive (below).
 bool IsTextData(std::string ext) {
   for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
   return ext == ".dat" || ext == ".ide" || ext == ".csv" || ext == ".txt" || ext == ".xml" ||
          ext == ".ipl" || ext == ".ini";
 }
 
-int ListRpf(const fs::path& rpf, const std::vector<uint8_t>& key, std::ostream& listing,
-            const fs::path& data_out, const std::string& prefix) {
-  std::ifstream in(rpf, std::ios::binary);
+uint32_t Le32(const uint8_t* p) {
+  return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+}
+void PutLe32(uint8_t* p, uint32_t v) {
+  p[0] = uint8_t(v);
+  p[1] = uint8_t(v >> 8);
+  p[2] = uint8_t(v >> 16);
+  p[3] = uint8_t(v >> 24);
+}
+
+constexpr uint32_t kRpf2Magic = 0x32465052u;  // 'RPF2'
+constexpr uint64_t kRpfTocOffset = 0x800, kRpfBlock = 0x800;
+
+struct RpfFile {
+  std::string path;  // from the root, lowercase ("/data/vehicles.ide")
+  size_t toc_offset = 0;
+  uint32_t size = 0, offset = 0, stored = 0;
+  bool compressed = false, resource = false;
+};
+struct Rpf {
+  uint32_t toc_size = 0, count = 0;
+  bool encrypted = false;
+  uint64_t file_size = 0;
+  std::vector<uint8_t> toc;  // decrypted
+  std::vector<RpfFile> files;
+  const RpfFile* Find(std::string_view path) const {
+    for (const auto& f : files)
+      if (f.path == path)
+        return &f;
+    return nullptr;
+  }
+};
+
+std::optional<Rpf> ReadRpf(const fs::path& path, const std::vector<uint8_t>& key) {
+  std::ifstream in(path, std::ios::binary);
   std::array<uint8_t, 20> header{};
-  if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
-    return 0;
-  auto le32 = [](const uint8_t* p) {
-    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
-  };
-  if (le32(header.data()) != 0x32465052u)  // 'RPF2'
-    return 0;
-  const uint32_t toc_size = le32(header.data() + 4), count = le32(header.data() + 8);
-  const bool encrypted = le32(header.data() + 16) != 0;
-  if (!count || count > 1000000 || uint64_t(count) * 16 > toc_size || toc_size > (64u << 20) ||
-      (encrypted && key.size() != 32))
-    return 0;
-  std::vector<uint8_t> toc(toc_size);
-  in.seekg(0x800);
-  if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
-    return 0;
-  if (encrypted)
-    CryptBlocks(toc.data(), toc.size(), key, false);
-  const size_t names = size_t(count) * 16;
+  if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()) ||
+      Le32(header.data()) != kRpf2Magic)
+    return std::nullopt;
+  Rpf rpf;
+  rpf.toc_size = Le32(header.data() + 4);
+  rpf.count = Le32(header.data() + 8);
+  rpf.encrypted = Le32(header.data() + 16) != 0;
+  rpf.file_size = SizeOf(path);
+  if (!rpf.count || rpf.count > 1000000 || uint64_t(rpf.count) * 16 > rpf.toc_size ||
+      rpf.toc_size > (64u << 20) || (rpf.encrypted && key.size() != 32) ||
+      rpf.file_size == UINT64_MAX || kRpfTocOffset + rpf.toc_size > rpf.file_size)
+    return std::nullopt;
+  rpf.toc.resize(rpf.toc_size);
+  in.seekg(std::streamoff(kRpfTocOffset));
+  if (!in.read(reinterpret_cast<char*>(rpf.toc.data()), std::streamsize(rpf.toc.size())))
+    return std::nullopt;
+  if (rpf.encrypted)
+    CryptBlocks(rpf.toc.data(), rpf.toc.size(), key, false);
+  const uint8_t* toc = rpf.toc.data();
+  const size_t names = size_t(rpf.count) * 16;
   auto name_of = [&](uint32_t i) {
-    const uint32_t at = le32(toc.data() + i * 16);
-    if (names + at >= toc.size()) return std::string("?");
-    return std::string(reinterpret_cast<const char*>(toc.data() + names + at),
-                       strnlen(reinterpret_cast<const char*>(toc.data() + names + at),
-                               toc.size() - names - at));
+    const uint32_t at = Le32(toc + i * 16);
+    if (names + at >= rpf.toc.size())
+      return std::string("?");
+    std::string name(reinterpret_cast<const char*>(toc + names + at),
+                     strnlen(reinterpret_cast<const char*>(toc + names + at),
+                             rpf.toc.size() - names - at));
+    for (char& c : name) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return name;
   };
-  listing << "# " << rpf.string() << " entries=" << count << "\n";
-  int copied = 0;
-  // Walk directories from the root (entry 0).
+  if (!(Le32(toc + 8) & 0x80000000u))
+    return std::nullopt;  // the root must be a directory
   std::vector<std::pair<uint32_t, std::string>> pending = {{0, ""}};
-  size_t guard = 0;
-  while (!pending.empty() && ++guard < 200000) {
-    auto [dir, path] = pending.back();
+  std::vector<bool> seen(rpf.count);
+  while (!pending.empty()) {
+    auto [dir, base_path] = pending.back();
     pending.pop_back();
-    const uint8_t* d = toc.data() + dir * 16;
-    const uint32_t first = le32(d + 8) & 0x7FFFFFFF, n = le32(d + 12) & 0x0FFFFFFF;
-    if (uint64_t(first) + n > count)
+    if (seen[dir])
       continue;
+    seen[dir] = true;
+    const uint32_t first = Le32(toc + dir * 16 + 8) & 0x7FFFFFFF;
+    const uint32_t n = Le32(toc + dir * 16 + 12) & 0x0FFFFFFF;
+    if (uint64_t(first) + n > rpf.count)
+      return std::nullopt;
     for (uint32_t i = first; i < first + n; ++i) {
-      const uint8_t* e = toc.data() + i * 16;
-      const std::string child = path + "/" + name_of(i);
-      if (le32(e + 8) & 0x80000000u) {
+      const uint8_t* e = toc + i * 16;
+      const std::string child = base_path + "/" + name_of(i);
+      if (Le32(e + 8) & 0x80000000u) {
         pending.emplace_back(i, child);
         continue;
       }
-      const uint32_t size = le32(e + 4), w2 = le32(e + 8), w3 = le32(e + 12);
-      const bool resource = (w3 & 0xC0000000u) == 0xC0000000u;
-      listing << child << " " << size << (resource ? " rsc" : "") << "\n";
-      if (resource || size > (2u << 20) || !IsTextData(fs::path(child).extension().string()))
-        continue;
-      const bool compressed = (w3 & 0x40000000u) != 0;
-      const uint32_t stored = w3 & 0xBFFFFFFFu;
-      std::vector<uint8_t> raw(compressed ? stored : size);
-      in.clear();
-      in.seekg(std::streamoff(w2));
-      if (!in.read(reinterpret_cast<char*>(raw.data()), std::streamsize(raw.size())))
-        continue;
-      std::vector<uint8_t> text(size);
-      if (compressed) {
-        z_stream z{};
-        if (inflateInit2(&z, -MAX_WBITS) != Z_OK)
-          continue;
-        z.next_in = raw.data();
-        z.avail_in = uInt(raw.size());
-        z.next_out = text.data();
-        z.avail_out = uInt(text.size());
-        const int status = inflate(&z, Z_FINISH);
-        inflateEnd(&z);
-        if (status != Z_STREAM_END)
-          continue;
-      } else {
-        text = std::move(raw);
-      }
-      std::string flat = prefix + child;
-      std::replace(flat.begin(), flat.end(), '/', '_');
-      std::ofstream(data_out / flat, std::ios::binary | std::ios::trunc)
-          .write(reinterpret_cast<const char*>(text.data()), std::streamsize(text.size()));
-      ++copied;
+      RpfFile f;
+      f.path = child;
+      f.toc_offset = size_t(i) * 16;
+      f.size = Le32(e + 4);
+      const uint32_t w2 = Le32(e + 8), w3 = Le32(e + 12);
+      f.resource = (w3 & 0xC0000000u) == 0xC0000000u;
+      f.offset = f.resource ? (w2 & 0x7FFFFF00u) : w2;
+      f.stored = f.resource ? f.size : (w3 & 0xBFFFFFFFu);
+      f.compressed = !f.resource && (w3 & 0x40000000u) != 0;
+      if (uint64_t(f.offset) + f.stored > rpf.file_size)
+        return std::nullopt;
+      rpf.files.push_back(std::move(f));
     }
   }
+  return rpf;
+}
+
+// A plain (non-resource) file's contents, inflated when stored compressed.
+bool ReadRpfData(const fs::path& path, const RpfFile& f, std::vector<uint8_t>& out) {
+  if (f.resource || f.size > (64u << 20) || f.stored > (64u << 20))
+    return false;
+  std::ifstream in(path, std::ios::binary);
+  std::vector<uint8_t> raw(f.stored);
+  in.seekg(std::streamoff(f.offset));
+  if (!in || !in.read(reinterpret_cast<char*>(raw.data()), std::streamsize(raw.size())))
+    return false;
+  if (!f.compressed) {
+    raw.resize(std::min<size_t>(raw.size(), f.size));
+    out = std::move(raw);
+    return true;
+  }
+  out.assign(f.size, 0);
+  z_stream z{};
+  if (inflateInit2(&z, -MAX_WBITS) != Z_OK)
+    return false;
+  z.next_in = raw.data();
+  z.avail_in = uInt(raw.size());
+  z.next_out = out.data();
+  z.avail_out = uInt(out.size());
+  const int status = inflate(&z, Z_FINISH);
+  inflateEnd(&z);
+  return status == Z_STREAM_END && z.avail_out == 0;
+}
+
+int ListRpf(const fs::path& path, const std::vector<uint8_t>& key, std::ostream& listing,
+            const fs::path& data_out, const std::string& prefix) {
+  const auto rpf = ReadRpf(path, key);
+  if (!rpf)
+    return 0;
+  listing << "# " << path.string() << " entries=" << rpf->count << "\n";
+  int copied = 0;
+  for (const auto& f : rpf->files) {
+    listing << f.path << " " << f.size << (f.resource ? " rsc" : "") << "\n";
+    if (f.resource || f.size > (2u << 20) || !IsTextData(fs::path(f.path).extension().string()))
+      continue;
+    std::vector<uint8_t> text;
+    if (!ReadRpfData(path, f, text))
+      continue;
+    std::string flat = prefix + f.path;
+    std::replace(flat.begin(), flat.end(), '/', '_');
+    std::ofstream(data_out / flat, std::ios::binary | std::ios::trunc)
+        .write(reinterpret_cast<const char*>(text.data()), std::streamsize(text.size()));
+    ++copied;
+  }
   return copied;
+}
+
+// `path` relative to `base` as text ("game/common/data/vehicles.ide"); the
+// library's own relative() answers "." on the console.
+std::string RelativeTo(const fs::path& path, const fs::path& base) {
+  const std::string p = path.generic_string(), b = base.generic_string();
+  if (!b.empty() && p.size() > b.size() && p.compare(0, b.size(), b) == 0 && p[b.size()] == '/')
+    return p.substr(b.size() + 1);
+  return p;
 }
 
 // The game's layout for the converter (logs/export/index on the console):
@@ -979,7 +1117,7 @@ int ListRpf(const fs::path& rpf, const std::vector<uint8_t>& key, std::ostream& 
 // weather, handling...). Once per version of this list.
 void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, const fs::path& out) {
   std::error_code ec;
-  constexpr std::string_view kVersion = "index v2\n";
+  constexpr std::string_view kVersion = "index v3\n";
   {
     std::vector<uint8_t> marker;
     if (ReadAll(out / "done.txt", marker) && std::string(marker.begin(), marker.end()) == kVersion)
@@ -1002,23 +1140,24 @@ void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, cons
         continue;
       const auto& path = it->path();
       const uint64_t size = SizeOf(path);
-      files << fs::relative(path, game.parent_path(), fec).string() << " " << size << "\n";
+      const std::string relative = RelativeTo(path, game.parent_path());
+      files << relative << " " << size << "\n";
       std::string ext = path.extension().string();
       for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
       if (ext == ".img") {
-        std::string flat = fs::relative(path, game.parent_path(), fec).string();
+        std::string flat = relative;
         std::replace(flat.begin(), flat.end(), '/', '_');
         std::ofstream listing(out / "toc" / (flat + ".txt"), std::ios::trunc);
         archives += ListImg(path, key, listing) ? 1 : 0;
       } else if (ext == ".rpf") {
-        std::string flat = fs::relative(path, game.parent_path(), fec).string();
+        std::string flat = relative;
         std::replace(flat.begin(), flat.end(), '/', '_');
         std::ofstream listing(out / "toc" / (flat + ".txt"), std::ios::trunc);
         copied += ListRpf(path, key, listing, out / "data", flat);
         ++archives;
       } else if (IsTextData(ext) && size < (2u << 20) &&
                  path.string().find(".stock-bak") == std::string::npos) {
-        std::string flat = fs::relative(path, game.parent_path(), fec).string();
+        std::string flat = relative;
         std::replace(flat.begin(), flat.end(), '/', '_');
         copied += CopyBytes(path, out / "data" / flat) ? 1 : 0;
       }
@@ -1100,6 +1239,7 @@ bool InsertIntoSection(const fs::path& file, std::string_view section, std::stri
 struct Addon {
   fs::path dir;
   std::string model, donor = "fbi", colours;
+  std::string template_model;  // the stock car it was converted on (default: the donor)
   std::string handling, ide;
   std::string carcols_section, carcols_row;
 };
@@ -1136,8 +1276,10 @@ std::vector<Addon> FindAddons(const fs::path& app_addons) {
       if (key == "model") a.model = Lower(value);
       else if (key == "donor") a.donor = Lower(value);
       else if (key == "colours" || key == "colors") a.colours = Lower(value);
+      else if (key == "template") a.template_model = Lower(value);
     }
     if (a.colours.empty()) a.colours = a.donor;
+    if (a.template_model.empty()) a.template_model = a.donor;
     a.handling = ReadLineFile(dir / "handling.txt");
     a.ide = ReadLineFile(dir / "vehicles_ide.txt");
     TextLines carcols;
@@ -1164,15 +1306,300 @@ std::vector<Addon> FindAddons(const fs::path& app_addons) {
 
 }  // namespace
 
-void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) {
+// What the earlier FBI-slot releases wrote over the FBI, and the stock lines
+// to put back when no genuine backup is at hand.
+bool LegacyHandling(std::string_view line) {
+  const auto t = Tokens(line);
+  return t.size() > 1 && t[0] == "fbi" && t[1] == "9550.0";  // the Batmobile's mass
+}
+bool LegacyIde(std::string_view line) {
+  const auto t = Tokens(line);
+  return !t.empty() && t[0] == "fbi" && t.back().find("truckfirefx") != std::string::npos;
+}
+constexpr std::string_view kStockFbiHandling =
+    "FBI          1550.0  7.5   85\t0.0 0.0 -0.24  \t\t0.0  5  0.22  1.0 150.0\t0.25 0.65 0.7  "
+    "35.0\t\t1.35 1.10 13.5 0.15 0.48\t\t2.0  1.2  1.2  0.13 -0.13 0.0  0.5  \t\t1.0 1.0 0.8 "
+    "1.5 \t0.0  25000 \t\t440010\t\t1\t\t\t\t0";
+constexpr std::string_view kStockFbiIde =
+    "fbi,\t\tfbi,\t\tcar,\t\tFBI,\t\tFBI,\t\tVEH@STD,\tNULL,\t\t100,\t999,\t\t"
+    "0.2622, 0.2622,\t\t0,\t5,\t1.0\t-";
+
+// The template car's line in a vehicles.ide.
+std::string TemplateLine(const fs::path& file, const std::string& model) {
+  TextLines text;
+  if (!LoadText(file, text))
+    return {};
+  for (auto line : text.lines) {
+    if (FirstToken(line) != model)
+      continue;
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    return line;
+  }
+  return {};
+}
+
+// Everything one data file takes for the add-ons, chosen by its name: each
+// vehicle line right after its donor's line in vehicles.ide's cars section
+// (in the console's format), its handling line, and colour and camera rows
+// (its own or the donor's copied).
+bool EditDataFile(const fs::path& file, const std::vector<Addon>& addons) {
+  const std::string name = Lower(file.filename().string());
+  bool fine = true;
+  if (name == "handling.dat")
+    fine &= RestoreDonorLine(file, "fbi", LegacyHandling, kStockFbiHandling, "stock FBI handling");
+  if (name == "vehicles.ide")
+    fine &= RestoreDonorLine(file, "fbi", LegacyIde, kStockFbiIde, "stock FBI vehicle");
+  for (const auto& a : addons) {
+    const std::string label = a.model;
+    if (name == "handling.dat")
+      fine &= InsertAfterDonor(file, a.donor, a.handling, (label + " handling").c_str());
+    if (name == "vehicles.ide")
+      fine &= InsertAfterDonor(file, a.donor,
+                               ConsoleIdeLine(a.ide, TemplateLine(file, a.template_model)),
+                               (label + " vehicle").c_str());
+    if (name == "carcols.dat") {
+      // Its own colour row when it brought one and the section exists;
+      // otherwise a copy of a stock car's rows.
+      if (a.carcols_row.empty() ||
+          !InsertIntoSection(file, a.carcols_section, a.carcols_row, (label + " colours").c_str()))
+        fine &= CloneDonorLines(file, a.colours, a.model, (label + " colours").c_str());
+    }
+    // Camera offsets: the donor's (the converted car keeps its body shape).
+    if (name == "vehoff.csv")
+      fine &= CloneDonorLines(file, a.donor, a.model, (label + " camera offsets").c_str());
+  }
+  return fine;
+}
+
+// ---------------------------------------------------------------------------
+// The game reads vehicles.ide, handling.dat, carcols.dat and vehOff.csv from
+// common.rpf (default.dat names them on the common: device, which is the
+// archive), not from the copy the port's installer unpacked beside it:
+// console log 039's vehicle store held exactly the archive's 127 cars, and
+// the add-ons came out as plain props. So their lines go into a shadow
+// common.rpf, the way the port gives the game its own button prompts
+// (rpf_button_prompts.cpp): a copy of the archive with the edited files
+// appended and its table of contents pointed at them, with game:\common.rpf
+// redirected to the copy by the app (gta4_ps5_app.cpp). The installed archive
+// itself is never changed.
+// ---------------------------------------------------------------------------
+uint64_t Fnv1a(uint64_t h, const void* data, size_t size) {
+  const auto* p = static_cast<const uint8_t*>(data);
+  for (size_t i = 0; i < size; ++i) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+std::string Hex64(uint64_t v) {
+  static const char* kDigits = "0123456789abcdef";
+  std::string out(16, '0');
+  for (int i = 15; i >= 0; --i, v >>= 4)
+    out[size_t(i)] = kDigits[v & 15];
+  return out;
+}
+
+using EditedFile = std::pair<std::string, std::vector<uint8_t>>;  // path in the archive, contents
+
+bool WritePadding(std::fstream& out, uint64_t from, uint64_t to) {
+  if (to <= from)
+    return true;
+  std::vector<char> zeros(size_t(to - from), 0);
+  out.seekp(std::streamoff(from));
+  return bool(out.write(zeros.data(), std::streamsize(zeros.size())));
+}
+
+// Raw deflate, the way the archive stores its compressed files.
+bool Deflate(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+  z_stream z{};
+  if (deflateInit2(&z, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+    return false;
+  out.resize(deflateBound(&z, uLong(in.size())));
+  z.next_in = const_cast<Bytef*>(in.data());
+  z.avail_in = uInt(in.size());
+  z.next_out = out.data();
+  z.avail_out = uInt(out.size());
+  const int status = deflate(&z, Z_FINISH);
+  out.resize(out.size() - z.avail_out);
+  deflateEnd(&z);
+  return status == Z_STREAM_END;
+}
+
+bool WriteShadowRpf(const fs::path& source, const Rpf& rpf, const std::vector<uint8_t>& key,
+                    const std::vector<EditedFile>& files, const fs::path& destination) {
+  if (!CopyBytes(source, destination))
+    return false;
+  std::fstream out(destination, std::ios::binary | std::ios::in | std::ios::out);
+  if (!out)
+    return false;
+  std::vector<uint8_t> toc = rpf.toc;
+  uint64_t end = rpf.file_size;
+  for (const auto& [inner, data] : files) {
+    const RpfFile* f = rpf.Find(inner);
+    if (!f || f->resource)
+      return false;
+    // Stored the way the original was: compressed if it was.
+    std::vector<uint8_t> packed;
+    if (f->compressed && !Deflate(data, packed))
+      return false;
+    const std::vector<uint8_t>& stored = f->compressed ? packed : data;
+    const uint64_t at = (end + kRpfBlock - 1) / kRpfBlock * kRpfBlock;
+    if (at + stored.size() >= 0x80000000ull || !WritePadding(out, end, at))
+      return false;
+    out.seekp(std::streamoff(at));
+    if (!out.write(reinterpret_cast<const char*>(stored.data()), std::streamsize(stored.size())))
+      return false;
+    end = at + stored.size();
+    // Size, offset, size in the archive (with the compressed flag).
+    PutLe32(toc.data() + f->toc_offset + 4, uint32_t(data.size()));
+    PutLe32(toc.data() + f->toc_offset + 8, uint32_t(at));
+    PutLe32(toc.data() + f->toc_offset + 12,
+            uint32_t(stored.size()) | (f->compressed ? 0x40000000u : 0u));
+  }
+  if (!WritePadding(out, end, (end + kRpfBlock - 1) / kRpfBlock * kRpfBlock))
+    return false;
+  if (rpf.encrypted)
+    CryptBlocks(toc.data(), toc.size(), key, true);
+  out.seekp(std::streamoff(kRpfTocOffset));
+  out.write(reinterpret_cast<const char*>(toc.data()), std::streamsize(toc.size()));
+  out.flush();
+  return bool(out);
+}
+
+bool ShadowHolds(const fs::path& shadow, const std::vector<uint8_t>& key,
+                 const std::vector<EditedFile>& files) {
+  const auto rpf = ReadRpf(shadow, key);
+  if (!rpf)
+    return false;
+  for (const auto& [inner, data] : files) {
+    const RpfFile* f = rpf->Find(inner);
+    std::vector<uint8_t> now;
+    if (!f || !ReadRpfData(shadow, *f, now) || now != data)
+      return false;
+  }
+  return true;
+}
+
+std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& archive,
+                                           const std::vector<uint8_t>& key,
+                                           const std::vector<Addon>& addons, const fs::path& cache,
+                                           const std::string& label) {
   std::error_code ec;
-  if (!fs::exists(app_addons, ec)) return;  // nothing bundled
+  const Rpf* rpf = &archive;
+  const fs::path work = cache / "work" / label;
+  fs::create_directories(work, ec);
+  // The archive's own copies, edited exactly as the loose ones are.
+  std::vector<EditedFile> edited;
+  uint64_t fingerprint = Fnv1a(1469598103934665603ull, rpf->toc.data(), rpf->toc.size());
+  for (const std::string inner :
+       {"/data/vehicles.ide", "/data/handling.dat", "/data/carcols.dat", "/data/vehoff.csv"}) {
+    const RpfFile* f = rpf->Find(inner);
+    std::vector<uint8_t> original, now;
+    if (!f)
+      continue;
+    if (!ReadRpfData(source, *f, original)) {
+      REXLOG_WARN("gta4-addons: {} has an unreadable {}", source.string(), inner);
+      continue;
+    }
+    const fs::path file = work / fs::path(inner).filename();
+    fs::remove(file.string() + ".stock-bak", ec);
+    std::ofstream(file, std::ios::binary | std::ios::trunc)
+        .write(reinterpret_cast<const char*>(original.data()), std::streamsize(original.size()));
+    EditDataFile(file, addons);
+    if (!ReadAll(file, now))
+      continue;
+    fingerprint = Fnv1a(fingerprint, inner.data(), inner.size());
+    fingerprint = Fnv1a(fingerprint, now.data(), now.size());
+    if (now != original)
+      edited.emplace_back(inner, std::move(now));
+  }
+  if (edited.empty()) {
+    REXLOG_INFO("gta4-addons: {} needs no change", source.string());
+    return std::nullopt;
+  }
+  const fs::path destination = cache / (label + "-" + Hex64(fingerprint) + ".rpf");
+  if (fs::exists(destination, ec) && ShadowHolds(destination, key, edited)) {
+    REXLOG_INFO("gta4-addons: shadow of {} up to date: {}", source.string(), destination.string());
+    return destination;
+  }
+  // Only the current shadow is kept.
+  std::vector<fs::path> stale;
+  for (auto it = fs::directory_iterator(cache, ec); !ec && it != fs::directory_iterator();
+       it.increment(ec))
+    if (it->path().filename().string().rfind(label + "-", 0) == 0)
+      stale.push_back(it->path());
+  for (const auto& old : stale)
+    fs::remove(old, ec);
+  const fs::path temporary = destination.string() + ".tmp";
+  if (!WriteShadowRpf(source, *rpf, key, edited, temporary) ||
+      !ShadowHolds(temporary, key, edited)) {
+    fs::remove(temporary, ec);
+    REXLOG_WARN("gta4-addons: the shadow of {} could not be built in {}; the add-ons stay out "
+                "of the game's vehicle list", source.string(), cache.string());
+    return std::nullopt;
+  }
+  ec.clear();
+  fs::rename(temporary, destination, ec);
+  if (ec) {
+    REXLOG_WARN("gta4-addons: could not publish {}: {}", destination.string(), ec.message());
+    fs::remove(temporary, ec);
+    return std::nullopt;
+  }
+  REXLOG_INFO("gta4-addons: built a shadow of {} ({} file(s) with the add-ons' lines): {}",
+              source.string(), edited.size(), destination.string());
+  return destination;
+}
+
+// Every archive the game might read the data files from: common.rpf in the
+// game folder (game:\common.rpf), and one in the title update's folder
+// (update:\...) should it carry its own copy. Each that holds any of the
+// data files gets a shadow.
+std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<uint8_t>& key,
+                                        const std::vector<Addon>& addons, const fs::path& cache) {
+  std::vector<ShadowArchive> out;
+  std::error_code ec;
+  fs::create_directories(cache, ec);
+  struct Place {
+    fs::path folder;
+    std::string guest, label;
+  };
+  for (const Place& place : {Place{game, "game:\\", "game"}, Place{game / "update", "update:\\", "update"}}) {
+    std::vector<fs::path> archives;
+    for (auto it = fs::directory_iterator(place.folder, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+      std::error_code fec;
+      if (it->is_regular_file(fec) && Lower(it->path().extension().string()) == ".rpf")
+        archives.push_back(it->path());
+    }
+    ec.clear();
+    std::sort(archives.begin(), archives.end());
+    for (const auto& source : archives) {
+      const auto rpf = ReadRpf(source, key);
+      if (!rpf || (!rpf->Find("/data/vehicles.ide") && !rpf->Find("/data/handling.dat")))
+        continue;
+      const std::string name = source.filename().string();
+      const std::string label = place.label + "-" + Lower(source.stem().string());
+      if (const auto shadow = BuildShadowArchive(source, *rpf, key, addons, cache, label))
+        out.push_back({place.guest + name, *shadow});
+    }
+  }
+  if (out.empty())
+    REXLOG_INFO("gta4-addons: no archive with the data files to shadow; the game reads them loose");
+  return out;
+}
+
+std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
+                                          const fs::path& user_data_root) {
+  std::error_code ec;
+  if (!fs::exists(app_addons, ec)) return {};  // nothing bundled
   const std::vector<Addon> addons = FindAddons(app_addons);
-  if (addons.empty()) return;
+  if (addons.empty()) return {};
   const fs::path game = FindGameRoot(user_data_root);
   if (game.empty()) {
     REXLOG_INFO("gta4-addons: no installed game yet; add-ons wait for the next boot");
-    return;
+    return {};
   }
 
   // Every bundled car is its own vehicle beside the stock ones: no stock
@@ -1185,23 +1612,6 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   // own handling line, and colour/camera rows (its own or the donor's
   // copied). The .stock-bak files undo everything.
   //
-  // What the earlier FBI-slot releases wrote over the FBI, and the stock
-  // lines to put back when no genuine backup is at hand.
-  auto legacy_handling = [](std::string_view line) {
-    const auto t = Tokens(line);
-    return t.size() > 1 && t[0] == "fbi" && t[1] == "9550.0";  // the Batmobile's mass
-  };
-  auto legacy_ide = [](std::string_view line) {
-    const auto t = Tokens(line);
-    return !t.empty() && t[0] == "fbi" && t.back().find("truckfirefx") != std::string::npos;
-  };
-  constexpr std::string_view kStockFbiHandling =
-      "FBI          1550.0  7.5   85\t0.0 0.0 -0.24  \t\t0.0  5  0.22  1.0 150.0\t0.25 0.65 0.7  "
-      "35.0\t\t1.35 1.10 13.5 0.15 0.48\t\t2.0  1.2  1.2  0.13 -0.13 0.0  0.5  \t\t1.0 1.0 0.8 "
-      "1.5 \t0.0  25000 \t\t440010\t\t1\t\t\t\t0";
-  constexpr std::string_view kStockFbiIde =
-      "fbi,\t\tfbi,\t\tcar,\t\tFBI,\t\tFBI,\t\tVEH@STD,\tVEH@STD_LO4_LO4,\t100,\t999,\t\t"
-      "0.2622, 0.2622,\t\t0,\t5,\t1.0\t,0,\t-";
   bool ok = true;
   // Every copy of the data files the game might read - base, title update,
   // episodes - found by name in any letter case (the update's files keep the
@@ -1234,33 +1644,11 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       REXLOG_INFO("gta4-addons: data file {}", f.string());
   }
   for (const auto& file : data_files) {
-    const std::string name = Lower(file.filename().string());
     // Only the base game's own copies must take every edit; another copy (an
     // update's or an episode's, perhaps partial) takes what applies to it.
     std::error_code eq_ec;
     const bool base_copy = fs::equivalent(file.parent_path(), game / "common" / "data", eq_ec);
-    bool fine = true;
-    if (name == "handling.dat")
-      fine &= RestoreDonorLine(file, "fbi", legacy_handling, kStockFbiHandling, "stock FBI handling");
-    if (name == "vehicles.ide")
-      fine &= RestoreDonorLine(file, "fbi", legacy_ide, kStockFbiIde, "stock FBI vehicle");
-    for (const auto& a : addons) {
-      const std::string label = a.model;
-      if (name == "handling.dat")
-        fine &= InsertAfterDonor(file, a.donor, a.handling, (label + " handling").c_str());
-      if (name == "vehicles.ide")
-        fine &= InsertAfterDonor(file, a.donor, a.ide, (label + " vehicle").c_str());
-      if (name == "carcols.dat") {
-        // Its own colour row when it brought one and the section exists;
-        // otherwise a copy of a stock car's rows.
-        if (a.carcols_row.empty() ||
-            !InsertIntoSection(file, a.carcols_section, a.carcols_row, (label + " colours").c_str()))
-          fine &= CloneDonorLines(file, a.colours, a.model, (label + " colours").c_str());
-      }
-      // Camera offsets: the donor's (the converted car keeps its physics).
-      if (name == "vehoff.csv")
-        fine &= CloneDonorLines(file, a.donor, a.model, (label + " camera offsets").c_str());
-    }
+    const bool fine = EditDataFile(file, addons);
     if (base_copy)
       ok &= fine;
   }
@@ -1268,7 +1656,7 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   const fs::path img = FindVehiclesImg(game);
   if (img.empty()) {
     REXLOG_WARN("gta4-addons: vehicles.img was not found under {}", game.string());
-    return;
+    return {};
   }
   // The console's archives are usually encrypted with the game's own RPF
   // key, which the installer leaves in the game root.
@@ -1281,6 +1669,8 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       REXLOG_WARN("gta4-addons: {} has no aes_key.bin; only a plain archive can be edited",
                   game.string());
   }
+  // The data files the game actually reads: in common.rpf.
+  const auto shadows = BuildShadows(game, key, addons, game.parent_path() / "addon_cache");
   // Every vehicles.img in the installed tree: base, title update, episodes.
   // Whichever the game streams from must carry the cars, so all of them get
   // them, and each is named in the log with its size for diagnosis.
@@ -1305,7 +1695,7 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   }
   if (images.empty()) {
     REXLOG_WARN("gta4-addons: no vehicles.img anywhere under {}", game.string());
-    return;
+    return shadows;
   }
   // Reference files for the PC->360 converter (logs/export on the console):
   // stock cars to build add-ons on - the FBI, low sports cars, cars with
@@ -1338,6 +1728,7 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
     for (const auto& a : addons) names += (names.empty() ? "" : ", ") + a.model;
     REXLOG_INFO("gta4-addons: installed as their own vehicles: {}", names);
   }
+  return shadows;
 }
 
 }  // namespace gta4::addons

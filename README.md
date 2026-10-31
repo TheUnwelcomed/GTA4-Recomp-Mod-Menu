@@ -77,13 +77,26 @@ network session.
 - **Vehicle model store**: the game sizes it once at boot and adds cars without
   a capacity check, so the trainer gives it 64 more entries (`sub_821C83C0`),
   as the PC game's limit adjusters do.
+- **Where the add-ons' data goes**: the console game reads `vehicles.ide`,
+  `handling.dat`, `carcols.dat` and `vehOff.csv` from **inside `common.rpf`**
+  (`default.dat` names them on the `common:` device), not from the copy the
+  port's installer unpacks beside it, while `vehicles.img` lives loose on the
+  `platformimg:` device. So the installer writes the cars' lines (in the
+  console's 15-field `vehicles.ide` format, on each car's template line) into a
+  **shadow copy of `common.rpf`** in `LibertyRecomp/addon_cache`: the archive
+  with the edited files appended and its table of contents pointed at them.
+  The app redirects `game:\common.rpf` to it, the way the port already swaps in
+  its own `xbox360.rpf` for the PS5 button prompts. The installed archive is
+  never modified; deleting `addon_cache` restores the stock data.
+- **Self-measurement**: every 10 seconds the log gets a
+  `gta4-trainer: cost over 10.0 s` line with the trainer's own time per frame.
 
 ## Files
 
 | | |
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
-| `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch |
+| `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
 | `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI |

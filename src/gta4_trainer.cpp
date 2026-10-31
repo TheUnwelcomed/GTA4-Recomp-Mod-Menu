@@ -338,6 +338,7 @@ GameContext ReadContext(PPCContext& ctx, uint8_t* base) {
 // a different check and still counts.
 // ---------------------------------------------------------------------------
 std::atomic<bool> g_any_ride{false};
+std::atomic<uint32_t> g_ride_calls{0};  // checks scripts asked (for the cost line)
 
 enum class Kind : uint8_t { kOther, kRoad, kHeli, kBoat };
 
@@ -436,6 +437,7 @@ void NativeSayYes(uint8_t* base, uint32_t native) {
 // Runs the game's own handler; true when the option is on and it said no.
 bool GameSaidNo(RideHookId id, PPCContext& ctx, uint8_t* base) {
   const uint32_t native = ctx.r3.u32;
+  g_ride_calls.fetch_add(1, std::memory_order_relaxed);
   if (auto* original = g_ride_hooks[id].original_fn)
     original(ctx, base);
   if (!g_any_ride.load(std::memory_order_relaxed))
@@ -628,9 +630,26 @@ uint64_t g_last_gun_ms = 0;
 // Cheap gate for the script-thread hook: only when the trainer actually has
 // something to do does RunActions run (set by Poll, recomputed after a run).
 std::atomic<bool> g_has_work{false};
-// When the script-thread hook last ran a full pass (it fires once per script
-// thread, dozens of times a frame; one pass per frame is plenty).
-uint64_t g_last_run_ms = 0;
+// Frames, counted by the input poll (once per frame), so the script-thread
+// hook - which fires once per script thread, dozens of times a frame - runs
+// one pass per frame without reading a clock on every thread.
+std::atomic<uint32_t> g_frame{0};
+uint32_t g_last_run_frame = ~0u;
+// What the trainer itself costs, measured and logged every 10 seconds next to
+// the port's own timing lines: frames, passes, time spent in them and in the
+// menu poll, and how often scripts asked the mission-vehicle checks.
+struct TrainerCost {
+  uint64_t window_start_ms = 0;
+  uint32_t frames = 0, passes = 0;
+  uint64_t pass_ns = 0, poll_ns = 0, worst_pass_ns = 0;
+};
+TrainerCost g_cost;
+
+uint64_t NowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
 // Which bundled add-ons this install has, looked up once (IS_MODEL_IN_CDIMAGE)
 // so their watchers cost nothing on installs without them.
 bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false;
@@ -1944,7 +1963,33 @@ void ObserveNativeRegistration(PPCContext& context, uint8_t* base) {
 
 bool InputOwned() { return g_input_owned.load(std::memory_order_relaxed); }
 
+void PollMenu(PPCContext& ctx, uint8_t* base);
+
 void Poll(PPCContext& ctx, uint8_t* base) {
+  g_frame.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t start = NowNs();
+  PollMenu(ctx, base);
+  auto& c = g_cost;
+  c.poll_ns += NowNs() - start;
+  ++c.frames;
+  const uint64_t now = NowMs();
+  if (!c.window_start_ms) {
+    c = TrainerCost{};
+    c.window_start_ms = now;
+  } else if (now - c.window_start_ms >= 10000) {
+    const uint32_t frames = std::max<uint32_t>(c.frames, 1);
+    REXLOG_INFO("gta4-trainer: cost over {:.1f} s: {} frames, {} passes, {:.1f} us a frame "
+                "(passes {:.1f}, menu {:.1f}; worst pass {:.0f} us), {} mission-vehicle checks",
+                (now - c.window_start_ms) / 1000.0, c.frames, c.passes,
+                (c.pass_ns + c.poll_ns) / 1000.0 / frames, c.pass_ns / 1000.0 / frames,
+                c.poll_ns / 1000.0 / frames, c.worst_pass_ns / 1000.0,
+                g_ride_calls.exchange(0, std::memory_order_relaxed));
+    c = TrainerCost{};
+    c.window_start_ms = now;
+  }
+}
+
+void PollMenu(PPCContext& ctx, uint8_t* base) {
   // Input and menu only. This hook runs in the frame's input stage, where
   // the game's natives are NOT safe (the first spawn attempt from here page
   // faulted inside CREATE_CAR): everything that touches the game is queued
@@ -2344,22 +2389,26 @@ extern "C" void sub_82844200(PPCContext& ctx, uint8_t* base) {
   using namespace gta4::trainer;
   if (!g_has_work.load(std::memory_order_relaxed))
     return;
-  // At most one pass per frame, decided before any memory query: this hook
-  // fires once per script thread, dozens of times a frame, and each query
-  // takes the heap's lock.
-  const uint64_t now = NowMs();
-  if (now - g_last_run_ms < 8)
+  // At most one pass per frame, decided before any clock or memory query:
+  // this hook fires once per script thread, dozens of times a frame.
+  const uint32_t frame = g_frame.load(std::memory_order_relaxed);
+  if (frame == g_last_run_frame)
     return;
   static const bool executing_global_ok = Span(base, kExecutingThread, 4, true);
   if (!executing_global_ok || !thread || !Span(base, thread, 116))
     return;
-  g_last_run_ms = now;
+  g_last_run_frame = frame;
+  const uint64_t start = NowNs();
   const uint32_t previous = Read(base, kExecutingThread);
   if (!previous)
     Write(base, kExecutingThread, thread);
   RunActions(ctx, base);
   if (!previous)
     Write(base, kExecutingThread, previous);
+  const uint64_t spent = NowNs() - start;
+  g_cost.pass_ns += spent;
+  g_cost.worst_pass_ns = std::max(g_cost.worst_pass_ns, spent);
+  ++g_cost.passes;
 }
 
 // The vehicle model store is sized once at boot (sub_821C83C0) and the
