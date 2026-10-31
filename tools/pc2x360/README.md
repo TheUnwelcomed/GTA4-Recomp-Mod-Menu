@@ -37,11 +37,25 @@ does the same.
 PC file. It also checks GPU descriptors, bone bindings, shader inputs, and that
 every donor texture untiles back to its source.
 
-| car | result |
-|---|---|
-| Batmobile | 16/16 checks; output byte-identical across converter revisions |
-| F-16C (airtug slot on PC) | 16/16 checks: 3 LODs, 35,295 lod0 vertices |
-| Grotti Deimos GTS | 16/16 checks: 100 geometries, 30 textures |
+| car | template | result |
+|---|---|---|
+| Batmobile | FBI | 18/18 checks, 1,134 pointed objects within pages |
+| F-16C (airtug slot on PC) | FBI | 18/18 checks: 3 LODs, 35,295 lod0 vertices |
+| Grotti Deimos GTS | Banshee | 18/18 checks: lamp pods in 3 poses, 2,596 pointed objects within pages |
+
+### The page rule (the v1.7 crash)
+
+The console loads a resource's virtual segment in 4 KiB pages and translates
+pointers page by page, so **no object reached through a pointer may straddle
+a page boundary**. Rockstar's packer keeps to this: of 15 stock 360 cars, 11
+have no crossing at all. v1.7's converter appended its structures without
+regard to pages, so some geometry, vertex-buffer and index-buffer records
+straddled. On the console the part past the line came from the wrong memory,
+and the cars crashed on load or spawn: a vertex buffer's header pointer read
+as null in its placement, and a model whose fragment never attached left
+its vehicle structure null. The allocator now starts any object that would
+cross on the next page, and `validate_vehicle.py` checks every pointed
+object (records, arrays, strings, texture headers) against the rule.
 
 ### What the converter handles (beyond a like-for-like car)
 
@@ -60,6 +74,11 @@ every donor texture untiles back to its source.
   in-range ones are untouched).
 - **Textures borrowed from another stock car's dictionary** get a black
   stand-in. The shared `vehicle_generic_*` pack resolves the rest.
+- **Posed copies** (`poses` argument): geometry bound to a donor bone is
+  emitted once per pose, each copy bound to a template *extra* and turned
+  about X through the bone's origin. The game shows or hides extras, so the
+  trainer can switch poses. This is how the Deimos's pop-up headlights work:
+  it's built on the Banshee, which has extras 1, 2 and 5.
 
 ## Format notes (what was mapped)
 
@@ -89,7 +108,7 @@ every donor texture untiles back to its source.
 clang++ -std=c++20 -O2 -I<libmspack/mspack> xlzx.cpp lzxd.o -o xlzx   # port's patched libmspack
 ./xlzx unrsc fbi.xft work/fbi.xft.bin && ./xlzx unrsc fbi.xtd work/fbi.xtd.bin
 python3 identity_test.py <export_dir> <stock PC fbi dir> work         # prove the rules
-python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar    # convert (template: fbi)
+python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [poses]   # template: fbi
 python3 validate_vehicle.py out mycar car.wft car.wtd                 # structural checks
 ./xlzx rsc 112 <flags> out/mycar.xft.bin mycar.xft   # flags from out/flags.txt
 ./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd

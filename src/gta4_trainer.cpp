@@ -155,6 +155,9 @@ std::array g_natives = {
     NativeEntry{"SET_OBJECT_COLLISION"}, NativeEntry{"FREEZE_OBJECT_POSITION"},
     // Chaos: raining cars, gravity.
     NativeEntry{"SET_CAR_HEADING"}, NativeEntry{"SET_GRAVITY_OFF"},
+    // Grotti Deimos pop-up headlights (vehicle extras).
+    NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"GET_TIME_OF_DAY"},
+    NativeEntry{"GET_CURRENT_WEATHER"},
 };
 std::mutex g_native_mutex;
 
@@ -381,6 +384,7 @@ enum class Action {
   kToggleGod, kToggleNeverWanted, kWantedUp, kWantedDown, kWantedApply,
   kMoney, kHeal,
   kToggleVehicleGod, kRepair, kToggleWarpIn, kToggleGadgets, kToggleJet,
+  kCyclePopups, kTogglePopupTilt,
   kSpawnVehicle, kTeleportWaypoint, kTeleportPreset, kSavePosition, kLoadPosition,
   kHourUp, kHourDown, kMinuteUp, kMinuteDown, kTimeApply,
   kWeatherNext, kWeatherPrevious, kWeatherApply, kWeatherRelease,
@@ -403,12 +407,15 @@ struct State {
   bool gadgets = false;
   bool jet = true;  // F-16 flight and weapons, active only in the jet
   bool raining = false, gravity_off = false;
+  int popup_mode = 0;        // Deimos pop-ups: 0 with the lights, 1 always up, 2 always down
+  bool popup_flip = false;   // which way they tilt up (the model's two up poses)
   int wanted_target = 0;
   int hour = 12, minute = 0, weather = 1;
   // Async vehicle spawn.
   int pending_model = -1;
   uint32_t pending_hash = 0;
   int pending_ticks = 0;
+  uint64_t pending_since = 0;
   // Saved position.
   bool have_saved = false;
   float saved[3]{};
@@ -504,7 +511,13 @@ std::vector<Item> PageItems(const State& s) {
                           : "Batmobile Gadgets: OFF",
                 Action::kToggleGadgets},
                {s.jet ? "F-16 Flight and Weapons: ON" : "F-16 Flight and Weapons: OFF",
-                Action::kToggleJet}};
+                Action::kToggleJet},
+               {s.popup_mode == 0   ? "Deimos Pop-up Lights: With Headlights"
+                : s.popup_mode == 1 ? "Deimos Pop-up Lights: Always Up"
+                                    : "Deimos Pop-up Lights: Always Down",
+                Action::kCyclePopups},
+               {s.popup_flip ? "Deimos Pop-up Tilt: B" : "Deimos Pop-up Tilt: A",
+                Action::kTogglePopupTilt}};
       break;
     case Page::kSpawn:
       for (int i = 0; i < int(kVehicles.size()); ++i)
@@ -614,7 +627,136 @@ void StartSpawn(State& s, int model_index, PPCContext& ctx, uint8_t* base) {
   s.pending_model = model_index;
   s.pending_hash = hash;
   s.pending_ticks = 0;
-  Toast(s, std::string("Loading ") + std::string(choice.label) + "...");
+  s.pending_since = NowMs();
+  Toast(s, std::string("Loading ") + std::string(choice.label) + "...", 20000);
+}
+
+// ---------------------------------------------------------------------------
+// Spawn guard. The game's vehicle creation reads the model's vehicle
+// structure (model info +196; taken from the 50-entry VehicleStruct pool when
+// the model's fragment is attached at +8) without a null check, so a model
+// whose fragment never attached - an add-on file the engine did not accept -
+// crashed CREATE_CAR (console logs 030/032: sub_82380220 reading 0x164). The
+// trainer looks first and refuses instead. Model infos are found in the table
+// the game indexes by model index (0x82B3A1A0, signed 16-bit index); the
+// name-hash field inside them is located once from three stock models.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kModelInfoTable = 0x82B3A1A0;
+constexpr uint32_t kModelInfoCount = 32768;
+constexpr uint32_t kModelInfoFragType = 8, kModelInfoVehicleStructure = 196;
+constexpr uint32_t kVehicleStructPool = 0x8303206C;
+int g_hash_field = -2;  // -2: not looked for yet, -1: not found
+
+template <typename Visit>
+void ForEachModelInfo(uint8_t* base, Visit&& visit) {
+  constexpr uint32_t kChunk = 1024;
+  for (uint32_t first = 0; first < kModelInfoCount; first += kChunk) {
+    if (!Span(base, kModelInfoTable + first * 4, kChunk * 4))
+      continue;
+    for (uint32_t i = first; i < first + kChunk; ++i) {
+      const uint32_t info = Read(base, kModelInfoTable + i * 4);
+      if (info && Span(base, info, 256) && visit(info))
+        return;
+    }
+  }
+}
+
+uint32_t FindModelInfo(uint8_t* base, uint32_t hash) {
+  if (g_hash_field == -2) {
+    g_hash_field = -1;
+    const uint32_t probes[3] = {ModelHash("POLICE"), ModelHash("TAXI"), ModelHash("ADMIRAL")};
+    std::array<uint8_t, 64> hits{};
+    ForEachModelInfo(base, [&](uint32_t info) {
+      for (uint32_t k = 0; k < 64; ++k) {
+        const uint32_t v = Read(base, info + k * 4);
+        for (int p = 0; p < 3; ++p)
+          if (v == probes[p])
+            hits[k] |= uint8_t(1u << p);
+      }
+      return false;
+    });
+    for (int k = 0; k < 64; ++k)
+      if (hits[size_t(k)] == 7) {
+        g_hash_field = k * 4;
+        break;
+      }
+    REXLOG_INFO("gta4-trainer: model info name-hash field at +{}", g_hash_field);
+  }
+  if (g_hash_field < 0)
+    return 0;
+  uint32_t found = 0;
+  ForEachModelInfo(base, [&](uint32_t info) {
+    if (Read(base, info + uint32_t(g_hash_field)) != hash)
+      return false;
+    found = info;
+    return true;
+  });
+  return found;
+}
+
+// The Grotti Deimos's pop-up headlights: the model carries its lamp pods in
+// three poses on the template's extras (1: down, 2 and 5: up, tilted one way
+// or the other); the game shows or hides extras, the trainer picks the pose.
+// Up when the game would have headlights on (night, rain, fog), or as set.
+struct PopupState {
+  uint32_t car = 0;
+  int pose = 0;
+  bool in_car = false;
+  uint64_t next_probe = 0, next_check = 0;
+};
+PopupState g_popup;
+// The pop-ups need the player's car watched always (a cheap look every 250 ms
+// until the player sits in a Deimos), so the trainer stays awake for it.
+constexpr bool kWatchPopups = true;
+constexpr std::array<int, 3> kPopupExtras = {1, 2, 5};
+
+bool HeadlightsWanted(PPCContext& ctx, uint8_t* base) {
+  if (const auto t = Invoke(ctx, base, "GET_TIME_OF_DAY", {0, 0}, 0, 0, 2)) {
+    const uint32_t hour = t->words[0];
+    if (hour < 24 && (hour >= 20 || hour < 6))
+      return true;
+  }
+  if (const auto w = Invoke(ctx, base, "GET_CURRENT_WEATHER", {0}, 0)) {
+    const uint32_t weather = w->words[0];
+    if (weather >= 4 && weather <= 7)  // rain, drizzle, fog, lightning
+      return true;
+  }
+  return false;
+}
+
+int WantedPopupPose(PPCContext& ctx, uint8_t* base, const State& s) {
+  const bool up = s.popup_mode == 1 || (s.popup_mode == 0 && HeadlightsWanted(ctx, base));
+  return up ? (s.popup_flip ? 5 : 2) : 1;
+}
+
+void SetPopupPose(PPCContext& ctx, uint8_t* base, uint32_t car, int pose) {
+  for (const int extra : kPopupExtras)
+    Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, uint32_t(extra), extra == pose ? 0u : 1u});
+}
+
+void PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const State& s) {
+  const uint64_t now = NowMs();
+  if (!g_popup.in_car && now < g_popup.next_probe)
+    return;
+  g_popup.next_probe = now + 250;
+  if (g_popup.in_car && now < g_popup.next_check)
+    return;
+  g_popup.next_check = now + 250;
+  const auto car = CurrentVehicle(ctx, base, game);
+  std::optional<InvokeResult> model;
+  if (car)
+    model = Invoke(ctx, base, "GET_CAR_MODEL", {*car, 0}, 1);
+  if (!car || !model || model->words[0] != ModelHash("DEIMOS")) {
+    g_popup.in_car = false;
+    return;
+  }
+  const int pose = WantedPopupPose(ctx, base, s);
+  if (!g_popup.in_car || g_popup.car != *car || g_popup.pose != pose) {
+    SetPopupPose(ctx, base, *car, pose);
+    g_popup.car = *car;
+    g_popup.pose = pose;
+  }
+  g_popup.in_car = true;
 }
 
 void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s) {
@@ -626,11 +768,44 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
     return;
   }
   if (!loaded->r0()) {
-    if (++s.pending_ticks > 300) {  // ~5 seconds at 60
+    ++s.pending_ticks;
+    // Big models (the Batmobile is ~10 MB) can take a while to stream in.
+    if (NowMs() - s.pending_since > 20000) {
+      REXLOG_WARN("gta4-trainer: {} (hash {:08X}) did not load within 20 s",
+                  std::string(kVehicles[size_t(s.pending_model)].model), s.pending_hash);
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {s.pending_hash});
       s.pending_model = -1;
       Toast(s, "The model did not load.");
     }
     return;
+  }
+  // The guard: no car from a model whose vehicle data did not attach.
+  if (const uint32_t info = FindModelInfo(base, s.pending_hash)) {
+    const uint32_t fragment = Read(base, info + kModelInfoFragType);
+    const uint32_t structure = Read(base, info + kModelInfoVehicleStructure);
+    if (!fragment || !structure) {
+      uint32_t pool_words[6] = {};
+      if (Span(base, kVehicleStructPool, 4)) {
+        const uint32_t pool = Read(base, kVehicleStructPool);
+        if (pool && Span(base, pool, 24))
+          for (uint32_t k = 0; k < 6; ++k)
+            pool_words[k] = Read(base, pool + k * 4);
+      }
+      REXLOG_WARN("gta4-trainer: {} loaded without its vehicle data (model info {:08X}, "
+                  "fragment {:08X}, structure {:08X}; VehicleStruct pool +8={} +16={} +20={}); "
+                  "not spawning it",
+                  std::string(kVehicles[size_t(s.pending_model)].model), info, fragment, structure,
+                  pool_words[2], pool_words[4], pool_words[5]);
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {s.pending_hash});
+      Toast(s, std::string(kVehicles[size_t(s.pending_model)].label) +
+                   " did not load properly, so it was not spawned (details in the log).",
+            6000);
+      s.pending_model = -1;
+      return;
+    }
+  } else {
+    REXLOG_INFO("gta4-trainer: no model info found for {:08X}; spawning without the guard",
+                s.pending_hash);
   }
   // In front of the player (further for the long ones), slightly raised.
   const float ahead = kVehicles[size_t(s.pending_model)].distance;
@@ -642,6 +817,8 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   if (car && car->words[0]) {
     const uint32_t handle = car->words[0];
     Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {handle});
+    if (s.pending_hash == ModelHash("DEIMOS"))  // extras come up random: set the pods
+      SetPopupPose(ctx, base, handle, WantedPopupPose(ctx, base, s));
     if (s.warp_in)
       Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, handle});
     // Hand the car to the world so it cleans up like traffic.
@@ -1091,6 +1268,18 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       Invoke(ctx, base, "SET_GRAVITY_OFF", {s.gravity_off ? 1u : 0u});
       Toast(s, s.gravity_off ? "Gravity off: everything floats." : "Gravity back to normal.");
       break;
+    case Action::kCyclePopups:
+      s.popup_mode = (s.popup_mode + 1) % 3;
+      g_popup.in_car = false;  // re-apply on the next look
+      Toast(s, s.popup_mode == 0   ? "Deimos pop-ups follow the headlights."
+               : s.popup_mode == 1 ? "Deimos pop-ups always up."
+                                   : "Deimos pop-ups always down.");
+      break;
+    case Action::kTogglePopupTilt:
+      s.popup_flip = !s.popup_flip;
+      g_popup.in_car = false;
+      Toast(s, "Deimos pop-ups tilt the other way.");
+      break;
     case Action::kToggleJet:
       s.jet = !s.jet;
       Toast(s, s.jet ? "F-16 flight and weapons on." : "F-16 flight and weapons off.");
@@ -1392,7 +1581,7 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   g_pad.last = buttons;
   g_input_owned.store(s.open, std::memory_order_relaxed);
   if (!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets || s.jet ||
-      s.raining || s.pending_model >= 0)
+      s.raining || s.pending_model >= 0 || kWatchPopups)
     g_has_work.store(true, std::memory_order_relaxed);
 
   // Publishing builds strings; while the menu is shut and nothing is on
@@ -1424,8 +1613,9 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool missiles_live = std::any_of(g_jet.missiles.begin(), g_jet.missiles.end(),
                                          [](const Missile& m) { return m.live; });
   const bool jet_due = s.jet && (g_jet.in_jet || missiles_live || now >= g_jet.next_probe);
+  const bool popup_due = g_popup.in_car || now >= g_popup.next_probe;
   if (g_pending.empty() && !s.god && !s.never_wanted && !s.vehicle_god && !s.gadgets &&
-      s.pending_model < 0 && !jet_due && !s.raining)
+      s.pending_model < 0 && !jet_due && !s.raining && !popup_due)
     return;
 
   const GameContext game = ReadContext(ctx, base);
@@ -1490,12 +1680,13 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   g_vehicle_mask.store(vehicle_mask, std::memory_order_relaxed);
   if (s.raining)
     RainCars(ctx, base, game);
+  PopupLights(ctx, base, game, s);
   if (acted || s.toast_until > now) {
     const auto missing = MissingNatives();
     PublishDraw(s, g_natives.size(), missing.size(), missing);
   }
   g_has_work.store(!g_pending.empty() || s.god || s.never_wanted || s.vehicle_god ||
-                       s.gadgets || s.jet || s.raining || s.pending_model >= 0,
+                       s.gadgets || s.jet || s.raining || s.pending_model >= 0 || kWatchPopups,
                    std::memory_order_relaxed);
 }
 

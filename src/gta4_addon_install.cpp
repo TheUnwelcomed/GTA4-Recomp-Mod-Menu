@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <ostream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -499,7 +500,18 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
       matched[f] = true;
       const uint32_t stored =
           uint32_t(entries[i].used_blocks) * kBlock - uint32_t(entries[i].flags & 0x7FF);
-      if (stored == files[f].data.size()) {
+      // Current only when the stored bytes ARE the bundled file: a fixed
+      // conversion can keep the exact size of the one it replaces.
+      bool same = stored == files[f].data.size() && entries[i].word0 == files[f].rsc_flags;
+      if (same) {
+        std::vector<uint8_t> current(files[f].data.size());
+        in.clear();
+        in.seekg(std::streamoff(uint64_t(entries[i].offset_block) * kBlock));
+        same = bool(in.read(reinterpret_cast<char*>(current.data()),
+                            std::streamsize(current.size()))) &&
+               std::memcmp(current.data(), files[f].data.data(), current.size()) == 0;
+      }
+      if (same) {
         REXLOG_INFO("gta4-addons: {} already carries this {}", img.filename().string(),
                     files[f].name);
       } else {
@@ -743,6 +755,108 @@ void ExportReference(const fs::path& img, const std::vector<uint8_t>& key, const
   std::ofstream(out_dir / "exported.txt", std::ios::trunc) << wanted;
   REXLOG_INFO("gta4-addons: exported {} reference file(s) and the TOC listing to {}", exported,
               out_dir.string());
+}
+
+// Writes one archive's table of contents (name, flags, type, block, size)
+// to `listing`; false when it is not a readable IMG3.
+bool ListImg(const fs::path& img, const std::vector<uint8_t>& key, std::ostream& listing) {
+  std::ifstream in(img, std::ios::binary);
+  std::array<uint8_t, 0x14> header{};
+  if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
+    return false;
+  Endian e{};
+  bool encrypted = false;
+  auto match = [&](const uint8_t* p) {
+    uint32_t magic;
+    std::memcpy(&magic, p, 4);
+    if (magic == kImgMagic) { e.big = false; return true; }
+    if (Swap32(magic) == kImgMagic) { e.big = true; return true; }
+    return false;
+  };
+  if (!match(header.data())) {
+    std::array<uint8_t, 0x14> trial = header;
+    CryptBlocks(trial.data(), 16, key, false);
+    if (key.empty() || !match(trial.data()))
+      return false;
+    encrypted = true;
+    header = trial;
+  }
+  const uint32_t count = e.R32(header.data() + 8);
+  const uint32_t toc_size = e.R32(header.data() + 12);
+  if (count == 0 || count > 200000 || toc_size <= count * 16 || toc_size > (64u << 20))
+    return false;
+  std::vector<uint8_t> toc(toc_size);
+  if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
+    return false;
+  if (encrypted)
+    CryptBlocks(toc.data(), toc.size(), key, false);
+  listing << "# " << img.string() << " endian=" << (e.big ? "big" : "little")
+          << " encrypted=" << (encrypted ? 1 : 0) << " entries=" << count << "\n";
+  const char* names = reinterpret_cast<const char*>(toc.data()) + count * 16;
+  size_t names_len = toc_size - count * 16, cursor = 0;
+  for (uint32_t i = 0; i < count && cursor < names_len; ++i) {
+    const uint8_t* p = toc.data() + i * 16;
+    const size_t len = strnlen(names + cursor, names_len - cursor);
+    char line[200];
+    std::snprintf(line, sizeof(line), "%.*s %08X %08X %u %u %04X\n", int(len), names + cursor,
+                  e.R32(p), e.R32(p + 4), e.R32(p + 8), unsigned(e.R16(p + 12)),
+                  unsigned(e.R16(p + 14)));
+    listing << line;
+    cursor += len + 1;
+  }
+  return true;
+}
+
+// The game's layout for the converter (logs/export/index on the console):
+// every file under the install with its size, every archive's table of
+// contents, and copies of the small text data files (timecycle, materials,
+// weather, handling...). Once per version of this list.
+void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, const fs::path& out) {
+  std::error_code ec;
+  constexpr std::string_view kVersion = "index v1\n";
+  {
+    std::vector<uint8_t> marker;
+    if (ReadAll(out / "done.txt", marker) && std::string(marker.begin(), marker.end()) == kVersion)
+      return;
+  }
+  fs::create_directories(out / "data", ec);
+  fs::create_directories(out / "toc", ec);
+  std::ofstream files(out / "files.txt", std::ios::trunc);
+  int archives = 0, copied = 0;
+  std::vector<fs::path> roots = {game};
+  if (fs::exists(game.parent_path() / "dlc", ec))
+    roots.push_back(game.parent_path() / "dlc");
+  for (const auto& root : roots) {
+    for (auto it = fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      if (it.depth() > 8) { it.disable_recursion_pending(); continue; }
+      std::error_code fec;
+      if (!it->is_regular_file(fec))
+        continue;
+      const auto& path = it->path();
+      const uint64_t size = it->file_size(fec);
+      files << fs::relative(path, game.parent_path(), fec).string() << " " << size << "\n";
+      std::string ext = path.extension().string();
+      for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (ext == ".img") {
+        std::string flat = fs::relative(path, game.parent_path(), fec).string();
+        std::replace(flat.begin(), flat.end(), '/', '_');
+        std::ofstream listing(out / "toc" / (flat + ".txt"), std::ios::trunc);
+        archives += ListImg(path, key, listing) ? 1 : 0;
+      } else if ((ext == ".dat" || ext == ".ide" || ext == ".csv" || ext == ".txt" ||
+                  ext == ".xml" || ext == ".ipl") && size < (2u << 20) &&
+                 path.string().find(".stock-bak") == std::string::npos) {
+        std::string flat = fs::relative(path, game.parent_path(), fec).string();
+        std::replace(flat.begin(), flat.end(), '/', '_');
+        fs::copy_file(path, out / "data" / flat, fs::copy_options::overwrite_existing, fec);
+        copied += fec ? 0 : 1;
+      }
+    }
+  }
+  std::ofstream(out / "done.txt", std::ios::trunc) << kVersion;
+  REXLOG_INFO("gta4-addons: game index exported to {} ({} archives listed, {} data files)",
+              out.string(), archives, copied);
 }
 
 fs::path FindGameRoot(const fs::path& user_data_root) {
@@ -1021,6 +1135,7 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       refs.push_back(std::string(car) + ".xtd");
     }
     ExportReference(images.front(), key, app_addons.parent_path() / "logs" / "export", refs);
+    ExportGameIndex(game, key, app_addons.parent_path() / "logs" / "export" / "index");
   }
   std::vector<fs::path> files;
   for (const auto& a : addons) {

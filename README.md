@@ -34,7 +34,8 @@ dialogs use), so you won't punch anyone while navigating.
   - **Batmobile** (JulioNIB), with its gadgets re-created
   - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a nose cannon and
     missiles (the PC mod's Air Combat IV script, re-done in the trainer)
-  - **Grotti Deimos GTS** (harithd / Milcin)
+  - **Grotti Deimos GTS** (harithd / Milcin), with pop-up headlights switched
+    by the trainer
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets
 - **Time & Weather** — set the clock, force or release any weather
 - **Weapons** — full loadout with ammo, or strip all weapons

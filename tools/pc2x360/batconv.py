@@ -14,6 +14,7 @@ all other children. The donor provides: main drawable LODs, the wheel child's
 LODs, shaders (cloned from same-named 360 shaders, values by name hash),
 textures (merged into the .xtd), bounds, and bone transforms (by bone name).
 """
+import math
 import struct
 import sys
 
@@ -91,15 +92,28 @@ def encode_flags(template_flags, vsize, psize):
     return flags, vtot, ptot
 
 
-class Seg:
-    def __init__(self, data=b''):
-        self.buf = bytearray(data)
+# The console loads a resource's virtual segment page by page (4 KiB pages
+# for these files: 256 << the flags' shift), each page wherever the
+# allocator finds room, and translates every pointer page by page. So no
+# object reached through a pointer may straddle a page boundary - the rule
+# Rockstar's packer keeps (checked on 15 stock 360 cars). An object that
+# would cross starts on the next page instead.
+VIRTUAL_PAGE = 4096
 
-    def alloc(self, size, alignment=16):
-        pad = (-len(self.buf)) % alignment
-        self.buf += b'\0' * pad
+
+class Seg:
+    def __init__(self, data=b'', page=0):
+        self.buf = bytearray(data)
+        self.page = page  # 0: no paging rule (the physical segment is contiguous)
+
+    def alloc(self, size, alignment=16, phase=0):
+        """`phase`: the offset must equal this modulo `alignment`."""
         off = len(self.buf)
-        self.buf += b'\0' * size
+        off += (phase - off) % alignment
+        if self.page and size <= self.page and off // self.page != (off + size - 1) // self.page:
+            off = (off // self.page + 1) * self.page
+            off += (phase - off) % alignment
+        self.buf += b'\0' * (off + size - len(self.buf))
         return off
 
     def put(self, data, alignment=16):
@@ -232,12 +246,26 @@ def bones(r, skel):
 
 
 # ---------------------------------------------------------------- the transplant
+def rotate_x(p, pivot, degrees):
+    """Rotation about the X axis through `pivot` (+: forward rises)."""
+    a = math.radians(degrees)
+    c, s_ = math.cos(a), math.sin(a)
+    y, z = p[1] - pivot[1], p[2] - pivot[2]
+    return (p[0], pivot[1] + y * c - z * s_, pivot[2] + y * s_ + z * c)
+
+
 class Converter:
-    def __init__(self, tmpl, donor, log=print):
+    def __init__(self, tmpl, donor, log=print, variants=None):
+        """`variants`: {donor bone: [(template bone, degrees), ...]} - every
+        geometry bound to that donor bone is emitted once per entry, bound to
+        the template bone (an extra, say) and turned by `degrees` about X
+        through the donor bone's origin. The game switches extras on and off,
+        so the trainer can show one pose at a time (pop-up headlights)."""
+        self.variants = variants or {}
         self.t = tmpl     # rsc5.Resource (360, big-endian)
         self.d = donor    # rsc5.Resource (PC)
         self.log = log
-        self.v = Seg(tmpl.virt)   # template virt kept whole; new structs appended
+        self.v = Seg(tmpl.virt, VIRTUAL_PAGE)  # template virt kept whole; new structs appended
         self.p = Seg()            # physical rebuilt: donor geometry only
         self.tf = rsc5.read_fragtype(tmpl)
         self.df = rsc5.read_fragtype(donor)
@@ -304,6 +332,15 @@ class Converter:
         tbo, tnames = bones(t, tsk)
         dbo, dnames = bones(d, dsk)
         dindex = {n: i for i, n in enumerate(dnames)}
+        self.donor_bone_names = dnames
+        self.donor_bone_pos = [struct.unpack_from('<3f', d.virt, dbo + 0xE0 * i + 0x60)
+                               for i in range(len(dnames))]
+        self.template_bone_index = {n: i for i, n in enumerate(tnames)}
+        for donor_bone, poses in self.variants.items():
+            assert donor_bone in dindex, 'variant bone %s not in the donor' % donor_bone
+            for target, _ in poses:
+                assert target in self.template_bone_index, \
+                    'variant target %s not in the template' % target
         self.bone_map = {}
         self.unmapped = []
         for di, n in enumerate(dnames):
@@ -386,10 +423,10 @@ class Converter:
         # before its matrix), so every value keeps the template's position.
         tpo, tpt, tpn = t.vptr(ts + 0x14), t.vptr(ts + 0x24), t.vptr(ts + 0x34)
         size = t.u32(ts + 0x20)
-        pad = (tpo - len(v.buf)) % 64
-        v.buf += b'\0' * pad
-        po = len(v.buf)
-        v.buf += t.virt[tpo:tpo + size]
+        # Kept inside one page when it fits (each array and value in it is
+        # reached through its own pointer), with the template's 64-byte phase.
+        po = v.alloc(size, 64, tpo % 64)
+        v.buf[po:po + size] = t.virt[tpo:tpo + size]
         assert po % 64 == tpo % 64
         pt, pn = po + (tpt - tpo), po + (tpn - tpo)
         for i, p in enumerate(tparams):
@@ -447,7 +484,7 @@ class Converter:
         self.decls[usage] = off
         return off
 
-    def convert_geometry(self, g, need=0):
+    def convert_geometry(self, g, need=0, variant=None):
         """Donor geometry -> phys data (shared across LOD duplicates). `need`:
         the vertex inputs of the 360 shader it is drawn with; a texcoord set
         the donor lacks is filled from texcoord 0."""
@@ -460,6 +497,11 @@ class Converter:
         # index buffers always carry them.
         vcount = g['vertex_count'] or g['vb_count']
         vsrc = d.phys[g['vb_data'][1]:g['vb_data'][1] + vcount * g['vb_stride']]
+        bp = d.vptr(g['off'] + 56)
+        bc = d.u16(g['off'] + 62)
+        table = [d.u16(bp + 2 * k) for k in range(bc)] if bp is not None else []
+        if variant is not None:
+            vsrc = self._pose(vsrc, src_usage, vcount, g['vb_stride'], table, variant)
         vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
         if fill_uv:
             self.uv_filled += 1
@@ -469,9 +511,9 @@ class Converter:
         assert max(struct.unpack('<%dH' % n, isrc)) < vcount
         vo = self.p.put(vdata, 0x100)
         io = self.p.put(idata, 0x100)
-        bp = d.vptr(g['off'] + 56)
-        bc = d.u16(g['off'] + 62)
-        tb = [self.bone_map[d.u16(bp + 2 * k)] for k in range(bc)] if bp is not None else []
+        tb = [self.bone_map[b] for b in table]
+        if variant is not None:
+            tb = [variant[1] if b == variant[0] else t for b, t in zip(table, tb)]
         decl_src = d.vptr(g['vb_off'] + 16)
         return dict(usage=usage, stride=stride, vcount=vcount, icount=n,
                     vo=vo, vbytes=len(vdata), io=io, ibytes=len(idata), bones=tb,
@@ -546,6 +588,47 @@ class Converter:
         v.w16(coll + 6, len(models))
         return coll
 
+    def _pose(self, src, usage, count, stride, table, variant):
+        """Turns the vertices whose strongest bone is the variant's donor bone
+        (positions, normals, tangents, binormals) on the PC data."""
+        bone, _, degrees, pivot = variant
+        layout = dict(vertex_layout(usage, SIZE_PC)[0])
+        out = bytearray(src)
+        zero = (0.0, 0.0, 0.0)
+        for v in range(count):
+            b = v * stride
+            if 1 in layout and 2 in layout:
+                w = out[b + layout[1]:b + layout[1] + 4]
+                i = out[b + layout[2]:b + layout[2] + 4]
+                k = max(range(4), key=lambda j: w[j])
+                if k >= len(i) or i[k] >= len(table) or table[i[k]] != bone:
+                    continue
+            elif table != [bone]:
+                continue
+            p = struct.unpack_from('<3f', out, b + layout[0])
+            struct.pack_into('<3f', out, b + layout[0], *rotate_x(p, pivot, degrees))
+            for e in (3, 15):
+                if e in layout:
+                    n = struct.unpack_from('<3f', out, b + layout[e])
+                    struct.pack_into('<3f', out, b + layout[e], *rotate_x(n, zero, degrees))
+            if 14 in layout:
+                t = struct.unpack_from('<4f', out, b + layout[14])
+                struct.pack_into('<4f', out, b + layout[14], *rotate_x(t[:3], zero, degrees), t[3])
+        return bytes(out)
+
+    def _variants_for(self, gofs):
+        """[(variant or None)] per emitted copy of the donor geometry at gofs."""
+        d = self.d
+        bp = d.vptr(gofs + 56)
+        bc = d.u16(gofs + 62)
+        table = [d.u16(bp + 2 * k) for k in range(bc)] if bp is not None else []
+        for b in table:
+            name = self.donor_bone_names[b]
+            if name in self.variants:
+                pivot = self.donor_bone_pos[b]
+                return [(b, self.template_bone_index[t], deg, pivot) for t, deg in self.variants[name]]
+        return [None]
+
     def convert_drawable_lods(self, ddraw):
         out = []
         for coll in lod_collections(self.d, ddraw['off']):
@@ -557,9 +640,13 @@ class Converter:
                 gs = [g for g in rsc5.ptr_collection(self.d, m + 4) if g is not None]
                 smap_p = self.d.vptr(m + 16)
                 smap = [self.d.u16(smap_p + 2 * k) for k in range(len(gs))]
-                lod.append(([self.convert_geometry(rsc5.read_geometry(self.d, g),
-                                                   self.shader_usage[si])
-                             for g, si in zip(gs, smap)], smap))
+                geoms, shaders = [], []
+                for g, si in zip(gs, smap):
+                    for variant in self._variants_for(g):
+                        geoms.append(self.convert_geometry(rsc5.read_geometry(self.d, g),
+                                                           self.shader_usage[si], variant))
+                        shaders.append(si)
+                lod.append((geoms, shaders))
             out.append(lod)
         return out
 
@@ -651,7 +738,8 @@ def build_xtd(tmpl, sources, wanted, log=print):
     """Template 360 dictionary kept whole (its textures stay valid); donor
     textures appended; hash table and list rebuilt, sorted by hash."""
     t = tmpl
-    v = Seg(t.virt[:align(max(o for o in range(t.vsize) if t.virt[o] not in (0, 0xCD)) + 1, 16)])
+    v = Seg(t.virt[:align(max(o for o in range(t.vsize) if t.virt[o] not in (0, 0xCD)) + 1, 16)],
+            VIRTUAL_PAGE)
     p = Seg(t.phys)
     tl, n = t.vptr(24), t.u16(20)
     ht = t.vptr(16)

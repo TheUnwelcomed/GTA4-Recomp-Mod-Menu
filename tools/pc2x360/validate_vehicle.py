@@ -1,6 +1,9 @@
 """Structural validation of a converted 360 vehicle against its PC donor.
 
-usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd>
+usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd> [poses]
+
+poses: as given to run_vehicle.py; posed copies are checked against the
+donor's vertices turned by each pose's angle.
 """
 import os
 import struct
@@ -14,6 +17,11 @@ import rsc5  # noqa: E402
 import xenos  # noqa: E402
 
 out_dir, name, wft, wtd = sys.argv[1:5]
+POSES = {}
+if len(sys.argv) > 5:
+    _bones, _poses = sys.argv[5].split('=')
+    _parsed = [(t, float(deg)) for t, deg in (x.split('@') for x in _poses.split(','))]
+    POSES = {b: _parsed for b in _bones.split(',')}
 flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
 x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
 t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
@@ -46,7 +54,7 @@ if dwheel is None:
 def vcount(g):
     return g['vertex_count'] or g.get('vb_count', 0)
 _, xbones = batconv.bones(x, xd['skeleton_off'])
-_, dbones = batconv.bones(d, dd['skeleton_off'])
+dbo, dbones = batconv.bones(d, dd['skeleton_off'])
 
 # every geometry: pointers in range, descriptors consistent, decoded data == donor
 geo_out = [(g, 'main') for lod in xd['lods'] for m in lod for g in m['geometries']] + \
@@ -73,14 +81,37 @@ check('vertex/index GPU descriptors and declarations consistent', bad_desc == 0,
 check('index buffers: whole triangles, indices in range', bad_idx == 0, 'bad=%d' % bad_idx)
 
 # geometry counts and vertex totals equal the donor's (main LOD 0/1, wheel LOD 0/1)
-def counts(draw, n):
+def poses_of(r, g, bones):
+    bp = r.vptr(g['off'] + 56)
+    table = [r.u16(bp + 2 * k) for k in range(r.u16(g['off'] + 62))] if bp is not None else []
+    for b in table:
+        if bones[b] in POSES:
+            return [(b, deg) for _, deg in POSES[bones[b]]], table
+    return [None], table
+
+
+def expanded(r, lod, bones):
+    """Donor geometries of a LOD, each repeated once per pose."""
+    out = []
+    for m in lod:
+        for g in m['geometries']:
+            poses, table = poses_of(r, g, bones)
+            out += [(g, p, table) for p in poses]
+    return out
+
+
+def counts(draw, n, res=None, bones=None):
+    if res is not None:
+        return [(len(expanded(res, lod, bones)), sum(vcount(g) for g, _, _ in expanded(res, lod, bones)))
+                for lod in draw['lods'][:n]]
     return [(sum(len(m['geometries']) for m in lod), sum(vcount(g) for m in lod for g in m['geometries']))
             for lod in draw['lods'][:n]]
 nd = len(dd['lods'])
-check('main LOD geometry/vertex counts equal donor (%d donor LODs)' % nd,
-      counts(xd, min(nd, 3)) == counts(dd, min(nd, 3)), str(counts(xd, 3)))
+dcounts = counts(dd, 3, d, dbones)
+check('main LOD geometry/vertex counts equal donor (%d donor LODs%s)' % (nd, ', posed copies' if POSES else ''),
+      counts(xd, min(nd, 3)) == dcounts[:min(nd, 3)], str(counts(xd, 3)))
 if nd < 3:
-    check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', counts(xd, 3)[2] == counts(dd, nd)[-1])
+    check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', counts(xd, 3)[2] == dcounts[-1])
 dw = counts(dwheel, 2)
 check('wheel LOD geometry/vertex counts equal donor (a missing LOD repeats the last)',
       counts(xwheel, 2) == [dw[min(k, len(dw) - 1)] for k in range(len(counts(xwheel, 2)))] if dw else
@@ -113,11 +144,12 @@ def dec_pc(i, b):
 worst = {}
 bone_bad = 0
 pairs = list(zip([g for lod in xd['lods'][:3] for m in lod for g in m['geometries']],
-                 [g for lod in dd['lods'][:3] for m in lod for g in m['geometries']])) + \
+                 [e for lod in dd['lods'][:3] for e in expanded(d, lod, dbones)])) + \
     list(zip([g for lod in xwheel['lods'][:2] for m in lod for g in m['geometries']],
-             [g for lod in dwheel['lods'][:2] for m in lod for g in m['geometries']]))
+             [(g, None, []) for lod in dwheel['lods'][:2] for m in lod for g in m['geometries']]))
+pose_bad = 0
 uv_fill_bad = 0
-for xg, dg in pairs:
+for xg, (dg, pose, dtable) in pairs:
     u = dg['decl']['usage']
     xu = xg['decl']['usage']
     assert xu & u == u and not (xu & ~u & ~batconv.UV_BITS & 0xFFFF), (hex(xu), hex(u))
@@ -133,7 +165,9 @@ for xg, dg in pairs:
     dtab = [d.u16(dbp + 2 * k) for k in range(d.u16(dg['off'] + 62))] if dbp is not None else []
     for xi, di in zip(xtab, dtab):  # bone tables bind the same-named bones
         want = batconv.BONE_ALIAS.get(dbones[di], dbones[di])
-        if want not in xbones:
+        if pose is not None and di == pose[0]:
+            want = POSES[dbones[di]][[p for _, p in POSES[dbones[di]]].index(pose[1])][0]
+        elif want not in xbones:
             want = batconv.BONE_FALLBACK
         if xbones[xi] != want:
             bone_bad += 1
@@ -148,6 +182,15 @@ for xg, dg in pairs:
             else:
                 a = dec(i, bytes(x.phys[xb + v * xs + xo:xb + v * xs + xo + 4]))
             b = dec_pc(i, bytes(d.phys[db + v * ds + do:db + v * ds + do + batconv.SIZE_PC[i]]))
+            if pose is not None and i in (0, 3, 14, 15):
+                dl_at = dict(dl)
+                w = d.phys[db + v * ds + dl_at[1]:db + v * ds + dl_at[1] + 4]
+                ix = d.phys[db + v * ds + dl_at[2]:db + v * ds + dl_at[2] + 4]
+                k = max(range(4), key=lambda j: w[j])
+                if ix[k] < len(dtable) and dtable[ix[k]] == pose[0]:
+                    pivot = struct.unpack_from('<3f', d.virt, dbo + 0xE0 * pose[0] + 0x60)
+                    b = list(batconv.rotate_x(b, pivot if i == 0 else (0, 0, 0), pose[1]))
+                    b = list(struct.unpack('<3f', struct.pack('<3f', *b[:3])))  # stored as float32
             if i in (6, 7, 8, 9, 10, 11, 12, 13):
                 err = max(abs(p - q) / max(1.0, abs(q)) for p, q in zip(a, b))
             else:
@@ -219,5 +262,100 @@ for s in sg['shaders']:
             shader_tex.add(x.cstr(x.vptr(p['value'] + 20)).lower())
 unresolved = sorted(n for n in shader_tex if n not in dict_names and not n.startswith('vehicle_generic'))
 check('shader textures resolve (own dictionary or vehicle_generic shared pack)', not unresolved, str(unresolved))
+# The console loads the virtual segment page by page: no object reached
+# through a pointer may straddle a page (Rockstar's packer never does).
+def pointed_objects_xft(r):
+    out = []
+    def strlen(o):
+        e = r.virt.find(b'\0', o)
+        return (e - o + 1) if e >= 0 else 1
+    def draw(d):
+        for coll in batconv.lod_collections(r, d['off']):
+            if coll is None:
+                continue
+            out.append(('lod collection', coll, 8))
+            arr, n = r.vptr(coll), r.u16(coll + 4)
+            if arr is not None:
+                out.append(('model array', arr, 4 * n))
+        for lod in d['lods']:
+            for m in lod:
+                n = len(m['geometries'])
+                out.append(('model', m['off'], 0x20))
+                ga, sm = r.vptr(m['off'] + 4), r.vptr(m['off'] + 16)
+                if ga is not None:
+                    out.append(('geometry array', ga, 4 * n))
+                if sm is not None:
+                    out.append(('shader map', sm, 2 * n))
+                for g in m['geometries']:
+                    # Buffers and their GPU headers are separate objects, each
+                    # reached through its own pointer (+28 / +12).
+                    out.extend([('geometry', g['off'], 0x50), ('vertex buffer', g['vb_off'], 0x20),
+                                ('vertex buffer header', g['vb_off'] + 0x20, 0x20),
+                                ('index buffer', g['ib_off'], 0x10),
+                                ('index buffer header', g['ib_off'] + 0x10, 0x20)])
+                    dcl = r.vptr(g['vb_off'] + 16)
+                    if dcl is not None:
+                        out.append(('declaration', dcl, 16))
+                    bt = r.vptr(g['off'] + 56)
+                    if bt is not None:
+                        out.append(('bone table', bt, 2 * r.u16(g['off'] + 62)))
+        sg = d['shader_group']
+        if sg:
+            n = len(sg['shaders'])
+            for k, size in ((8, 4 * n), (64, 4 * n), (72, 4 * n)):
+                a = r.vptr(sg['off'] + k)
+                if a is not None:
+                    out.append(('shader group array', a, size))
+            for sh in sg['shaders']:
+                out.append(('shader', sh['off'], 0x60))
+                for k in (0x14, 0x24, 0x34):
+                    a = r.vptr(sh['off'] + k)
+                    cnt = r.u32(sh['off'] + 0x1C)
+                    if a is not None:
+                        out.append(('shader param array', a, {0x14: 4, 0x24: 1, 0x34: 4}[k] * cnt))
+                for k in (0x44, 0x48):
+                    a = r.vptr(sh['off'] + k)
+                    if a is not None:
+                        out.append(('shader name', a, strlen(a)))
+                for p in batconv.shader_params(r, sh['off']):
+                    if p['value'] is None:
+                        continue
+                    if p['type'] == 0:
+                        out.append(('texture reference', p['value'], 32))
+                        nm = r.vptr(p['value'] + 20)
+                        if nm is not None:
+                            out.append(('texture name', nm, strlen(nm)))
+                    else:
+                        out.append(('shader value', p['value'], 16 * p['type']))
+    draw(xd)
+    for c in xf['children']:
+        if c['drawable'] and c['drawable']['lods']:
+            draw(c['drawable'])
+    return out
+
+
+def pointed_objects_xtd(t):
+    out = []
+    tl, n = t.vptr(24), t.u16(20)
+    out.extend([('texture hash table', t.vptr(16), 4 * n), ('texture list', tl, 4 * n)])
+    for i in range(n):
+        info = t.vptr(tl + 4 * i)
+        out.append(('texture info', info, 0x40))
+        out.append(('texture header', t.vptr(info + 24), 0x34))
+        nm = t.vptr(info + 20)
+        e = t.virt.find(b'\0', nm)
+        out.append(('texture name', nm, e - nm + 1))
+    return out
+
+
+for label, res, objs in (('model', x, pointed_objects_xft(x)), ('textures', t, pointed_objects_xtd(t))):
+    # At least 4 KiB: stock texture dictionaries (flags of 256-byte units)
+    # cross 256-byte lines freely, but no stock car crosses a 4 KiB one.
+    page = max(4096, 256 << ((res.flags >> 11) & 0xF))
+    crossing = [(k, o, n) for k, o, n in objs if n and o // page != (o + n - 1) // page]
+    kinds = sorted({k for k, _, _ in crossing})
+    check('%s: %d pointed objects, none straddles a %d-byte page' % (label, len(objs), page),
+          not crossing, ', '.join(kinds))
+
 print('FAILURES: %d' % fails)
 sys.exit(1 if fails else 0)

@@ -2,16 +2,20 @@
 stock 360 car from your console as the template (physics, collision, the
 fragment layout).
 
-usage: run_vehicle.py <export_dir> <work_dir> <pc.wft> <pc.wtd> <out_dir> <name> [template]
+usage: run_vehicle.py <export_dir> <work_dir> <pc.wft> <pc.wtd> <out_dir> <name> [template] [poses]
 
   export_dir  the stock 360 files exported by the trainer build (logs/export)
   work_dir    their decompressed bodies (xlzx unrsc <template>.xft work/<template>.xft.bin)
   name        the add-on's model name: writes <name>.xft.bin / <name>.xtd.bin and
               flags.txt (the RSC flags for xlzx rsc)
   template    the stock car to build on (default: fbi)
+  poses       optional: geometry bound to a donor bone emitted once per pose,
+              each bound to a template extra and turned about X, e.g.
+              "misc_headlight_l,misc_headlight_r=extra_1@0,extra_2@30,extra_5@-30"
 """
 import os
 import struct
+import json
 import sys
 import time
 import zlib
@@ -30,6 +34,11 @@ def load_pc_wtd(path):
 def main():
     export, work, wft, wtd, out, name = sys.argv[1:7]
     template = sys.argv[7] if len(sys.argv) > 7 else 'fbi'
+    variants = {}
+    if len(sys.argv) > 8:
+        bones, poses = sys.argv[8].split('=')
+        parsed = [(t, float(deg)) for t, deg in (x.split('@') for x in poses.split(','))]
+        variants = {b: parsed for b in bones.split(',')}
     os.makedirs(out, exist_ok=True)
     t0 = time.time()
 
@@ -40,7 +49,7 @@ def main():
     dft = rsc5.Resource.pc(wft)
     dtd = load_pc_wtd(wtd)
 
-    conv = batconv.Converter(tx, dft)
+    conv = batconv.Converter(tx, dft, variants=variants)
     xft_flags, xft_body = conv.run()
     for sps, tsps in conv.shader_report:
         if sps != tsps:
