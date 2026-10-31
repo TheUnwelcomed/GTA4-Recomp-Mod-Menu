@@ -1,0 +1,3 @@
+Add-on install: nothing stock was changed. To uninstall, delete the two added
+lines (handling.dat: the BATMOBILE line; vehicles.ide: the batmobile line) and
+restore your backup vehicles.img.
