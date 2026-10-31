@@ -27,7 +27,8 @@ dialogs use), so you won't punch anyone while navigating.
 - **Vehicle** — vehicle god mode, repair, warp-into-spawned-car toggle
 - **Car Spawning** — 30 cars, bikes and helicopters, spawned in front of you;
   episode-only vehicles are detected and refused outside their episode;
-  includes a **Batmobile** entry (see `batmobile/README.md`)
+  includes the **Batmobile**, converted to the 360 format and installed
+  automatically (see `batmobile/README.md`)
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets
 - **Time & Weather** — set the clock, force or release any weather
 - **Weapons** — full loadout with ammo, or strip all weapons
@@ -53,8 +54,10 @@ network session.
 | | |
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
+| `src/gta4_addon_install.h` / `.cpp` | installs bundled add-ons (the Batmobile) into the game at launch |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `batmobile/` | the Batmobile car mod, adapted (read its README) |
+| `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI |
 
 ## Building
 

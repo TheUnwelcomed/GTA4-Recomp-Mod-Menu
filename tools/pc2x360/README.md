@@ -1,0 +1,78 @@
+# pc2x360 — PC GTA IV vehicle → Xbox 360 vehicle converter
+
+The PS5 port runs the **Xbox 360** build of GTA IV, which streams `.xft`/`.xtd`
+models (big-endian structures, Xenos GPU formats, XMem LZX compression). PC car
+mods ship `.wft`/`.wtd`. This converts a PC car into the 360 format by
+**transplanting** it into a stock 360 car of your own game:
+
+- kept from the stock 360 car: physics/collision, fragment groups, skeleton
+  topology, the non-wheel children;
+- taken from the PC car: the body (all LODs), the wheel, shaders (cloned from
+  the same-named 360 shaders, values transferred by parameter name hash),
+  textures (merged into the `.xtd`), bounds, and bone positions (by bone name).
+
+## Verified against ground truth
+
+Every format rule here was checked against a car that exists on both
+platforms — the stock FBI Buffalo, PC vs the 360 files exported from a console.
+`identity_test.py` converts the stock **PC** FBI into the stock **360** FBI and
+compares with the real 360 file:
+
+| check | result |
+|---|---|
+| skeleton: 58 bones + 3 × 58 transform matrices | byte-identical |
+| fragment and drawable bounds | byte-identical |
+| all 9 shaders: parameter values and texture names | byte-identical |
+| lod0 vertices (position, normal, tangent, UVs, colour, weighted bones) | 13,913 / 13,913 identical |
+| GPU vertex/index descriptors | consistent |
+
+Texture conversion (8-in-16 endian swap + Xenos 2D tiling) reproduces the 360
+FBI's texture blocks exactly at every mip level. Rockstar's tools truncate
+toward zero when packing normals (`Dec3N`) and UVs (half floats); the converter
+does the same.
+
+## Format notes (what was mapped)
+
+- RSC5 360: header big-endian; body = `0x0FF512EF`, u32be length, XMem LZX
+  frames (`u16be csize` per 32 KiB frame, `0xFF u16be usize u16be csize` for a
+  short one). `xlzx` decodes with the port's patched libmspack and encodes with
+  LZX *uncompressed* blocks; every write is round-tripped before it is saved.
+- Vertex elements (360): position f32×3 BE; normal/tangent/binormal `Dec3N`
+  (10:10:10, /511, tangent sign in the top 2 bits); UVs half×2 (u high, v low);
+  weights/indices/colour byte-reversed dwords. Declaration types word
+  `0xAA1111111199A996`.
+- Vertex/index buffers carry an embedded D3D resource header with the Xenos
+  fetch constant (vertex: address|3, size in dwords, endian 8in32).
+- Shaders: 0x60-byte header; parameter block (offsets | types | name hashes |
+  values) replicated byte-for-byte from the 360 template; the type byte is the
+  vec4 count (1, 4 = matrix, 15 = array); texture parameters reference textures
+  by name. The shader group stores per-shader required vertex inputs.
+- Textures: 0x40-byte info → D3D texture header (Xenos fetch constant: format,
+  pitch, 4 KiB-page base address, mip address); tiled data padded to 32×32
+  blocks per level. Dictionary hash = Jenkins one-at-a-time of the lowercase
+  bare name; hash table sorted.
+- Skeleton bones are 0xE0 bytes, identical layout on both platforms.
+
+## Use
+
+```
+clang++ -std=c++20 -O2 -I<libmspack/mspack> xlzx.cpp lzxd.o -o xlzx   # port's patched libmspack
+./xlzx unrsc fbi.xft work/fbi.xft.bin && ./xlzx unrsc fbi.xtd work/fbi.xtd.bin
+python3 identity_test.py <export_dir> <stock PC fbi dir> work      # prove the rules
+python3 run_batmobile.py <export_dir> <PC car dir> work out        # convert
+python3 validate_output.py out <PC car dir>                        # 15 structural checks
+./xlzx rsc 112 <flags> out/fbi.xft.bin fbi.xft  # flags from out/flags.txt
+./xlzx rsc 7   <flags> out/fbi.xtd.bin fbi.xtd
+```
+
+The stock 360 files come from your own console: the trainer build exports
+`fbi.xft`/`fbi.xtd` to `/data/homebrew/PPSA94004/logs/export/` on launch.
+Converted files are not committed here — they contain data from the game.
+
+## Known limits
+
+- Collision stays the template car's (the Batmobile collides like a Buffalo).
+- Template bones the donor lacks (rear doors, sirens, …) keep their position;
+  nothing of the donor is drawn there.
+- Donor textures must be DXT1/3/5; mip chains beyond level 0 are not emitted
+  (the Batmobile has none).

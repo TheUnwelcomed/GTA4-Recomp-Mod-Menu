@@ -1,60 +1,52 @@
-# Batmobile (JulioNIB) on the PS5 port — as an add-on car
+# Batmobile (JulioNIB) on the PS5 port
 
-Installed as a **new vehicle** named `batmobile`: every stock car, the FBI Buffalo
-included, stays exactly as it is. The trainer's Car Spawning page has a
-**"Batmobile (add-on)"** entry that spawns it once installed — until then the entry
-answers "not installed" and does nothing.
+The Batmobile is **converted to the Xbox 360 format** the port runs, and the app
+installs it by itself: copy the release's `PPSA94004` folder over yours and
+launch. The trainer's **Car Spawning → Batmobile** entry spawns it.
 
-The original mod has two halves:
+## How it gets there
 
-| Part | On this port |
+1. The PS5 port runs the 360 build of GTA IV, which streams `.xft`/`.xtd` model
+   files. The mod ships PC `.wft`/`.wtd` files, so earlier versions that
+   installed the PC files spawned a stock car: the game never looked them up.
+2. `tools/pc2x360` converts the PC Batmobile into the 360 format by
+   transplanting it into the stock 360 FBI car from your own console (exported
+   by the trainer build to `logs/export/`). Every format rule was verified
+   against the stock FBI, which exists on both platforms — see that folder's
+   README for the results.
+3. On launch the app's add-on installer (`src/gta4_addon_install.cpp`) puts the
+   converted `fbi.xft`/`fbi.xtd` into `vehicles.img` (decrypting and
+   re-encrypting its table with the game's own key) and applies the
+   Batmobile's handling line to the FBI slot. First launch rewrites the archive
+   once; later launches change nothing.
+
+The converted files are bundled in the release zip only (they contain data
+from the game, so they are not committed here).
+
+## What you get / known limits
+
+| | |
 |---|---|
-| The car (`batmobile.wft` / `batmobile.wtd` + two text lines) | Installable (model files experimental, below) |
-| The gadget script (ScriptHookDotNet `.net.dll`s) | **Cannot run** — Windows x86 .NET plugins. The trainer re-creates the essentials natively instead: with *Vehicle Options → Batmobile Gadgets* on, while driving the Batmobile, **d-pad left** fires the front guns (explosive volley ahead) and **holding d-pad right** is the afterburner. |
+| Body, all LODs, wheels, textures | the Batmobile's |
+| Handling | the Batmobile mod's (heavy, 9,550 kg) |
+| Collision | the FBI Buffalo's (it collides like a Buffalo-sized car) |
+| Parts the Batmobile has no mesh for (rear doors, sirens) | invisible |
+| Gadget script (ScriptHookDotNet `.net.dll`s) | cannot run on the port — the trainer re-creates the essentials: *Vehicle Options → Batmobile Gadgets*, then in the car **d-pad left** fires the front guns, **hold d-pad right** for the afterburner |
+| FBI cars in 4-star+ chases | are Batmobiles too (it takes the FBI slot) |
 
-## 1. Register the vehicle (text edits — these definitely work)
+The model is about 7× the polygons of a stock car. If the engine refuses to
+stream it, the trainer says "The model did not load." — nothing crashes.
 
-The port reads these as loose files; edit them over FTP, after backing both up:
+## Undo
 
-```
-/data/homebrew/PPSA94004/game/common/data/handling.dat
-/data/homebrew/PPSA94004/game/common/data/vehicles.ide
-```
+Next to `vehicles.img`, `handling.dat` and `vehicles.ide` the installer leaves
+`.stock-bak` copies made before its first change. Put those back (and remove
+`addons/batmobile` from the app folder) for the stock FBI.
 
-- **Append** the line in `handling-batmobile.txt` to `handling.dat`, near the other
-  handling lines (do not touch the existing `FBI` line).
-- **Append** the line in `vehicles-ide-batmobile.txt` to `vehicles.ide` inside the
-  `cars` section, beside the other car lines.
+## Files here
 
-Spawn frequency in that line is 10 with no special flags, so ambient traffic won't
-be full of Batmobiles; the trainer spawns it on demand.
-
-## 2. The model files (experimental)
-
-`batmobile.wft` / `batmobile.wtd` must be **added** (not replacing anything) to the
-vehicles image:
-
-1. FTP `game/xbox360/models/cdimages/vehicles.img` (if there is no `xbox360`
-   folder, look under `game/pc/models/cdimages/`) to your computer. **Keep an
-   untouched copy.**
-2. On PC, open it with SparkIV or OpenIV, **add** `batmobile.wft` and
-   `batmobile.wtd` from this folder, rebuild.
-3. FTP it back and launch. Spawn it from the trainer.
-
-**The honest caveat:** these two files are PC-format RAGE resources (`RSC\x05`,
-little-endian; the .wft is a 16 MB fragment). This port runs the Xbox 360 build,
-whose resource layout is big-endian, so the engine may refuse them — an invisible
-car or a crash at spawn means exactly that. Because this is an add-on, recovery is
-trivial: restore the backup `vehicles.img` (or just never press the spawn entry).
-Everything else — the registration lines, the trainer entry, the gadgets — stays
-harmless either way.
-
-## Why there's no PC→360 converter in this folder
-
-Converting means re-serializing the whole model graph big-endian and re-encoding
-vertex, index and texture streams; no public tool does it for IV, and a hand-written
-one can't be validated without crash-testing on a console. Two real routes, both
-iterative projects: (1) a converter developed against your console with a
-spawn → log → fix loop, or (2) teaching the port's loaders to accept PC-endian
-resources — the cleaner fix (the port already runs on x86), which would open the
-whole PC car-mod catalog, not just this one.
+| | |
+|---|---|
+| `batmobile.wft` / `batmobile.wtd` | the mod's PC model and textures (the converter's input, as `fbi.wft`/`fbi.wtd`) |
+| `handling_fbi.txt` / `vehicles_ide_fbi.txt` | the mod's lines for the FBI slot (bundled with the app) |
+| `restore_fbi.txt` | the stock FBI lines |

@@ -639,11 +639,13 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
     return;
   }
 
-  // IV's vehicle registry is a fixed table (a brand-new vehicle line is
-  // ignored, as the earlier add-on attempt proved on the console), so the
-  // Batmobile ships the way its author shipped it on PC: in the FBI car's
-  // slot. The FBI only appears in high-wanted chases, so ordinary traffic
-  // is untouched; restore_fbi.txt and the .stock-bak files undo everything.
+  // The Batmobile takes the FBI car's slot, as its author shipped it on PC.
+  // Its model files are converted 360 resources (fbi.xft / fbi.xtd, made by
+  // the PC-to-360 converter in the mod's repo, validated against the stock
+  // 360 FBI): the 360 build streams .xft/.xtd, so PC .wft/.wtd files are
+  // never looked up - which is why the earlier PC-file attempts showed a
+  // stock car. The FBI only appears in high-wanted chases, so ordinary
+  // traffic is untouched; the .stock-bak files undo everything.
   const std::string handling = ReadLineFile(batmobile / "handling_fbi.txt");
   const std::string ide = ReadLineFile(batmobile / "vehicles_ide_fbi.txt");
   bool ok = true;
@@ -724,7 +726,7 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   for (const auto& image : images) {
     REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
                 uint64_t(fs::file_size(image, ec)));
-    any |= InjectIntoImg(image, key, {batmobile / "fbi.wft", batmobile / "fbi.wtd"},
+    any |= InjectIntoImg(image, key, {batmobile / "fbi.xft", batmobile / "fbi.xtd"},
                          /*append_missing=*/false);
   }
   if (any && ok)
