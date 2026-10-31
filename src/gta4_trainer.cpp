@@ -230,46 +230,56 @@ constexpr uint32_t kPedOffset = 1400;
 
 GameContext ReadContext(PPCContext& ctx, uint8_t* base) {
   GameContext out;
-  const auto playing = Invoke(ctx, base, "IS_PLAYER_PLAYING",
-                              {Invoke(ctx, base, "GET_PLAYER_ID").value_or(InvokeResult{}).r0()});
+  // The world gate comes FIRST, as raw span-checked reads, before any native
+  // is called: the player natives dereference the player info without a null
+  // check, so calling them during boot or loading (the info table is still
+  // empty) is the crash the first console run hit (a page fault at
+  // info+~0x4CE, IS_PLAYER_PLAYING reading a null info's state field). The
+  // same chain the port's DualSense feedback walks, with the same checks.
+  if (!Span(base, kPrimaryPlayer, 4))
+    return out;
+  const uint32_t index = Read(base, kPrimaryPlayer);
+  if (index >= 16 || !Span(base, kPlayerInfoTable + index * 4, 4))
+    return out;
+  const uint32_t info = Read(base, kPlayerInfoTable + index * 4);
+  if (!info || !Span(base, info, kPedOffset + 4))
+    return out;
+  // info+1232 is the player state; 2 means playing (gta4_sony_feedback.cpp).
+  if (Read(base, info + 1232) != 2)
+    return out;
+  const uint32_t ped_address = Read(base, info + kPedOffset);
+  if (!ped_address || !Span(base, ped_address, 2692))
+    return out;
+  out.ped_address = ped_address;
+  const uint32_t matrix = Read(base, ped_address + kPedMatrix);
+  uint32_t position = 0, forward = 0;
+  if (matrix && Span(base, matrix, 64)) {
+    position = matrix + kMatrixPosition;
+    forward = matrix + kMatrixForward;
+  } else if (!matrix) {
+    position = ped_address + kPedInline;
+  }
+  for (int axis = 0; axis < 3; ++axis) {
+    if (position)
+      out.position[axis] = ReadFloat(base, position + uint32_t(axis) * 4);
+    if (forward)
+      out.forward[axis] = ReadFloat(base, forward + uint32_t(axis) * 4);
+  }
+  // Only now, with a live player behind them, the natives.
   const auto player = Invoke(ctx, base, "GET_PLAYER_ID");
-  if (!player || !playing || !playing->r0())
+  if (!player)
+    return out;
+  const auto playing = Invoke(ctx, base, "IS_PLAYER_PLAYING", {player->r0()});
+  if (!playing || !playing->r0())
     return out;
   out.player = player->r0();
   const auto ped = Invoke(ctx, base, "GET_PLAYER_CHAR", {out.player, 0}, 1);
-  if (!ped)
+  if (!ped || !ped->words[0])
     return out;
   out.ped = ped->words[0];
   const auto online = Invoke(ctx, base, "IS_NETWORK_GAME_RUNNING");
   out.online = online && online->r0() != 0;
-  // CPed address for the matrix read (display/spawn placement only).
-  if (Span(base, kPrimaryPlayer, 4)) {
-    const uint32_t index = Read(base, kPrimaryPlayer);
-    if (index < 16 && Span(base, kPlayerInfoTable + index * 4, 4)) {
-      const uint32_t info = Read(base, kPlayerInfoTable + index * 4);
-      if (Span(base, info, kPedOffset + 4)) {
-        const uint32_t ped_address = Read(base, info + kPedOffset);
-        if (Span(base, ped_address, 2692)) {
-          out.ped_address = ped_address;
-          const uint32_t matrix = Read(base, ped_address + kPedMatrix);
-          uint32_t position = 0, forward = 0;
-          if (matrix && Span(base, matrix, 64)) {
-            position = matrix + kMatrixPosition;
-            forward = matrix + kMatrixForward;
-          } else if (!matrix) {
-            position = ped_address + kPedInline;
-          }
-          for (int axis = 0; axis < 3; ++axis) {
-            if (position)
-              out.position[axis] = ReadFloat(base, position + uint32_t(axis) * 4);
-            if (forward)
-              out.forward[axis] = ReadFloat(base, forward + uint32_t(axis) * 4);
-          }
-        }
-      }
-    }
-  }
-  out.valid = out.ped != 0;
+  out.valid = true;
   return out;
 }
 
@@ -847,10 +857,12 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   if (!game.valid || game.online) {
     if (s.open && game.online)
       Toast(s, "The trainer is single-player only.");
+    const bool was_open = s.open;
     s.open = false;
     s.pending_model = -1;
     g_input_owned.store(false, std::memory_order_relaxed);
-    PublishDraw(s, g_natives.size(), MissingNatives().size(), {});
+    if (was_open || s.toast_until > now)
+      PublishDraw(s, g_natives.size(), 0, {});
     return;
   }
 
@@ -896,7 +908,8 @@ void Poll(PPCContext& ctx, uint8_t* base) {
       }
     }
   } else {
-    g_pad.last = buttons;
+    // Menu closed: the gadgets read the pad the game is also seeing.
+    Gadgets(ctx, base, game, s, buttons, g_pad.last);
   }
   g_pad.last = buttons;
   g_input_owned.store(s.open, std::memory_order_relaxed);
@@ -915,8 +928,15 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   }
   FinishSpawn(ctx, base, game, s);
 
-  const auto missing = MissingNatives();
-  PublishDraw(s, g_natives.size(), missing.size(), missing);
+  // Publishing builds strings; while the menu is shut and nothing is on
+  // screen there is nothing to draw, so skip it (one trailing publish clears
+  // the overlay after a close or an expired toast).
+  static bool s_published = false;
+  if (s.open || s.toast_until > now || s_published) {
+    const auto missing = MissingNatives();
+    PublishDraw(s, g_natives.size(), missing.size(), missing);
+    s_published = s.open || s.toast_until > now;
+  }
 }
 
 // ---------------------------------------------------------------------------
