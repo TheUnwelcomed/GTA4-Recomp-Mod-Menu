@@ -228,6 +228,22 @@ struct GameContext {
 constexpr uint32_t kPrimaryPlayer = 0x82A98778, kPlayerInfoTable = 0x82C01C70;
 constexpr uint32_t kPedOffset = 1400;
 
+// Raw world gate, no natives: true once the local player exists and is
+// playing. The input poll uses this alone; everything heavier runs in the
+// script stage.
+bool WorldAlive(uint8_t* base) {
+  if (!Span(base, kPrimaryPlayer, 4))
+    return false;
+  const uint32_t index = Read(base, kPrimaryPlayer);
+  if (index >= 16 || !Span(base, kPlayerInfoTable + index * 4, 4))
+    return false;
+  const uint32_t info = Read(base, kPlayerInfoTable + index * 4);
+  if (!info || !Span(base, info, kPedOffset + 4) || Read(base, info + 1232) != 2)
+    return false;
+  const uint32_t ped = Read(base, info + kPedOffset);
+  return ped && Span(base, ped, 2692);
+}
+
 GameContext ReadContext(PPCContext& ctx, uint8_t* base) {
   GameContext out;
   // The world gate comes FIRST, as raw span-checked reads, before any native
@@ -395,6 +411,18 @@ struct DrawModel {
 };
 DrawModel g_draw;
 std::atomic<bool> g_input_owned{false};
+
+// Menu selections cross from the input poll to the script stage here. Both
+// run on the game's main thread, so plain containers suffice; the atomics
+// carry the pad sample for the gadgets and the online verdict back.
+struct PendingItem {
+  Action action = Action::kNone;
+  int index = -1;
+};
+std::vector<PendingItem> g_pending;
+std::atomic<uint16_t> g_gadget_buttons{0}, g_gadget_previous{0};
+std::atomic<bool> g_online{false};
+uint64_t g_last_gun_ms = 0;
 
 void Toast(State& s, std::string text, uint64_t ms = 2500) {
   s.toast = std::move(text);
@@ -844,23 +872,25 @@ void ObserveNativeRegistration(PPCContext& context, uint8_t* base) {
 bool InputOwned() { return g_input_owned.load(std::memory_order_relaxed); }
 
 void Poll(PPCContext& ctx, uint8_t* base) {
+  // Input and menu only. This hook runs in the frame's input stage, where
+  // the game's natives are NOT safe (the first spawn attempt from here page
+  // faulted inside CREATE_CAR): everything that touches the game is queued
+  // for RunActions, which the script-stage hooks drive.
+  (void)ctx;
   if (!REXCVAR_GET(gta4_trainer)) {
     g_input_owned.store(false, std::memory_order_relaxed);
     return;
   }
   auto& s = g_state;
-  ++s.tick;
   const uint64_t now = NowMs();
 
-  const GameContext game = ReadContext(ctx, base);
   // Single-player only: in a network session the menu closes and stays shut.
-  if (!game.valid || game.online) {
-    if (s.open && game.online)
-      Toast(s, "The trainer is single-player only.");
+  if (!WorldAlive(base) || g_online.load(std::memory_order_relaxed)) {
     const bool was_open = s.open;
     s.open = false;
-    s.pending_model = -1;
     g_input_owned.store(false, std::memory_order_relaxed);
+    g_gadget_buttons.store(0, std::memory_order_relaxed);
+    g_gadget_previous.store(0, std::memory_order_relaxed);
     if (was_open || s.toast_until > now)
       PublishDraw(s, g_natives.size(), 0, {});
     return;
@@ -897,8 +927,21 @@ void Poll(PPCContext& ctx, uint8_t* base) {
       Adjust(s, -1);
     if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_DPAD_RIGHT, now, true))
       Adjust(s, 1);
-    if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_A, now) && s.selected < count)
-      Perform(ctx, base, game, s, items[size_t(s.selected)]);
+    if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_A, now) && s.selected < count) {
+      const Item& item = items[size_t(s.selected)];
+      switch (item.action) {
+        // Page navigation is pure UI and stays here.
+        case Action::kOpenPlayer: s.page = Page::kPlayer; s.selected = 0; break;
+        case Action::kOpenVehicle: s.page = Page::kVehicle; s.selected = 0; break;
+        case Action::kOpenSpawn: s.page = Page::kSpawn; s.selected = 0; break;
+        case Action::kOpenTeleport: s.page = Page::kTeleport; s.selected = 0; break;
+        case Action::kOpenWorld: s.page = Page::kWorld; s.selected = 0; break;
+        case Action::kOpenWeapons: s.page = Page::kWeapons; s.selected = 0; break;
+        case Action::kOpenStatus: s.page = Page::kStatus; s.selected = 0; break;
+        // Everything else runs where natives are safe.
+        default: g_pending.push_back({item.action, item.index}); break;
+      }
+    }
     if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_B, now)) {
       if (s.page == Page::kMain)
         s.open = false;
@@ -907,26 +950,16 @@ void Poll(PPCContext& ctx, uint8_t* base) {
         s.selected = 0;
       }
     }
+    // No gadget input while the menu owns the pad.
+    g_gadget_buttons.store(0, std::memory_order_relaxed);
+    g_gadget_previous.store(0, std::memory_order_relaxed);
   } else {
-    // Menu closed: the gadgets read the pad the game is also seeing.
-    Gadgets(ctx, base, game, s, buttons, g_pad.last);
+    g_gadget_previous.store(g_gadget_buttons.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+    g_gadget_buttons.store(buttons, std::memory_order_relaxed);
   }
   g_pad.last = buttons;
   g_input_owned.store(s.open, std::memory_order_relaxed);
-
-  // Continuous effects, menu open or not.
-  if (s.god && (s.tick % 30) == 0)
-    ApplyGod(ctx, base, game, true);
-  if (s.never_wanted && (s.tick % 15) == 0) {
-    const auto wanted = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, 0});
-    if (wanted && wanted->r0())
-      Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
-  }
-  if (s.vehicle_god && (s.tick % 30) == 0) {
-    if (const auto car = CurrentVehicle(ctx, base, game))
-      Invoke(ctx, base, "SET_CAR_PROOFS", {*car, 1, 1, 1, 1, 1});
-  }
-  FinishSpawn(ctx, base, game, s);
 
   // Publishing builds strings; while the menu is shut and nothing is on
   // screen there is nothing to draw, so skip it (one trailing publish clears
@@ -936,6 +969,64 @@ void Poll(PPCContext& ctx, uint8_t* base) {
     const auto missing = MissingNatives();
     PublishDraw(s, g_natives.size(), missing.size(), missing);
     s_published = s.open || s.toast_until > now;
+  }
+}
+
+void RunActions(PPCContext& ctx, uint8_t* base) {
+  if (!REXCVAR_GET(gta4_trainer))
+    return;
+  auto& s = g_state;
+  ++s.tick;
+  const uint64_t now = NowMs();
+
+  const GameContext game = ReadContext(ctx, base);
+  g_online.store(game.online, std::memory_order_relaxed);
+  if (!game.valid || game.online) {
+    if (game.online) {
+      // Nothing of the trainer survives into a network session.
+      s.god = s.never_wanted = s.vehicle_god = s.gadgets = false;
+    }
+    g_pending.clear();
+    s.pending_model = -1;
+    return;
+  }
+
+  bool acted = false;
+  for (const auto& pending : g_pending) {
+    Perform(ctx, base, game, s, Item{{}, pending.action, pending.index});
+    acted = true;
+  }
+  g_pending.clear();
+
+  // Continuous effects, throttled by time: this hook can fire more than
+  // once per frame (two script-stage sites drive it, as with quicksave).
+  static uint64_t s_next_god = 0, s_next_wanted = 0, s_next_car = 0;
+  if (s.god && now >= s_next_god) {
+    s_next_god = now + 500;
+    ApplyGod(ctx, base, game, true);
+  }
+  if (s.never_wanted && now >= s_next_wanted) {
+    s_next_wanted = now + 250;
+    const auto wanted = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, 0});
+    if (wanted && wanted->r0())
+      Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
+  }
+  if (s.vehicle_god && now >= s_next_car) {
+    s_next_car = now + 500;
+    if (const auto car = CurrentVehicle(ctx, base, game))
+      Invoke(ctx, base, "SET_CAR_PROOFS", {*car, 1, 1, 1, 1, 1});
+  }
+  FinishSpawn(ctx, base, game, s);
+  if (s.gadgets) {
+    const uint16_t buttons = g_gadget_buttons.load(std::memory_order_relaxed);
+    const uint16_t previous = g_gadget_previous.load(std::memory_order_relaxed);
+    Gadgets(ctx, base, game, s, buttons, previous);
+    // Consume the edge so the second script-stage site cannot double-fire.
+    g_gadget_previous.store(buttons, std::memory_order_relaxed);
+  }
+  if (acted || s.toast_until > now) {
+    const auto missing = MissingNatives();
+    PublishDraw(s, g_natives.size(), missing.size(), missing);
   }
 }
 

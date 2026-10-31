@@ -33,9 +33,15 @@ namespace gta4::trainer {
 void ObserveNativeRegistration(PPCContext& context, uint8_t* base);
 
 // Called once per frame from the input-poll hook (gta4_input_hooks,
-// sub_828CCD60), on the game thread, before the retail poll: reads the pad,
-// runs the menu, applies toggles and performs queued actions.
+// sub_828CCD60), on the game thread, before the retail poll: reads the pad
+// and runs the menu. It calls no game natives — selections are queued.
 void Poll(PPCContext& ctx, uint8_t* base);
+
+// Called from the per-frame script-stage hooks (the two sites that also
+// drive gta4::quicksave::Poll): the only context where the game's natives
+// are safe to call. Drains the queued menu actions, maintains the toggles
+// and finishes pending vehicle spawns.
+void RunActions(PPCContext& ctx, uint8_t* base);
 
 // True while the menu owns the pad; the XAM input path then gives the game a
 // cleared pad, exactly as it does while a system dialog is up.
