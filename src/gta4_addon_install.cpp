@@ -248,7 +248,7 @@ struct TocEntry {
 };
 
 bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
-                   const std::vector<fs::path>& rsc_paths) {
+                   const std::vector<fs::path>& rsc_paths, bool append_missing) {
   std::ifstream in(img, std::ios::binary);
   if (!in) {
     REXLOG_WARN("gta4-addons: cannot open {}", img.string());
@@ -297,17 +297,6 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
   if (encrypted)
     CryptBlocks(toc.data(), toc.size(), key, false);
 
-  // The byte order is known only now, so the resources load here, their
-  // headers matched to it.
-  std::vector<NewFile> files(rsc_paths.size());
-  for (size_t i = 0; i < rsc_paths.size(); ++i) {
-    if (!LoadRsc(rsc_paths[i], e.big, files[i])) {
-      REXLOG_WARN("gta4-addons: bundled file {} is missing or malformed",
-                  rsc_paths[i].filename().string());
-      return false;
-    }
-  }
-
   std::vector<TocEntry> entries(count);
   for (uint32_t i = 0; i < count; ++i) {
     const uint8_t* p = toc.data() + i * 16;
@@ -320,11 +309,45 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     entries[i].name.assign(names + cursor, len);
     cursor += len + 1;
   }
+  // The byte order the GAME expects of a resource header is read off the
+  // stock payload being replaced - the container's own order says nothing
+  // about it - and the bundled files are stamped to match. Ground truth is
+  // logged so a console log settles any doubt.
+  bool rsc_big = e.big;
+  bool probed = false;
+  for (uint32_t i = 0; i < count && !probed; ++i) {
+    for (const auto& path : rsc_paths) {
+      if (entries[i].name != path.filename().string())
+        continue;
+      std::array<uint8_t, 4> head{};
+      in.clear();
+      in.seekg(std::streamoff(uint64_t(entries[i].offset_block) * kBlock));
+      if (in.read(reinterpret_cast<char*>(head.data()), head.size())) {
+        uint32_t magic;
+        std::memcpy(&magic, head.data(), 4);
+        if (magic == kRscMagicLE) { rsc_big = false; probed = true; }
+        else if (Swap32(magic) == kRscMagicLE) { rsc_big = true; probed = true; }
+        REXLOG_INFO("gta4-addons: {} stock {} header {:02X}{:02X}{:02X}{:02X} ({}-endian rsc)",
+                    img.filename().string(), entries[i].name, head[0], head[1], head[2], head[3],
+                    rsc_big ? "big" : "little");
+      }
+      break;
+    }
+  }
+  std::vector<NewFile> files(rsc_paths.size());
+  for (size_t i = 0; i < rsc_paths.size(); ++i) {
+    if (!LoadRsc(rsc_paths[i], rsc_big, files[i])) {
+      REXLOG_WARN("gta4-addons: bundled file {} is missing or malformed",
+                  rsc_paths[i].filename().string());
+      return false;
+    }
+  }
+
   // A bundled file whose name the archive already carries replaces that
   // entry's payload (the IV engine only accepts vehicles it already knows,
-  // so car mods swap an existing model); an unknown name is appended. An
-  // entry whose stored byte size already equals the bundled file counts as
-  // current, so later boots change nothing.
+  // so car mods swap an existing model); an unknown name is appended only
+  // when this archive is the append target. An entry whose stored byte size
+  // already equals the bundled file counts as current.
   auto fill_meta = [](TocEntry& entry, const NewFile& add) {
     entry.word0 = add.rsc_flags;  // IV resource flags carry the top bits
     entry.type = add.rsc_type;
@@ -352,13 +375,15 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
       }
       break;
     }
-    if (!matched[f]) {
+    if (!matched[f] && append_missing) {
       appended.push_back(f);
       work = true;
     }
   }
-  if (!work)
+  if (!work) {
+    REXLOG_INFO("gta4-addons: {} needs no change", img.string());
     return true;
+  }
 
   std::vector<TocEntry> all = entries;
   for (uint32_t i = 0; i < count; ++i)
@@ -540,6 +565,16 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   // The base game and, when installed, each episode: the episodes read
   // their own copies of these files.
   std::vector<fs::path> data_roots = {game / "common" / "data"};
+  // The title update mounts OVER the base at runtime, so a data file that
+  // exists under game/update is the one the game reads: it gets the lines
+  // too, or the base edit is shadowed.
+  if (fs::exists(game / "update", ec)) {
+    for (const char* sub : {"common/data", "update/common/data"}) {
+      const fs::path extra = game / "update" / sub;
+      if (fs::exists(extra / "vehicles.ide", ec) || fs::exists(extra / "handling.dat", ec))
+        data_roots.push_back(extra);
+    }
+  }
   for (const char* episode : {"TLAD", "TBOGT"}) {
     const fs::path extra = game.parent_path() / "dlc" / episode / "common" / "data";
     if (fs::exists(extra / "vehicles.ide", ec))
@@ -570,7 +605,41 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       REXLOG_WARN("gta4-addons: {} has no aes_key.bin; only a plain archive can be edited",
                   game.string());
   }
-  if (InjectIntoImg(img, key, {batmobile / "fbi.wft", batmobile / "fbi.wtd"}) && ok)
+  // Every vehicles.img in the installed tree: base, title update, episodes.
+  // The one the game streams from must carry the mod, so all of them get it
+  // (replace-only: an archive without an fbi entry is left as it is), and
+  // each is named in the log with its size for diagnosis.
+  std::vector<fs::path> images;
+  for (auto it = fs::recursive_directory_iterator(
+           game, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    if (it.depth() > 6) { it.disable_recursion_pending(); continue; }
+    if (it->is_regular_file(ec) && it->path().filename() == "vehicles.img")
+      images.push_back(it->path());
+  }
+  for (const char* episode : {"TLAD", "TBOGT"}) {
+    const fs::path dlc = game.parent_path() / "dlc" / episode;
+    std::error_code dlc_ec;
+    for (auto it = fs::recursive_directory_iterator(
+             dlc, fs::directory_options::skip_permission_denied, dlc_ec);
+         !dlc_ec && it != fs::recursive_directory_iterator(); it.increment(dlc_ec)) {
+      if (it.depth() > 6) { it.disable_recursion_pending(); continue; }
+      if (it->is_regular_file(dlc_ec) && it->path().filename() == "vehicles.img")
+        images.push_back(it->path());
+    }
+  }
+  if (images.empty()) {
+    REXLOG_WARN("gta4-addons: no vehicles.img anywhere under {}", game.string());
+    return;
+  }
+  bool any = false;
+  for (const auto& image : images) {
+    REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
+                uint64_t(fs::file_size(image, ec)));
+    any |= InjectIntoImg(image, key, {batmobile / "fbi.wft", batmobile / "fbi.wtd"},
+                         /*append_missing=*/false);
+  }
+  if (any && ok)
     REXLOG_INFO("gta4-addons: Batmobile is installed in the FBI slot");
 }
 
