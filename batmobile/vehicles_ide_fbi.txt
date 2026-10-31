@@ -1,1 +1,0 @@
-fbi, fbi, car, FBI, FBI, VEH@STD, VEH@STD_LO4_LO4, 100, 999, 0.2622, 0.2622, 0, 5, 1.0, 0, truckfirefx+sports+ext_conv+ext_strong

@@ -24,14 +24,21 @@ dialogs use), so you won't punch anyone while navigating.
 ## Features (Simple Native Trainer's core set)
 
 - **Player** — God mode, Never Wanted, set wanted level 0–6, +$100,000, heal & armor
-- **Vehicle** — vehicle god mode, repair, warp-into-spawned-car toggle
-- **Car Spawning** — 30 cars, bikes and helicopters, spawned in front of you;
-  episode-only vehicles are detected and refused outside their episode;
-  includes the **Batmobile**, converted to the 360 format and installed
-  automatically (see `batmobile/README.md`)
+- **Vehicle**: vehicle god mode, repair, warp-into-spawned-car toggle, Batmobile
+  gadgets, F-16 flight and weapons
+- **Car Spawning**: 29 stock cars, bikes and helicopters plus three bundled
+  **add-on vehicles**, spawned in front of you. Episode-only vehicles are
+  detected and refused outside their episode
+- **Add-on vehicles**, converted to the 360 format and installed by the app
+  itself as their own vehicles (no stock car replaced; see `addons/`):
+  - **Batmobile** (JulioNIB), with its gadgets re-created
+  - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a nose cannon and
+    missiles (the PC mod's Air Combat IV script, re-done in the trainer)
+  - **Grotti Deimos GTS** (harithd / Milcin)
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets
 - **Time & Weather** — set the clock, force or release any weather
 - **Weapons** — full loadout with ammo, or strip all weapons
+- **Chaos**: raining cars (random cars dropped around you), gravity on/off
 - **Trainer Status** — shows which game natives resolved, for debugging
 
 The menu is **single-player only**: it closes itself and refuses to act inside a
@@ -54,9 +61,9 @@ network session.
 | | |
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
-| `src/gta4_addon_install.h` / `.cpp` | installs bundled add-ons (the Batmobile) into the game at launch |
+| `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
-| `batmobile/` | the Batmobile car mod, adapted (read its README) |
+| `addons/` | the add-on vehicles: what each registers, notes and limits |
 | `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI |
 
 ## Building
@@ -80,6 +87,9 @@ one in `/data/homebrew/` — your installed game, saves and settings stay.
 - **OZORDI** — Liberty Recompiled; **vaduur** — the Android fork; **elripalda** — the
   PS5 port this builds on; **ReXGlue** underneath.
 - **sjaak327** — Simple Native Trainer, the model for the menu.
-- **JulioNIB** — the Batmobile mod (car model; the PC gadget script cannot run here).
+- **JulioNIB**: the Batmobile mod (the PC gadget script cannot run here) and Air
+  Combat IV, whose controls the F-16's flight follows.
+- **SkylineGTRFreak**: the F-16C model.
+- **harithd** (original model) and **Milcin** (IV port): the Grotti Deimos GTS.
 
 Single-player fun only. Don't bring it into other people's sessions.

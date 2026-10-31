@@ -18,6 +18,7 @@ import struct
 import sys
 
 import rsc5
+import dxt  # noqa: E402
 import xenos
 
 VP = 0x50000000
@@ -27,8 +28,22 @@ PP = 0x60000000
 SPS_FALLBACK = {
     'gta_vehicle_interior.sps': 'gta_vehicle_interior2.sps',
     'gta_default.sps': 'gta_vehicle_interior2.sps',  # needs 0059, as the donor part supplies
+    # Two- and three-colour paints: the template car only carries the
+    # one-colour paint; values shared by name carry over, the body takes the
+    # vehicle's primary colour.
+    'gta_vehicle_paint2.sps': 'gta_vehicle_paint1.sps',
+    'gta_vehicle_paint3.sps': 'gta_vehicle_paint1.sps',
+    'gta_vehicle_generic.sps': 'gta_vehicle_mesh.sps',
 }
 BONE_ALIAS = {'chasiss': 'chassis'}  # a typo in the Batmobile's skeleton
+# A donor bone the template has no bone for is drawn rigidly on the chassis
+# (vertices are stored in model space, so a part keeps its place; it only
+# loses its own motion).
+BONE_FALLBACK = 'chassis'
+# A template wheel the donor lacks takes the place of the donor's opposite
+# wheel - a tricycle layout's nose wheel, say, fills both front slots.
+WHEEL_STAND_IN = {'wheel_rf': 'wheel_lf', 'wheel_lf': 'wheel_rf',
+                  'wheel_rr': 'wheel_lr', 'wheel_lr': 'wheel_rr'}
 
 TYPES_360 = 0xAA1111111199A996  # pos f3, bw/bi/col c4, normal dec3n, uv half2, tangent/binormal dec3n
 SIZE_360 = {0: 12, 1: 4, 2: 4, 3: 4, 4: 4, 5: 4, 14: 4, 15: 4}
@@ -134,15 +149,38 @@ def vertex_layout(usage, sizes):
     return out, off
 
 
-def convert_vertices(src, usage, count, pc_stride):
+UV_BITS = 0x3FC0  # texcoord sets 0-7 (usage bits 6-13)
+
+
+def unit(x, y, z):
+    """A direction for 10:10:10 packing: some exporters leave the odd normal
+    unnormalised (lengths of 100 seen), which would wrap the 10-bit fields;
+    those are normalised, everything already in range is left exactly as is."""
+    if max(abs(x), abs(y), abs(z)) <= 1.0:
+        return x, y, z
+    n = (x * x + y * y + z * z) ** 0.5
+    return (x / n, y / n, z / n) if n > 0 else (0.0, 0.0, 1.0)
+
+
+def convert_vertices(src, usage, count, pc_stride, fill_uv=0):
+    """PC vertices -> 360 vertices. `fill_uv`: texcoord bits the target
+    shader reads but the donor lacks, written as copies of texcoord 0."""
     pc_elems, pc_size = vertex_layout(usage, SIZE_PC)
-    x_elems, x_size = vertex_layout(usage, SIZE_360)
+    x_elems, x_size = vertex_layout(usage | fill_uv, SIZE_360)
     assert pc_size == pc_stride, (hex(usage), pc_size, pc_stride)
+    assert not fill_uv or (usage & 0x40 and not fill_uv & ~UV_BITS & 0xFFFF)
+    x_at = dict(x_elems)
+    pc_at = dict(pc_elems)
     out = bytearray(x_size * count)
     for v in range(count):
         base = v * pc_stride
         obase = v * x_size
-        for (i, po), (_, xo) in zip(pc_elems, x_elems):
+        for i in range(16):
+            if fill_uv & (1 << i):
+                u, t = struct.unpack_from('<2f', src, base + pc_at[6])
+                struct.pack_into('>HH', out, obase + x_at[i], _half(u), _half(t))
+        for (i, po) in pc_elems:
+            xo = x_at[i]
             p = base + po
             o = obase + xo
             if i == 0:
@@ -150,10 +188,11 @@ def convert_vertices(src, usage, count, pc_stride):
             elif i in (1, 2, 4, 5):
                 out[o:o + 4] = src[p:p + 4][::-1]
             elif i in (3, 15):
-                x, y, z = struct.unpack_from('<3f', src, p)
+                x, y, z = unit(*struct.unpack_from('<3f', src, p))
                 struct.pack_into('>I', out, o, _dec3n(x, y, z, 0))
             elif i == 14:
                 x, y, z, w = struct.unpack_from('<4f', src, p)
+                x, y, z = unit(x, y, z)
                 struct.pack_into('>I', out, o, _dec3n(x, y, z, -1 if w < 0 else 1))
             else:
                 u, t = struct.unpack_from('<2f', src, p)
@@ -203,6 +242,7 @@ class Converter:
         self.tf = rsc5.read_fragtype(tmpl)
         self.df = rsc5.read_fragtype(donor)
         self.decls = {}
+        self.uv_filled = 0
         self.texture_names = set()
         self._templates()
 
@@ -254,7 +294,7 @@ class Converter:
         for c in self.df['children']:
             if c['drawable'] and c['drawable']['lods']:
                 return c['drawable']
-        raise ValueError('donor has no wheel child')
+        return None  # wheels modelled into the body (or none): template wheels hidden
 
     # ---------------- skeleton
     def transplant_skeleton(self):
@@ -265,15 +305,27 @@ class Converter:
         dbo, dnames = bones(d, dsk)
         dindex = {n: i for i, n in enumerate(dnames)}
         self.bone_map = {}
+        self.unmapped = []
         for di, n in enumerate(dnames):
             tn = BONE_ALIAS.get(n, n)
-            assert tn in tnames, 'donor bone %s has no template bone' % n
+            if tn not in tnames:
+                self.unmapped.append(n)
+                tn = BONE_FALLBACK
             self.bone_map[di] = tnames.index(tn)
+        if self.unmapped:
+            self.log('skeleton: donor bones without a template bone, drawn on %s: %s'
+                     % (BONE_FALLBACK, ', '.join(self.unmapped)))
         moved = 0
+        self.stand_ins = []
         for ti, n in enumerate(tnames):
             if n not in dindex:
-                continue
-            di = dindex[n]
+                if WHEEL_STAND_IN.get(n) in dindex:
+                    self.stand_ins.append('%s<-%s' % (n, WHEEL_STAND_IN[n]))
+                    di = dindex[WHEEL_STAND_IN[n]]
+                else:
+                    continue
+            else:
+                di = dindex[n]
             src = d.virt[dbo + 0xE0 * di + 0x30:dbo + 0xE0 * di + 0xE0]
             dst = tbo + 0xE0 * ti + 0x30
             self.v.buf[dst:dst + len(src)] = swap_words(src)
@@ -282,7 +334,9 @@ class Converter:
                 self.v.buf[ta + 64 * ti:ta + 64 * ti + 64] = swap_words(d.virt[da + 64 * di:da + 64 * di + 64])
             moved += 1
         self.log('skeleton: %d of %d template bones moved to the donor\'s pose; '
-                 '%d donor bones mapped' % (moved, len(tnames), len(self.bone_map)))
+                 '%d donor bones mapped%s' % (moved, len(tnames), len(self.bone_map),
+                                              ('; stand-ins ' + ', '.join(self.stand_ins))
+                                              if self.stand_ins else ''))
 
     # ---------------- shaders
     def build_shader_group(self):
@@ -393,24 +447,33 @@ class Converter:
         self.decls[usage] = off
         return off
 
-    def convert_geometry(self, g):
-        """Donor geometry -> phys data (shared across LOD duplicates)."""
+    def convert_geometry(self, g, need=0):
+        """Donor geometry -> phys data (shared across LOD duplicates). `need`:
+        the vertex inputs of the 360 shader it is drawn with; a texcoord set
+        the donor lacks is filled from texcoord 0."""
         d = self.d
         assert g['prim'] == 3, 'only triangle lists'
-        usage = g['decl']['usage']
-        vsrc = d.phys[g['vb_data'][1]:g['vb_data'][1] + g['vertex_count'] * g['vb_stride']]
-        vdata, stride = convert_vertices(vsrc, usage, g['vertex_count'], g['vb_stride'])
+        src_usage = g['decl']['usage']
+        fill_uv = need & ~src_usage & UV_BITS if src_usage & 0x40 else 0
+        usage = src_usage | fill_uv
+        # Some exporters leave the geometry's own counts zero; the vertex and
+        # index buffers always carry them.
+        vcount = g['vertex_count'] or g['vb_count']
+        vsrc = d.phys[g['vb_data'][1]:g['vb_data'][1] + vcount * g['vb_stride']]
+        vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
+        if fill_uv:
+            self.uv_filled += 1
         n = g['ib_count']
         isrc = d.phys[g['ib_data'][1]:g['ib_data'][1] + 2 * n]
         idata = struct.pack('>%dH' % n, *struct.unpack('<%dH' % n, isrc))
-        assert max(struct.unpack('<%dH' % n, isrc)) < g['vertex_count']
+        assert max(struct.unpack('<%dH' % n, isrc)) < vcount
         vo = self.p.put(vdata, 0x100)
         io = self.p.put(idata, 0x100)
         bp = d.vptr(g['off'] + 56)
         bc = d.u16(g['off'] + 62)
         tb = [self.bone_map[d.u16(bp + 2 * k)] for k in range(bc)] if bp is not None else []
         decl_src = d.vptr(g['vb_off'] + 16)
-        return dict(usage=usage, stride=stride, vcount=g['vertex_count'], icount=n,
+        return dict(usage=usage, stride=stride, vcount=vcount, icount=n,
                     vo=vo, vbytes=len(vdata), io=io, ibytes=len(idata), bones=tb,
                     decl_src=decl_src)
 
@@ -494,7 +557,9 @@ class Converter:
                 gs = [g for g in rsc5.ptr_collection(self.d, m + 4) if g is not None]
                 smap_p = self.d.vptr(m + 16)
                 smap = [self.d.u16(smap_p + 2 * k) for k in range(len(gs))]
-                lod.append(([self.convert_geometry(rsc5.read_geometry(self.d, g)) for g in gs], smap))
+                lod.append(([self.convert_geometry(rsc5.read_geometry(self.d, g),
+                                                   self.shader_usage[si])
+                             for g, si in zip(gs, smap)], smap))
             out.append(lod)
         return out
 
@@ -521,7 +586,7 @@ class Converter:
 
         main = self.convert_drawable_lods(ddraw)
         wheel_d = self._donor_wheel()
-        wheel = self.convert_drawable_lods(wheel_d)
+        wheel = self.convert_drawable_lods(wheel_d) if wheel_d else []
         self.check_shader_inputs(main)
         self.check_shader_inputs(wheel)
 
@@ -538,12 +603,19 @@ class Converter:
         twheel = self._template_wheel()
         tw_slots = [c is not None for c in lod_collections(t, twheel['off'])]
         wlods = [l for l in wheel if l is not None]
+        if not wlods:
+            # No wheel mesh of its own: the template's car wheels are not drawn
+            # (a drawable without LODs, like the template's other children).
+            for slot in range(4):
+                self.v.w32(twheel['off'] + 64 + 4 * slot, 0)
+            self.log('wheels: donor has no wheel mesh; template wheel meshes hidden')
         for slot, used in enumerate(tw_slots):
-            if not used:
+            if not used or not wlods:
                 continue
             src = wlods[min(slot, len(wlods) - 1)]
             self.v.w32(twheel['off'] + 64 + 4 * slot, VP | self.emit_lod(src, self.t_model_wheel))
-        self.copy_bounds(twheel['off'], wheel_d['off'])
+        if wheel_d:
+            self.copy_bounds(twheel['off'], wheel_d['off'])
 
         # fragment bounding sphere (+16..+31), same layout on both (checked by caller)
         self.v.buf[16:32] = swap_words(self.d.virt[16:32])
@@ -555,6 +627,9 @@ class Converter:
 
 
 # ---------------------------------------------------------------- textures
+A8R8G8B8 = '\x15\x00\x00\x00'  # D3DFMT_A8R8G8B8 as the PC info stores it
+
+
 def pc_textures(r, dict_off):
     out = {}
     tl = r.vptr(dict_off + 24)
@@ -598,10 +673,18 @@ def build_xtd(tmpl, sources, wanted, log=print):
         src = next((s[name] for s in sources if name in s), None)
         if src is None:
             continue
-        fmt, bpp = xenos.FORMATS[src['fmt']]
         w, h = src['w'], src['h']
         bw, bh = max(1, w // 4), max(1, h // 4)
-        lin = src['res'].phys[src['data']:src['data'] + bw * bh * bpp]
+        if src['fmt'] == A8R8G8B8:
+            # The odd uncompressed texture is compressed to DXT5 so it takes
+            # the same verified path as every other one.
+            raw = src['res'].phys[src['data']:src['data'] + w * h * 4]
+            lin = dxt.encode_dxt5(raw, w, h)
+            fmt, bpp = xenos.FORMATS['DXT5']
+            src = dict(src, fmt='DXT5 (from A8R8G8B8)')
+        else:
+            fmt, bpp = xenos.FORMATS[src['fmt']]
+            lin = src['res'].phys[src['data']:src['data'] + bw * bh * bpp]
         tiled = xenos.tile_level(xenos.swap16(lin), bw, bh, bpp)
         base = p.put(tiled, 0x1000)
         info = v.put(t_info)
@@ -622,6 +705,34 @@ def build_xtd(tmpl, sources, wanted, log=print):
         struct.pack_into('>6I', v.buf, d3d + 28, *f)
         entries.append((joaat(name), info))
         added.append('%s %dx%d %s' % (name, w, h, src['fmt']))
+        have.add(name)
+    # Textures the model borrows from another stock car's dictionary (not the
+    # shared vehicle pack every car can see) get a plain black stand-in, so
+    # nothing is drawn with a missing texture.
+    for name in sorted(set(wanted) - have):
+        if name.startswith('vehicle_generic'):
+            continue
+        lin = dxt.encode_dxt5(bytes([0, 0, 0, 255]) * 16 * 16, 16, 16)
+        fmt, bpp = xenos.FORMATS['DXT5']
+        tiled = xenos.tile_level(xenos.swap16(lin), 4, 4, bpp)
+        base = p.put(tiled, 0x1000)
+        info = v.put(t_info)
+        d3d = v.put(t_d3d)
+        nm = v.cstr('pack:/%s.dds' % name)
+        v.w32(info + 20, VP | nm)
+        v.w32(info + 24, VP | d3d)
+        v.w16(info + 28, 16)
+        v.w16(info + 30, 16)
+        v.w32(info + 32, 1)
+        f = list(struct.unpack_from('>6I', t_d3d, 28))
+        f[0] = (f[0] & ~(0x1FF << 22)) | (((32 * 4) >> 5) << 22)
+        f[1] = fmt | (1 << 6) | (f[1] & 0xF00) | ((PP | base) & 0xFFFFF000)
+        f[2] = (f[2] & ~0x03FFFFFF) | 15 | (15 << 13)
+        f[4] = f[4] & ~(0xFF << 2)
+        f[5] = (f[5] & ~0xFFFFF800) | (1 << 9) & 0x600
+        struct.pack_into('>6I', v.buf, d3d + 28, *f)
+        entries.append((joaat(name), info))
+        added.append('%s 16x16 black stand-in' % name)
         have.add(name)
     entries.sort()
     assert len({h for h, _ in entries}) == len(entries), 'hash collision'

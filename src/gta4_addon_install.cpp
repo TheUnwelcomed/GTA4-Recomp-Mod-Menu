@@ -18,11 +18,13 @@
 #include "gta4_addon_install.h"
 
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -108,81 +110,36 @@ bool BackupOnce(const fs::path& file) {
   return !ec;
 }
 
-// Appends `line` to a text file unless `token` already appears in it.
-bool AppendLineIfMissing(const fs::path& file, std::string_view token, std::string_view line,
-                         const char* what) {
+// The game's text data files (vehicles.ide, handling.dat, carcols.dat,
+// vehOff.csv) are edited line by line. Every line keeps its own ending, so a
+// CRLF file stays CRLF, and a file is only rewritten when an edit changed it.
+struct TextLines {
+  std::vector<std::string> lines;  // without the '\n'; a '\r' stays on the line
+  bool final_newline = true;
+};
+
+bool LoadText(const fs::path& file, TextLines& out) {
   std::vector<uint8_t> raw;
-  if (!ReadAll(file, raw)) {
-    REXLOG_WARN("gta4-addons: cannot read {}", file.string());
+  if (!ReadAll(file, raw))
     return false;
+  const std::string text(reinterpret_cast<const char*>(raw.data()), raw.size());
+  out.lines.clear();
+  size_t pos = 0;
+  while (pos < text.size()) {
+    const size_t eol = text.find('\n', pos);
+    if (eol == std::string::npos) {
+      out.lines.push_back(text.substr(pos));
+      out.final_newline = false;
+      return true;
+    }
+    out.lines.push_back(text.substr(pos, eol - pos));
+    pos = eol + 1;
   }
-  const std::string_view text(reinterpret_cast<const char*>(raw.data()), raw.size());
-  if (text.find(token) != std::string_view::npos) {
-    REXLOG_INFO("gta4-addons: {} already registered in {}", what, file.string());
-    return true;
-  }
-  if (!BackupOnce(file)) return false;
-  const fs::path tmp = file.string() + ".new";
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
-    out.write(reinterpret_cast<const char*>(raw.data()), std::streamsize(raw.size()));
-    if (!text.empty() && text.back() != '\n') out.put('\n');
-    out.write(line.data(), std::streamsize(line.size()));
-    out.put('\n');
-    if (!out) return false;
-  }
-  std::error_code ec;
-  fs::rename(tmp, file, ec);
-  if (ec) {
-    REXLOG_WARN("gta4-addons: could not update {}: {}", file.string(), ec.message());
-    return false;
-  }
-  REXLOG_INFO("gta4-addons: {} registered in {}", what, file.filename().string());
+  out.final_newline = true;
   return true;
 }
 
-// Replaces the one line that opens with `prefix` (a whole first token). Done
-// already when the file holds `line` verbatim.
-bool ReplaceLineStartingWith(const fs::path& file, std::string_view prefix,
-                             std::string_view line, const char* what) {
-  std::vector<uint8_t> raw;
-  if (!ReadAll(file, raw)) {
-    REXLOG_WARN("gta4-addons: cannot read {}", file.string());
-    return false;
-  }
-  const std::string text(reinterpret_cast<const char*>(raw.data()), raw.size());
-  if (text.find(line) != std::string::npos) {
-    REXLOG_INFO("gta4-addons: {} already in place in {}", what, file.string());
-    return true;
-  }
-  std::string replaced;
-  replaced.reserve(text.size() + line.size());
-  bool done = false;
-  size_t pos = 0;
-  while (pos <= text.size()) {
-    const size_t eol = text.find('\n', pos);
-    const size_t end = eol == std::string::npos ? text.size() : eol;
-    const std::string_view current(text.data() + pos, end - pos);
-    const bool starts =
-        current.size() > prefix.size() && current.substr(0, prefix.size()) == prefix &&
-        (prefix.back() == ',' || current[prefix.size()] == ' ' || current[prefix.size()] == '\t');
-    if (!done && starts) {
-      replaced.append(line);
-      done = true;
-    } else {
-      replaced.append(current);
-    }
-    if (eol == std::string::npos)
-      break;
-    replaced.push_back('\n');
-    pos = eol + 1;
-  }
-  if (!done) {
-    REXLOG_WARN("gta4-addons: no line starting with '{}' in {}", std::string(prefix),
-                file.string());
-    return false;
-  }
+bool SaveText(const fs::path& file, const TextLines& text, const char* what) {
   if (!BackupOnce(file))
     return false;
   const fs::path tmp = file.string() + ".new";
@@ -190,7 +147,11 @@ bool ReplaceLineStartingWith(const fs::path& file, std::string_view prefix,
     std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
     if (!out)
       return false;
-    out.write(replaced.data(), std::streamsize(replaced.size()));
+    for (size_t i = 0; i < text.lines.size(); ++i) {
+      out.write(text.lines[i].data(), std::streamsize(text.lines[i].size()));
+      if (i + 1 < text.lines.size() || text.final_newline)
+        out.put('\n');
+    }
     if (!out)
       return false;
   }
@@ -202,6 +163,145 @@ bool ReplaceLineStartingWith(const fs::path& file, std::string_view prefix,
   }
   REXLOG_INFO("gta4-addons: {} applied in {}", what, file.string());
   return true;
+}
+
+bool IsSeparator(char c) { return c == ' ' || c == '\t' || c == ',' || c == '\r'; }
+
+// Lowercased whitespace/comma-separated tokens: two lines that differ only
+// in spacing or case are the same entry.
+std::vector<std::string> Tokens(std::string_view line) {
+  std::vector<std::string> tokens;
+  size_t i = 0;
+  while (i < line.size()) {
+    while (i < line.size() && IsSeparator(line[i])) ++i;
+    const size_t start = i;
+    while (i < line.size() && !IsSeparator(line[i])) ++i;
+    if (i > start) {
+      std::string token(line.substr(start, i - start));
+      for (char& c : token) c = char(std::tolower(static_cast<unsigned char>(c)));
+      tokens.push_back(std::move(token));
+    }
+  }
+  return tokens;
+}
+
+// The first token of a line (the model or handling name), lowercased; its
+// position comes back too so it can be swapped for another name.
+std::string FirstToken(std::string_view line, size_t* at = nullptr, size_t* len = nullptr) {
+  size_t i = 0;
+  while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+  const size_t start = i;
+  while (i < line.size() && !IsSeparator(line[i])) ++i;
+  if (at) *at = start;
+  if (len) *len = i - start;
+  std::string token(line.substr(start, i - start));
+  for (char& c : token) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return token;
+}
+
+bool EditText(const fs::path& file, const char* what,
+              const std::function<bool(std::vector<std::string>&)>& edit) {
+  TextLines text;
+  if (!LoadText(file, text)) {
+    REXLOG_WARN("gta4-addons: cannot read {}", file.string());
+    return false;
+  }
+  std::vector<std::string> lines = text.lines;
+  if (!edit(lines))
+    return false;
+  if (lines == text.lines) {
+    REXLOG_INFO("gta4-addons: {} already in place in {}", what, file.string());
+    return true;
+  }
+  text.lines = std::move(lines);
+  return SaveText(file, text, what);
+}
+
+// The donor's line ending, so an inserted line matches its neighbours.
+std::string WithEnding(std::string_view line, const std::string& donor) {
+  std::string out(line);
+  if (!donor.empty() && donor.back() == '\r')
+    out.push_back('\r');
+  return out;
+}
+
+// Puts `line` into the file directly after the donor model's line - inside
+// the same section, which a plain append would miss (vehicles.ide closes its
+// "cars" section with "end", and lines after it are never read). Lines an
+// earlier attempt left for the same name, wherever they are, are dropped
+// first, so the file ends up with exactly one.
+bool InsertAfterDonor(const fs::path& file, std::string_view donor, std::string_view line,
+                      const char* what) {
+  const std::string name = FirstToken(line);
+  return EditText(file, what, [&](std::vector<std::string>& lines) {
+    std::erase_if(lines, [&](const std::string& l) { return FirstToken(l) == name; });
+    for (size_t i = 0; i < lines.size(); ++i) {
+      if (FirstToken(lines[i]) == donor) {
+        lines.insert(lines.begin() + std::ptrdiff_t(i + 1), WithEnding(line, lines[i]));
+        return true;
+      }
+    }
+    REXLOG_WARN("gta4-addons: no '{}' line in {} to place {} after", std::string(donor),
+                file.string(), what);
+    return false;
+  });
+}
+
+// For files with one or more lines per model (carcols.dat's colour sections,
+// vehOff.csv): every donor line gets a twin for the new model right after
+// it, the name written in the donor's case.
+bool CloneDonorLines(const fs::path& file, std::string_view donor, std::string_view model,
+                     const char* what) {
+  return EditText(file, what, [&](std::vector<std::string>& lines) {
+    std::erase_if(lines, [&](const std::string& l) { return FirstToken(l) == model; });
+    for (size_t i = 0; i < lines.size(); ++i) {
+      size_t at = 0, len = 0;
+      if (FirstToken(lines[i], &at, &len) != donor)
+        continue;
+      const std::string original = lines[i].substr(at, len);
+      const bool upper = std::none_of(original.begin(), original.end(),
+                                      [](char c) { return std::islower(static_cast<unsigned char>(c)); });
+      std::string name(model);
+      for (char& c : name)
+        c = char(upper ? std::toupper(static_cast<unsigned char>(c)) : c);
+      std::string twin = lines[i];
+      twin.replace(at, len, name);
+      lines.insert(lines.begin() + std::ptrdiff_t(i + 1), std::move(twin));
+      ++i;
+    }
+    return true;
+  });
+}
+
+// Earlier releases put the Batmobile INTO the FBI slot. When the donor's line
+// is still the one they wrote, it goes back to stock: from the .stock-bak
+// copy taken before that first change when it has a genuine one, otherwise
+// from the stock line shipped here.
+bool RestoreDonorLine(const fs::path& file, std::string_view donor,
+                      const std::function<bool(std::string_view)>& is_legacy,
+                      std::string_view stock, const char* what) {
+  std::string replacement(stock);
+  TextLines backup;
+  if (LoadText(file.string() + ".stock-bak", backup)) {
+    for (const auto& l : backup.lines) {
+      if (FirstToken(l) == donor && !is_legacy(l)) {
+        replacement = l;
+        if (!replacement.empty() && replacement.back() == '\r')
+          replacement.pop_back();
+        break;
+      }
+    }
+  }
+  return EditText(file, what, [&](std::vector<std::string>& lines) {
+    for (auto& l : lines) {
+      if (FirstToken(l) == donor && is_legacy(l)) {
+        REXLOG_INFO("gta4-addons: putting the stock {} line back in {}", std::string(donor),
+                    file.string());
+        l = WithEnding(replacement, l);
+      }
+    }
+    return true;
+  });
 }
 
 struct NewFile {
@@ -249,7 +349,8 @@ struct TocEntry {
 };
 
 bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
-                   const std::vector<fs::path>& rsc_paths, bool append_missing) {
+                   const std::vector<fs::path>& rsc_paths, bool append_missing,
+                   const std::vector<std::string>& remove_names = {}) {
   std::ifstream in(img, std::ios::binary);
   if (!in) {
     REXLOG_WARN("gta4-addons: cannot open {}", img.string());
@@ -310,16 +411,34 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     entries[i].name.assign(names + cursor, len);
     cursor += len + 1;
   }
-  // The byte order the GAME expects of a resource header is read off the
-  // stock payload being replaced - the container's own order says nothing
-  // about it - and the bundled files are stamped to match. Ground truth is
-  // logged so a console log settles any doubt.
+  // The byte order the GAME expects of a resource header is read off a
+  // stock payload of the same kind (.xft/.xtd) - the container's own order
+  // says nothing about it: the console's archive is little-endian around
+  // big-endian resources - and the bundled files are stamped to match. A
+  // same-named entry is preferred; a brand-new name probes any entry with
+  // its extension. Ground truth is logged so a console log settles any doubt.
+  auto extension = [](const std::string& name) {
+    const size_t dot = name.rfind('.');
+    return dot == std::string::npos ? std::string() : name.substr(dot);
+  };
+  std::vector<uint32_t> probe_order;
+  for (const auto& path : rsc_paths)
+    for (uint32_t i = 0; i < count; ++i)
+      if (entries[i].name == path.filename().string())
+        probe_order.push_back(i);
+  for (const auto& path : rsc_paths)
+    for (uint32_t i = 0; i < count; ++i)
+      if ((entries[i].word0 & 0xC0000000u) &&
+          extension(entries[i].name) == extension(path.filename().string()) &&
+          std::find(remove_names.begin(), remove_names.end(), entries[i].name) ==
+              remove_names.end()) {
+        probe_order.push_back(i);
+        break;
+      }
   bool rsc_big = e.big;
   bool probed = false;
-  for (uint32_t i = 0; i < count && !probed; ++i) {
-    for (const auto& path : rsc_paths) {
-      if (entries[i].name != path.filename().string())
-        continue;
+  for (const uint32_t i : probe_order) {
+    {
       std::array<uint8_t, 4> head{};
       in.clear();
       in.seekg(std::streamoff(uint64_t(entries[i].offset_block) * kBlock));
@@ -332,8 +451,9 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
                     img.filename().string(), entries[i].name, head[0], head[1], head[2], head[3],
                     rsc_big ? "big" : "little");
       }
-      break;
     }
+    if (probed)
+      break;
   }
   std::vector<NewFile> files(rsc_paths.size());
   for (size_t i = 0; i < rsc_paths.size(); ++i) {
@@ -360,6 +480,18 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
   std::vector<bool> matched(files.size(), false);
   std::vector<size_t> appended;
   bool work = false;
+  // Entries an earlier release added that the game never reads (PC-named
+  // .wft/.wtd files) are dropped.
+  std::vector<bool> drop(count, false);
+  for (uint32_t i = 0; i < count; ++i) {
+    if (std::find(remove_names.begin(), remove_names.end(), entries[i].name) !=
+        remove_names.end()) {
+      drop[i] = true;
+      work = true;
+      REXLOG_INFO("gta4-addons: dropping unused {} from {}", entries[i].name,
+                  img.filename().string());
+    }
+  }
   for (size_t f = 0; f < files.size(); ++f) {
     for (uint32_t i = 0; i < count; ++i) {
       if (entries[i].name != files[f].name)
@@ -386,15 +518,25 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     return true;
   }
 
-  std::vector<TocEntry> all = entries;
-  for (uint32_t i = 0; i < count; ++i)
+  // The new table: kept entries in their order (`source` >= 0 is the old
+  // index), then appended files (`source` = -1 - file index).
+  std::vector<TocEntry> all;
+  std::vector<int64_t> source;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (drop[i])
+      continue;
+    TocEntry entry = entries[i];
     if (replace_with[i] >= 0)
-      fill_meta(all[i], files[size_t(replace_with[i])]);
+      fill_meta(entry, files[size_t(replace_with[i])]);
+    all.push_back(std::move(entry));
+    source.push_back(i);
+  }
   for (const size_t f : appended) {
     TocEntry entry;
     fill_meta(entry, files[f]);
     entry.name = files[f].name;
     all.push_back(std::move(entry));
+    source.push_back(-1 - int64_t(f));
   }
   size_t new_names = 0;
   for (const auto& entry : all) new_names += entry.name.size() + 1;
@@ -430,8 +572,13 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
       out.write(zero.data(), std::streamsize(std::min(zero.size(), pad - at)));
     block += entry.used_blocks;
   };
-  for (uint32_t i = 0; i < count; ++i) {
-    auto& entry = all[i];
+  for (size_t k = 0; k < all.size(); ++k) {
+    auto& entry = all[k];
+    if (source[k] < 0) {
+      write_bundled(entry, files[size_t(-1 - source[k])]);
+      continue;
+    }
+    const uint32_t i = uint32_t(source[k]);
     if (replace_with[i] >= 0) {
       write_bundled(entry, files[size_t(replace_with[i])]);
       continue;
@@ -460,8 +607,6 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     }
     block += uint32_t(bytes / kBlock);
   }
-  for (size_t a = 0; a < appended.size(); ++a)
-    write_bundled(all[count + a], files[appended[a]]);
   // The real TOC.
   {
     size_t name_at = all.size() * 16;
@@ -503,9 +648,9 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     fs::remove(out_path, ec);
     return false;
   }
-  REXLOG_INFO("gta4-addons: {} rebuilt ({}-endian, {}) with {} added file(s)",
+  REXLOG_INFO("gta4-addons: {} rebuilt ({}-endian, {}): {} entries, {} file(s) added or updated",
               img.filename().string(), e.big ? "big" : "little",
-              encrypted ? "encrypted" : "plain", files.size());
+              encrypted ? "encrypted" : "plain", all.size(), files.size());
   return true;
 }
 
@@ -516,11 +661,17 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
 void ExportReference(const fs::path& img, const std::vector<uint8_t>& key, const fs::path& out_dir,
                      const std::vector<std::string>& names) {
   std::error_code ec;
-  bool all_there = true;
-  for (const auto& name : names)
-    all_there &= fs::exists(out_dir / name, ec);
-  if (all_there && fs::exists(out_dir / "vehicles_img_toc.txt", ec))
-    return;
+  // Done once per list: a marker names what was asked for (cars missing from
+  // the archive must not make every boot export again).
+  std::string wanted;
+  for (const auto& name : names) wanted += name + "\n";
+  {
+    std::vector<uint8_t> marker;
+    if (ReadAll(out_dir / "exported.txt", marker) &&
+        std::string(marker.begin(), marker.end()) == wanted &&
+        fs::exists(out_dir / "vehicles_img_toc.txt", ec))
+      return;
+  }
   std::ifstream in(img, std::ios::binary);
   std::array<uint8_t, 0x14> header{};
   if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
@@ -589,6 +740,7 @@ void ExportReference(const fs::path& img, const std::vector<uint8_t>& key, const
     meta << line;
     ++exported;
   }
+  std::ofstream(out_dir / "exported.txt", std::ios::trunc) << wanted;
   REXLOG_INFO("gta4-addons: exported {} reference file(s) and the TOC listing to {}", exported,
               out_dir.string());
 }
@@ -627,27 +779,145 @@ std::string ReadLineFile(const fs::path& path) {
   return text;
 }
 
+// Puts `line` into a named section ("car3" ... "end"), replacing lines an
+// earlier run left for the same model. False when the file has no such
+// section (the caller falls back to cloning the donor's rows).
+bool InsertIntoSection(const fs::path& file, std::string_view section, std::string_view line,
+                       const char* what) {
+  TextLines probe;
+  if (!LoadText(file, probe))
+    return false;
+  const auto has_section = std::any_of(probe.lines.begin(), probe.lines.end(), [&](const std::string& l) {
+    return FirstToken(l) == section;
+  });
+  if (!has_section)
+    return false;
+  const std::string name = FirstToken(line);
+  return EditText(file, what, [&](std::vector<std::string>& lines) {
+    std::erase_if(lines, [&](const std::string& l) { return FirstToken(l) == name; });
+    for (size_t i = 0; i < lines.size(); ++i) {
+      if (FirstToken(lines[i]) != section)
+        continue;
+      for (size_t j = i + 1; j < lines.size(); ++j) {
+        if (FirstToken(lines[j]) == "end") {
+          lines.insert(lines.begin() + std::ptrdiff_t(j), WithEnding(line, lines[j]));
+          return true;
+        }
+      }
+    }
+    return false;
+  });
+}
+
+// One bundled vehicle: addons/<folder>/addon.txt names it and its donor (the
+// stock car whose lines it is placed beside and whose per-model rows it
+// borrows), beside <model>.xft/.xtd, handling.txt and vehicles_ide.txt; an
+// optional carcols.txt carries its own colour section.
+struct Addon {
+  fs::path dir;
+  std::string model, donor = "fbi", colours;
+  std::string handling, ide;
+  std::string carcols_section, carcols_row;
+};
+
+std::string Lower(std::string text) {
+  for (char& c : text) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return text;
+}
+
+std::vector<Addon> FindAddons(const fs::path& app_addons) {
+  std::vector<Addon> out;
+  std::error_code ec;
+  std::vector<fs::path> dirs;
+  for (auto it = fs::directory_iterator(app_addons, ec); !ec && it != fs::directory_iterator();
+       it.increment(ec))
+    if (it->is_directory(ec))
+      dirs.push_back(it->path());
+  std::sort(dirs.begin(), dirs.end());
+  for (const auto& dir : dirs) {
+    TextLines manifest;
+    if (!LoadText(dir / "addon.txt", manifest))
+      continue;
+    Addon a;
+    a.dir = dir;
+    for (auto line : manifest.lines) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (line.empty() || line[0] == '#') continue;
+      const size_t eq = line.find('=');
+      if (eq == std::string::npos) continue;
+      const std::string key = Lower(line.substr(0, eq));
+      std::string value = line.substr(eq + 1);
+      while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.pop_back();
+      while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(0, 1);
+      if (key == "model") a.model = Lower(value);
+      else if (key == "donor") a.donor = Lower(value);
+      else if (key == "colours" || key == "colors") a.colours = Lower(value);
+    }
+    if (a.colours.empty()) a.colours = a.donor;
+    a.handling = ReadLineFile(dir / "handling.txt");
+    a.ide = ReadLineFile(dir / "vehicles_ide.txt");
+    TextLines carcols;
+    if (LoadText(dir / "carcols.txt", carcols)) {
+      for (auto line : carcols.lines) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::string token = FirstToken(line);
+        if (token.empty() || token == "end" || token[0] == '#') continue;
+        if (token == a.model) a.carcols_row = line;
+        else if (a.carcols_section.empty()) a.carcols_section = token;
+      }
+    }
+    std::error_code fec;
+    if (a.model.empty() || a.handling.empty() || a.ide.empty() ||
+        FirstToken(a.ide) != a.model || !fs::exists(dir / (a.model + ".xft"), fec) ||
+        !fs::exists(dir / (a.model + ".xtd"), fec)) {
+      REXLOG_WARN("gta4-addons: {} is incomplete; skipped", dir.string());
+      continue;
+    }
+    out.push_back(std::move(a));
+  }
+  return out;
+}
+
 }  // namespace
 
 void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) {
   std::error_code ec;
-  const fs::path batmobile = app_addons / "batmobile";
-  if (!fs::exists(batmobile, ec)) return;  // nothing bundled
+  if (!fs::exists(app_addons, ec)) return;  // nothing bundled
+  const std::vector<Addon> addons = FindAddons(app_addons);
+  if (addons.empty()) return;
   const fs::path game = FindGameRoot(user_data_root);
   if (game.empty()) {
     REXLOG_INFO("gta4-addons: no installed game yet; add-ons wait for the next boot");
     return;
   }
 
-  // The Batmobile takes the FBI car's slot, as its author shipped it on PC.
-  // Its model files are converted 360 resources (fbi.xft / fbi.xtd, made by
-  // the PC-to-360 converter in the mod's repo, validated against the stock
-  // 360 FBI): the 360 build streams .xft/.xtd, so PC .wft/.wtd files are
-  // never looked up - which is why the earlier PC-file attempts showed a
-  // stock car. The FBI only appears in high-wanted chases, so ordinary
-  // traffic is untouched; the .stock-bak files undo everything.
-  const std::string handling = ReadLineFile(batmobile / "handling_fbi.txt");
-  const std::string ide = ReadLineFile(batmobile / "vehicles_ide_fbi.txt");
+  // Every bundled car is its own vehicle beside the stock ones: no stock
+  // model is replaced (so the FBI cars of 4-star chases stay FBI cars). The
+  // model files are converted 360 resources (<model>.xft / .xtd, made by the
+  // PC-to-360 converter in the mod's repo and validated against the stock
+  // 360 FBI); the 360 build streams .xft/.xtd, so the PC .wft/.wtd files
+  // earlier releases installed were never looked up. Each vehicle line goes
+  // into vehicles.ide's cars section right after its donor's line, with its
+  // own handling line, and colour/camera rows (its own or the donor's
+  // copied). The .stock-bak files undo everything.
+  //
+  // What the earlier FBI-slot releases wrote over the FBI, and the stock
+  // lines to put back when no genuine backup is at hand.
+  auto legacy_handling = [](std::string_view line) {
+    const auto t = Tokens(line);
+    return t.size() > 1 && t[0] == "fbi" && t[1] == "9550.0";  // the Batmobile's mass
+  };
+  auto legacy_ide = [](std::string_view line) {
+    const auto t = Tokens(line);
+    return !t.empty() && t[0] == "fbi" && t.back().find("truckfirefx") != std::string::npos;
+  };
+  constexpr std::string_view kStockFbiHandling =
+      "FBI          1550.0  7.5   85\t0.0 0.0 -0.24  \t\t0.0  5  0.22  1.0 150.0\t0.25 0.65 0.7  "
+      "35.0\t\t1.35 1.10 13.5 0.15 0.48\t\t2.0  1.2  1.2  0.13 -0.13 0.0  0.5  \t\t1.0 1.0 0.8 "
+      "1.5 \t0.0  25000 \t\t440010\t\t1\t\t\t\t0";
+  constexpr std::string_view kStockFbiIde =
+      "fbi,\t\tfbi,\t\tcar,\t\tFBI,\t\tFBI,\t\tVEH@STD,\tVEH@STD_LO4_LO4,\t100,\t999,\t\t"
+      "0.2622, 0.2622,\t\t0,\t5,\t1.0\t,0,\t-";
   bool ok = true;
   // The base game and, when installed, each episode: the episodes read
   // their own copies of these files.
@@ -668,12 +938,33 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       data_roots.push_back(extra);
   }
   for (const auto& data : data_roots) {
-    if (!handling.empty() && fs::exists(data / "handling.dat", ec))
-      ok &= ReplaceLineStartingWith(data / "handling.dat", "FBI", handling,
-                                    "Batmobile handling (FBI slot)");
-    if (!ide.empty())
-      ok &= ReplaceLineStartingWith(data / "vehicles.ide", "fbi,", ide,
-                                    "Batmobile vehicle (FBI slot)");
+    if (fs::exists(data / "handling.dat", ec))
+      ok &= RestoreDonorLine(data / "handling.dat", "fbi", legacy_handling, kStockFbiHandling,
+                             "stock FBI handling");
+    if (fs::exists(data / "vehicles.ide", ec))
+      ok &= RestoreDonorLine(data / "vehicles.ide", "fbi", legacy_ide, kStockFbiIde,
+                             "stock FBI vehicle");
+    for (const auto& a : addons) {
+      const std::string label = a.model;
+      if (fs::exists(data / "handling.dat", ec))
+        ok &= InsertAfterDonor(data / "handling.dat", a.donor, a.handling,
+                               (label + " handling").c_str());
+      if (fs::exists(data / "vehicles.ide", ec))
+        ok &= InsertAfterDonor(data / "vehicles.ide", a.donor, a.ide, (label + " vehicle").c_str());
+      if (fs::exists(data / "carcols.dat", ec)) {
+        // Its own colour row when it brought one and the section exists;
+        // otherwise a copy of a stock car's rows.
+        if (a.carcols_row.empty() ||
+            !InsertIntoSection(data / "carcols.dat", a.carcols_section, a.carcols_row,
+                               (label + " colours").c_str()))
+          ok &= CloneDonorLines(data / "carcols.dat", a.colours, a.model,
+                                (label + " colours").c_str());
+      }
+      // Camera offsets: the donor's (the converted car keeps its physics).
+      if (fs::exists(data / "vehOff.csv", ec))
+        ok &= CloneDonorLines(data / "vehOff.csv", a.donor, a.model,
+                              (label + " camera offsets").c_str());
+    }
   }
 
   const fs::path img = FindVehiclesImg(game);
@@ -693,9 +984,8 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
                   game.string());
   }
   // Every vehicles.img in the installed tree: base, title update, episodes.
-  // The one the game streams from must carry the mod, so all of them get it
-  // (replace-only: an archive without an fbi entry is left as it is), and
-  // each is named in the log with its size for diagnosis.
+  // Whichever the game streams from must carry the cars, so all of them get
+  // them, and each is named in the log with its size for diagnosis.
   std::vector<fs::path> images;
   for (auto it = fs::recursive_directory_iterator(
            game, fs::directory_options::skip_permission_denied, ec);
@@ -719,18 +1009,36 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
     REXLOG_WARN("gta4-addons: no vehicles.img anywhere under {}", game.string());
     return;
   }
-  // Reference files for the PC->360 converter (logs/export on the console).
-  ExportReference(images.front(), key, app_addons.parent_path() / "logs" / "export",
-                  {"fbi.xft", "fbi.xtd"});
+  // Reference files for the PC->360 converter (logs/export on the console):
+  // stock cars to build add-ons on - the FBI, low sports cars, cars with
+  // extras (switchable parts) and the airport tug.
+  {
+    std::vector<std::string> refs;
+    for (const char* car : {"fbi", "turismo", "infernus", "comet", "banshee", "coquette", "taxi",
+                            "taxi2", "police", "police2", "noose", "sultan", "feroci",
+                            "cavalcade", "airtug"}) {
+      refs.push_back(std::string(car) + ".xft");
+      refs.push_back(std::string(car) + ".xtd");
+    }
+    ExportReference(images.front(), key, app_addons.parent_path() / "logs" / "export", refs);
+  }
+  std::vector<fs::path> files;
+  for (const auto& a : addons) {
+    files.push_back(a.dir / (a.model + ".xft"));
+    files.push_back(a.dir / (a.model + ".xtd"));
+  }
   bool any = false;
   for (const auto& image : images) {
     REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
                 uint64_t(fs::file_size(image, ec)));
-    any |= InjectIntoImg(image, key, {batmobile / "fbi.xft", batmobile / "fbi.xtd"},
-                         /*append_missing=*/false);
+    any |= InjectIntoImg(image, key, files, /*append_missing=*/true,
+                         {"batmobile.wft", "batmobile.wtd", "fbi.wft", "fbi.wtd"});
   }
-  if (any && ok)
-    REXLOG_INFO("gta4-addons: Batmobile is installed in the FBI slot");
+  if (any && ok) {
+    std::string names;
+    for (const auto& a : addons) names += (names.empty() ? "" : ", ") + a.model;
+    REXLOG_INFO("gta4-addons: installed as their own vehicles: {}", names);
+  }
 }
 
 }  // namespace gta4::addons

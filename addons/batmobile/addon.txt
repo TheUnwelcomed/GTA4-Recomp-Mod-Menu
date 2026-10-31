@@ -1,0 +1,3 @@
+# Batmobile (JulioNIB), converted for the 360 build
+model=batmobile
+donor=fbi

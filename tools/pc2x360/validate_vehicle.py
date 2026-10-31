@@ -1,6 +1,6 @@
 """Structural validation of a converted 360 vehicle against its PC donor.
 
-usage: validate_output.py <out_dir> <oiv_car_dir>
+usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd>
 """
 import os
 import struct
@@ -9,15 +9,16 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import batconv  # noqa: E402
+import dxt  # noqa: E402
 import rsc5  # noqa: E402
 import xenos  # noqa: E402
 
-out_dir, car = sys.argv[1:3]
+out_dir, name, wft, wtd = sys.argv[1:5]
 flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
-x = rsc5.Resource(open(os.path.join(out_dir, 'fbi.xft.bin'), 'rb').read(), int(flags['fbi.xft'], 16), True, 112, 'xft')
-t = rsc5.Resource(open(os.path.join(out_dir, 'fbi.xtd.bin'), 'rb').read(), int(flags['fbi.xtd'], 16), True, 7, 'xtd')
-d = rsc5.Resource.pc(os.path.join(car, 'fbi.wft'))
-raw = open(os.path.join(car, 'fbi.wtd'), 'rb').read()
+x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
+t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
+d = rsc5.Resource.pc(wft)
+raw = open(wtd, 'rb').read()
 _, rt, rf = struct.unpack_from('<III', raw, 0)
 dtd = rsc5.Resource(zlib.decompress(raw[12:]), rf, False, rt, 'wtd')
 fails = 0
@@ -32,8 +33,18 @@ def check(label, ok, detail=''):
 assert len(x.data) == x.vsize + x.psize and len(t.data) == t.vsize + t.psize
 xf, df = rsc5.read_fragtype(x), rsc5.read_fragtype(d)
 xd, dd = xf['drawable'], df['drawable']
-xwheel = next(c['drawable'] for c in xf['children'] if c['drawable'] and c['drawable']['lods'])
-dwheel = next(c['drawable'] for c in df['children'] if c['drawable'] and c['drawable']['lods'])
+# the template's wheel child (the one holding bone wheel_lf's mesh slot); the
+# donor may have none (wheels modelled into the body)
+dwheel = next((c['drawable'] for c in df['children'] if c['drawable'] and c['drawable']['lods']), None)
+xwheel = next((c['drawable'] for c in xf['children'] if c['drawable'] and c['drawable']['lods']), None)
+EMPTY = {'lods': []}
+if dwheel is None:
+    check('donor has no wheel mesh: no wheel meshes drawn', xwheel is None)
+    xwheel = dwheel = EMPTY
+
+
+def vcount(g):
+    return g['vertex_count'] or g.get('vb_count', 0)
 _, xbones = batconv.bones(x, xd['skeleton_off'])
 _, dbones = batconv.bones(d, dd['skeleton_off'])
 
@@ -63,11 +74,17 @@ check('index buffers: whole triangles, indices in range', bad_idx == 0, 'bad=%d'
 
 # geometry counts and vertex totals equal the donor's (main LOD 0/1, wheel LOD 0/1)
 def counts(draw, n):
-    return [(sum(len(m['geometries']) for m in lod), sum(g['vertex_count'] for m in lod for g in m['geometries']))
+    return [(sum(len(m['geometries']) for m in lod), sum(vcount(g) for m in lod for g in m['geometries']))
             for lod in draw['lods'][:n]]
-check('main LOD 0-1 geometry/vertex counts equal donor', counts(xd, 2) == counts(dd, 2), str(counts(xd, 3)))
-check('main LOD 2 reuses donor LOD 1 (template has 3 LOD slots)', counts(xd, 3)[2] == counts(dd, 2)[1])
-check('wheel LOD 0-1 geometry/vertex counts equal donor', counts(xwheel, 2) == counts(dwheel, 2), str(counts(xwheel, 2)))
+nd = len(dd['lods'])
+check('main LOD geometry/vertex counts equal donor (%d donor LODs)' % nd,
+      counts(xd, min(nd, 3)) == counts(dd, min(nd, 3)), str(counts(xd, 3)))
+if nd < 3:
+    check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', counts(xd, 3)[2] == counts(dd, nd)[-1])
+dw = counts(dwheel, 2)
+check('wheel LOD geometry/vertex counts equal donor (a missing LOD repeats the last)',
+      counts(xwheel, 2) == [dw[min(k, len(dw) - 1)] for k in range(len(counts(xwheel, 2)))] if dw else
+      counts(xwheel, 2) == [], str(counts(xwheel, 2)))
 
 
 # decode every output vertex back and compare with the donor's floats
@@ -85,9 +102,9 @@ def dec_pc(i, b):
     if i == 0:
         return list(struct.unpack('<3f', b))
     if i in (3, 15):
-        return list(struct.unpack('<3f', b))
+        return list(batconv.unit(*struct.unpack('<3f', b)))
     if i == 14:
-        return list(struct.unpack('<4f', b))[:3]
+        return list(batconv.unit(*struct.unpack('<4f', b)[:3]))
     if 6 <= i <= 13:
         return list(struct.unpack('<2f', b))
     return list(b)
@@ -95,25 +112,36 @@ def dec_pc(i, b):
 
 worst = {}
 bone_bad = 0
-pairs = list(zip([g for lod in xd['lods'][:2] for m in lod for g in m['geometries']],
-                 [g for lod in dd['lods'][:2] for m in lod for g in m['geometries']])) + \
+pairs = list(zip([g for lod in xd['lods'][:3] for m in lod for g in m['geometries']],
+                 [g for lod in dd['lods'][:3] for m in lod for g in m['geometries']])) + \
     list(zip([g for lod in xwheel['lods'][:2] for m in lod for g in m['geometries']],
              [g for lod in dwheel['lods'][:2] for m in lod for g in m['geometries']]))
+uv_fill_bad = 0
 for xg, dg in pairs:
-    u = xg['decl']['usage']
-    assert u == dg['decl']['usage']
-    xl, _ = batconv.vertex_layout(u, batconv.SIZE_360)
+    u = dg['decl']['usage']
+    xu = xg['decl']['usage']
+    assert xu & u == u and not (xu & ~u & ~batconv.UV_BITS & 0xFFFF), (hex(xu), hex(u))
+    xl_all, _ = batconv.vertex_layout(xu, batconv.SIZE_360)
+    xat = dict(xl_all)
+    xl = [(i, xat[i]) for i, _ in batconv.vertex_layout(u, batconv.SIZE_360)[0]]
     dl, _ = batconv.vertex_layout(u, batconv.SIZE_PC)
+    filled = [i for i in range(16) if (xu & ~u) & (1 << i)]
     xb, xs = xg['vb_data'][1], xg['vb_stride']
     db, ds = dg['vb_data'][1], dg['vb_stride']
     xbp, dbp = x.vptr(xg['off'] + 56), d.vptr(dg['off'] + 56)
     xtab = [x.u16(xbp + 2 * k) for k in range(x.u16(xg['off'] + 62))] if xbp is not None else []
     dtab = [d.u16(dbp + 2 * k) for k in range(d.u16(dg['off'] + 62))] if dbp is not None else []
     for xi, di in zip(xtab, dtab):  # bone tables bind the same-named bones
-        if xbones[xi] != batconv.BONE_ALIAS.get(dbones[di], dbones[di]):
+        want = batconv.BONE_ALIAS.get(dbones[di], dbones[di])
+        if want not in xbones:
+            want = batconv.BONE_FALLBACK
+        if xbones[xi] != want:
             bone_bad += 1
     step = max(1, xg['vertex_count'] // 400)
     for v in range(0, xg['vertex_count'], step):
+        for i in filled:  # a filled texcoord set repeats texcoord 0
+            if xs and x.phys[xb + v * xs + xat[i]:xb + v * xs + xat[i] + 4] != x.phys[xb + v * xs + xat[6]:xb + v * xs + xat[6] + 4]:
+                uv_fill_bad += 1
         for (i, xo), (_, do) in zip(xl, dl):
             if i == 0:
                 a = list(struct.unpack_from('>3f', x.phys, xb + v * xs + xo))
@@ -133,7 +161,8 @@ check('normals/tangents within packing precision (<= 2/511)',
 check('UVs within half precision (rel <= 2^-10)', max(worst.get(i, 0) for i in range(6, 14)) <= 2 ** -10,
       'max rel err %.6f' % max(worst.get(i, 0) for i in range(6, 14)))
 check('weights/indices/colors carried byte-exact', max(worst.get(1, 0), worst.get(2, 0), worst.get(4, 0)) == 0)
-check('bone tables bind the same-named FBI bones', bone_bad == 0, 'bad=%d' % bone_bad)
+check('bone tables bind the same-named template bones (or the fallback)', bone_bad == 0, 'bad=%d' % bone_bad)
+check('texcoord sets filled for the 360 shader repeat texcoord 0', uv_fill_bad == 0, 'bad=%d' % uv_fill_bad)
 
 # shaders: inputs satisfied; texture names resolvable
 sg = xd['shader_group']
@@ -169,12 +198,15 @@ for i in range(tn):
     f = struct.unpack_from('>6I', t.virt, d3d + 28)
     base = ((f[1] >> 12) << 12) & 0x0FFFFFFF
     w, h = (f[2] & 0x1FFF) + 1, ((f[2] >> 13) & 0x1FFF) + 1
-    fmt, bpp = xenos.FORMATS[s['fmt']]
+    fmt, bpp = xenos.FORMATS['DXT5' if s['fmt'] == batconv.A8R8G8B8 else s['fmt']]
     bw, bh = w // 4, h // 4
     tiled_size = xenos.align(bw, 32) * xenos.align(bh, 32) * bpp
     ok = (w, h) == (s['w'], s['h']) and (f[1] & 0x3F) == fmt and base % 4096 == 0 and \
         base + tiled_size <= t.psize and ((f[0] >> 22) & 0x1FF) << 5 == xenos.align(bw, 32) * 4
-    lin = s['res'].phys[s['data']:s['data'] + bw * bh * bpp]
+    if s['fmt'] == batconv.A8R8G8B8:
+        lin = dxt.encode_dxt5(s['res'].phys[s['data']:s['data'] + w * h * 4], w, h)
+    else:
+        lin = s['res'].phys[s['data']:s['data'] + bw * bh * bpp]
     back = xenos.untile_level(t.phys[base:base + tiled_size], bw, bh, bpp)
     if not ok or back != xenos.swap16(lin):
         tex_bad += 1

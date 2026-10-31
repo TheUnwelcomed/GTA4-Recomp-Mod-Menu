@@ -115,7 +115,9 @@ def read_geometry(r, off):
     if vb is not None:
         g['vb_off'] = vb
         g['vb_count'] = r.u16(vb + 4)
-        g['vb_data'] = r.resolve(r.u32(vb + 8))
+        # +8 is the locked-data pointer, +24 the buffer's own data pointer;
+        # some exporters fill only the latter.
+        g['vb_data'] = r.resolve(r.u32(vb + 8)) or r.resolve(r.u32(vb + 24))
         g['vb_stride'] = r.u32(vb + 12)
         d = r.vptr(vb + 16)
         g['decl'] = read_vertex_decl(r, d) if d is not None else None

@@ -1,0 +1,4 @@
+# F-16C Fighting Falcon (SkylineGTRFreak), converted for the 360 build
+model=f16
+donor=fbi
+colours=airtug

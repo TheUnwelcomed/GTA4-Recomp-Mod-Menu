@@ -31,6 +31,36 @@ FBI's texture blocks exactly at every mip level. Rockstar's tools truncate
 toward zero when packing normals (`Dec3N`) and UVs (half floats); the converter
 does the same.
 
+### The bundled cars
+
+`validate_vehicle.py` decodes every converted vertex back and compares with the
+PC file. It also checks GPU descriptors, bone bindings, shader inputs, and that
+every donor texture untiles back to its source.
+
+| car | result |
+|---|---|
+| Batmobile | 16/16 checks; output byte-identical across converter revisions |
+| F-16C (airtug slot on PC) | 16/16 checks: 3 LODs, 35,295 lod0 vertices |
+| Grotti Deimos GTS | 16/16 checks: 100 geometries, 30 textures |
+
+### What the converter handles (beyond a like-for-like car)
+
+- **Donor bones the template lacks** (`misc_*`, `steeringwheel`, ...) are drawn
+  rigid on the chassis. Vertices are stored in model space, so parts keep
+  their place and lose only their own motion.
+- **A missing wheel** takes its opposite's place (a tricycle's nose wheel fills
+  both front slots). **No wheel mesh at all** hides the template's wheels.
+- **Shaders the template lacks** map to the nearest one it has (`paint2`/`paint3`
+  to `paint1`, `generic` to `mesh`, `interior`/`default` to `interior2`). When
+  the 360 shader reads a texcoord set the part lacks, it is filled from set 0.
+- **Uncompressed A8R8G8B8 textures** are compressed to DXT5 (`dxt.py`), so they
+  take the same verified path as every other texture.
+- **Exporter quirks**: geometry counts left zero (taken from the buffers), the
+  buffer's data pointer only at +24, and un-normalised normals (normalised;
+  in-range ones are untouched).
+- **Textures borrowed from another stock car's dictionary** get a black
+  stand-in. The shared `vehicle_generic_*` pack resolves the rest.
+
 ## Format notes (what was mapped)
 
 - RSC5 360: header big-endian; body = `0x0FF512EF`, u32be length, XMem LZX
@@ -58,15 +88,20 @@ does the same.
 ```
 clang++ -std=c++20 -O2 -I<libmspack/mspack> xlzx.cpp lzxd.o -o xlzx   # port's patched libmspack
 ./xlzx unrsc fbi.xft work/fbi.xft.bin && ./xlzx unrsc fbi.xtd work/fbi.xtd.bin
-python3 identity_test.py <export_dir> <stock PC fbi dir> work      # prove the rules
-python3 run_batmobile.py <export_dir> <PC car dir> work out        # convert
-python3 validate_output.py out <PC car dir>                        # 15 structural checks
-./xlzx rsc 112 <flags> out/fbi.xft.bin fbi.xft  # flags from out/flags.txt
-./xlzx rsc 7   <flags> out/fbi.xtd.bin fbi.xtd
+python3 identity_test.py <export_dir> <stock PC fbi dir> work         # prove the rules
+python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar    # convert (template: fbi)
+python3 validate_vehicle.py out mycar car.wft car.wtd                 # structural checks
+./xlzx rsc 112 <flags> out/mycar.xft.bin mycar.xft   # flags from out/flags.txt
+./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd
 ```
 
-The stock 360 files come from your own console: the trainer build exports
-`fbi.xft`/`fbi.xtd` to `/data/homebrew/PPSA94004/logs/export/` on launch.
+Then add an `addons/mycar/` folder (see `addons/README.md`) and the app
+installs it as a new vehicle.
+
+The stock 360 files come from your own console: the app exports the FBI and
+a set of other stock cars (low sports cars, cars with extras, the airport
+tug) to `/data/homebrew/PPSA94004/logs/export/` on launch. Any of them can be
+the template (`run_vehicle.py ... mycar turismo`).
 Converted files are not committed here — they contain data from the game.
 
 ## Known limits
@@ -74,5 +109,7 @@ Converted files are not committed here — they contain data from the game.
 - Collision stays the template car's (the Batmobile collides like a Buffalo).
 - Template bones the donor lacks (rear doors, sirens, …) keep their position;
   nothing of the donor is drawn there.
-- Donor textures must be DXT1/3/5; mip chains beyond level 0 are not emitted
-  (the Batmobile has none).
+- Donor textures: DXT1/3/5 or A8R8G8B8. Mip chains beyond level 0 are not
+  emitted.
+- Behaviour that PC patches add (ZolikaPatch's pop-up lights or moving
+  steering wheels) is not part of the model and does not carry over.
