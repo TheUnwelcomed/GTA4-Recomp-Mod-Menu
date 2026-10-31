@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -508,6 +509,90 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
   return true;
 }
 
+// Reference export for the PC->360 model converter: copies the named
+// entries' stored bytes out of a vehicles.img (decrypting the TOC like the
+// injector does) into out_dir, with a full TOC listing beside them. Runs
+// once; a later boot that finds the files leaves them alone.
+void ExportReference(const fs::path& img, const std::vector<uint8_t>& key, const fs::path& out_dir,
+                     const std::vector<std::string>& names) {
+  std::error_code ec;
+  bool all_there = true;
+  for (const auto& name : names)
+    all_there &= fs::exists(out_dir / name, ec);
+  if (all_there && fs::exists(out_dir / "vehicles_img_toc.txt", ec))
+    return;
+  std::ifstream in(img, std::ios::binary);
+  std::array<uint8_t, 0x14> header{};
+  if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
+    return;
+  Endian e{};
+  bool encrypted = false;
+  auto match = [&](const uint8_t* p) {
+    uint32_t magic;
+    std::memcpy(&magic, p, 4);
+    if (magic == kImgMagic) { e.big = false; return true; }
+    if (Swap32(magic) == kImgMagic) { e.big = true; return true; }
+    return false;
+  };
+  if (!match(header.data())) {
+    std::array<uint8_t, 0x14> trial = header;
+    CryptBlocks(trial.data(), 16, key, false);
+    if (key.empty() || !match(trial.data())) {
+      REXLOG_WARN("gta4-addons: export: {} is not a readable IMG3", img.string());
+      return;
+    }
+    encrypted = true;
+    header = trial;
+  }
+  const uint32_t count = e.R32(header.data() + 8);
+  const uint32_t toc_size = e.R32(header.data() + 12);
+  if (count == 0 || count > 200000 || toc_size <= count * 16 || toc_size > (64u << 20))
+    return;
+  std::vector<uint8_t> toc(toc_size);
+  if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
+    return;
+  if (encrypted)
+    CryptBlocks(toc.data(), toc.size(), key, false);
+  fs::create_directories(out_dir, ec);
+  std::ofstream listing(out_dir / "vehicles_img_toc.txt", std::ios::trunc);
+  listing << "# " << img.string() << " endian=" << (e.big ? "big" : "little")
+          << " encrypted=" << (encrypted ? 1 : 0) << " entries=" << count << "\n";
+  listing << "# name word0 type offset_block used_blocks flags\n";
+  const char* names_base = reinterpret_cast<const char*>(toc.data()) + count * 16;
+  size_t names_len = toc_size - count * 16, cursor = 0;
+  int exported = 0;
+  for (uint32_t i = 0; i < count && cursor < names_len; ++i) {
+    const uint8_t* p = toc.data() + i * 16;
+    const uint32_t word0 = e.R32(p), type = e.R32(p + 4), offset = e.R32(p + 8);
+    const uint16_t used = e.R16(p + 12), flags = e.R16(p + 14);
+    const size_t len = strnlen(names_base + cursor, names_len - cursor);
+    const std::string name(names_base + cursor, len);
+    cursor += len + 1;
+    char line[160];
+    std::snprintf(line, sizeof(line), "%s %08X %08X %u %u %04X\n", name.c_str(), word0, type,
+                  offset, used, flags);
+    listing << line;
+    if (std::find(names.begin(), names.end(), name) == names.end())
+      continue;
+    const uint64_t size = uint64_t(used) * kBlock - (flags & 0x7FF);
+    std::vector<uint8_t> data(size);
+    in.clear();
+    in.seekg(std::streamoff(uint64_t(offset) * kBlock));
+    if (!in.read(reinterpret_cast<char*>(data.data()), std::streamsize(data.size())))
+      continue;
+    std::ofstream out(out_dir / name, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+    std::snprintf(line, sizeof(line), "%s.toc", name.c_str());
+    std::ofstream meta(out_dir / line, std::ios::trunc);
+    std::snprintf(line, sizeof(line), "word0=%08X type=%08X used_blocks=%u flags=%04X size=%llu\n",
+                  word0, type, used, flags, (unsigned long long)size);
+    meta << line;
+    ++exported;
+  }
+  REXLOG_INFO("gta4-addons: exported {} reference file(s) and the TOC listing to {}", exported,
+              out_dir.string());
+}
+
 fs::path FindGameRoot(const fs::path& user_data_root) {
   std::error_code ec;
   for (const fs::path candidate : {user_data_root, user_data_root.parent_path()}) {
@@ -632,6 +717,9 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
     REXLOG_WARN("gta4-addons: no vehicles.img anywhere under {}", game.string());
     return;
   }
+  // Reference files for the PC->360 converter (logs/export on the console).
+  ExportReference(images.front(), key, app_addons.parent_path() / "logs" / "export",
+                  {"fbi.xft", "fbi.xtd"});
   bool any = false;
   for (const auto& image : images) {
     REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
