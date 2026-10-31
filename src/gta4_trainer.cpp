@@ -317,15 +317,15 @@ constexpr std::array kVehicles = {
     VehicleChoice{"Sabre GT", "SABREGT"},      VehicleChoice{"Dukes", "DUKES"},
     VehicleChoice{"NRG 900", "NRG900"},        VehicleChoice{"PCJ 600", "PCJ"},
     VehicleChoice{"Sanchez", "SANCHEZ"},       VehicleChoice{"Police", "POLICE"},
-    VehicleChoice{"FIB Buffalo", "FBI"},       VehicleChoice{"Taxi", "TAXI"},
+    VehicleChoice{"Taxi", "TAXI"},
     VehicleChoice{"Ambulance", "AMBULANCE"},   VehicleChoice{"Firetruck", "FIRETRUK"},
     VehicleChoice{"Phantom", "PHANTOM"},       VehicleChoice{"Annihilator", "ANNIHILATOR"},
     VehicleChoice{"Maverick", "MAVERICK"},     VehicleChoice{"Buzzard (TBoGT)", "BUZZARD"},
     VehicleChoice{"APC (TBoGT)", "APC"},       VehicleChoice{"Hexer (TLAD)", "HEXER"},
-    // The Batmobile as an ADD-ON vehicle (the repo's batmobile/ folder): a new
-    // model registered beside the stock cars, which all stay untouched. Until
-    // it is installed, IS_MODEL_IN_CDIMAGE refuses it with a toast.
-    VehicleChoice{"Batmobile (add-on)", "BATMOBILE"},
+    // The Batmobile lives in the FBI car's slot (IV's fixed vehicle registry
+    // ignores brand-new vehicle lines, so the add-on route cannot work; the
+    // installer swaps the slot automatically, originals backed up).
+    VehicleChoice{"Batmobile", "FBI"},
 };
 struct WeaponChoice {
   std::string_view label;
@@ -854,7 +854,7 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }
-      model.footer = s.page == Page::kMain ? "X select    O close    touchpad close"
+      model.footer = s.page == Page::kMain ? "X select    O close    double-tap touchpad"
                                            : "X select    O back    < > change";
     }
   }
@@ -923,40 +923,51 @@ void Poll(PPCContext& ctx, uint8_t* base) {
   if (input && input->TryGetLastState(0, &pad))
     buttons = pad.gamepad.buttons;
 
-  // A three-second hold of the DualSense touchpad (BACK in this port's pad
+  // A quick double tap of the DualSense touchpad (BACK in this port's pad
   // mapping) opens and closes the menu. The game also uses BACK for the
-  // camera, so while the hold is being watched the button is hidden from
-  // the game, and an early release replays the tap - camera changes work
-  // exactly as stock, and never fire from working the menu.
+  // camera, so while a possible double tap is being watched the button is
+  // hidden from the game; a lone tap is replayed to it once the double-tap
+  // window lapses. Cameras change on single taps exactly as stock, just a
+  // third of a second later, and never from working the menu.
   constexpr uint16_t kToggle = X_INPUT_GAMEPAD_BACK;
-  constexpr uint64_t kHoldMs = 3000;
-  static uint64_t s_hold_started = 0;
+  constexpr uint64_t kTapMs = 350;   // press shorter than this is a tap
+  constexpr uint64_t kGapMs = 400;   // two taps inside this toggle the menu
+  static uint64_t s_pressed_at = 0, s_first_tap_at = 0;
   static int s_replay_frames = 0;
   const bool held = buttons & kToggle;
   const bool was_held = g_pad.last & kToggle;
   if (held && !was_held)
-    s_hold_started = now;
-  if (held && s_hold_started && now - s_hold_started >= kHoldMs) {
-    s_hold_started = 0;
-    s.open = !s.open;
-    if (s.open) {
-      s.page = Page::kMain;
-      s.selected = 0;
+    s_pressed_at = now;
+  if (!held && was_held && s_pressed_at) {
+    const bool tap = now - s_pressed_at <= kTapMs;
+    s_pressed_at = 0;
+    if (tap && s_first_tap_at && now - s_first_tap_at <= kGapMs) {
+      // The double tap.
+      s_first_tap_at = 0;
+      s.open = !s.open;
+      if (s.open) {
+        s.page = Page::kMain;
+        s.selected = 0;
+      }
+    } else if (tap) {
+      s_first_tap_at = now;  // maybe a camera tap: judgement waits for the gap
+    } else {
+      // A long press is the game's to keep.
+      if (!s.open)
+        s_replay_frames = 3;
+      s_first_tap_at = 0;
     }
-  } else if (!held && was_held && s_hold_started) {
-    if (!s.open && now - s_hold_started < kHoldMs)
-      s_replay_frames = 3;  // a tap: give the game its camera change
-    s_hold_started = 0;
   }
-  // The hold's progress, so the hold does not feel dead.
-  if (!s.open && held && s_hold_started && now - s_hold_started > 600)
-    Toast(s, "Keep holding to open Liberty Trainer (" +
-                 std::to_string((kHoldMs - (now - s_hold_started) + 999) / 1000) + ")",
-          300);
+  if (s_first_tap_at && !held && now - s_first_tap_at > kGapMs) {
+    // No second tap came: it was a camera tap after all.
+    if (!s.open)
+      s_replay_frames = 3;
+    s_first_tap_at = 0;
+  }
   uint32_t adjust = 0;
   if (!s.open) {
-    if (held)
-      adjust |= kToggle;  // hidden while the hold is watched
+    if (held || s_first_tap_at)
+      adjust |= kToggle;  // hidden while the double tap is watched
     else if (s_replay_frames > 0) {
       adjust |= uint32_t(kToggle) << 16;
       --s_replay_frames;

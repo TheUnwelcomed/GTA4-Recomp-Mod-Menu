@@ -141,6 +141,68 @@ bool AppendLineIfMissing(const fs::path& file, std::string_view token, std::stri
   return true;
 }
 
+// Replaces the one line that opens with `prefix` (a whole first token). Done
+// already when the file holds `line` verbatim.
+bool ReplaceLineStartingWith(const fs::path& file, std::string_view prefix,
+                             std::string_view line, const char* what) {
+  std::vector<uint8_t> raw;
+  if (!ReadAll(file, raw)) {
+    REXLOG_WARN("gta4-addons: cannot read {}", file.string());
+    return false;
+  }
+  const std::string text(reinterpret_cast<const char*>(raw.data()), raw.size());
+  if (text.find(line) != std::string::npos) {
+    REXLOG_INFO("gta4-addons: {} already in place in {}", what, file.string());
+    return true;
+  }
+  std::string replaced;
+  replaced.reserve(text.size() + line.size());
+  bool done = false;
+  size_t pos = 0;
+  while (pos <= text.size()) {
+    const size_t eol = text.find('\n', pos);
+    const size_t end = eol == std::string::npos ? text.size() : eol;
+    const std::string_view current(text.data() + pos, end - pos);
+    const bool starts =
+        current.size() > prefix.size() && current.substr(0, prefix.size()) == prefix &&
+        (prefix.back() == ',' || current[prefix.size()] == ' ' || current[prefix.size()] == '\t');
+    if (!done && starts) {
+      replaced.append(line);
+      done = true;
+    } else {
+      replaced.append(current);
+    }
+    if (eol == std::string::npos)
+      break;
+    replaced.push_back('\n');
+    pos = eol + 1;
+  }
+  if (!done) {
+    REXLOG_WARN("gta4-addons: no line starting with '{}' in {}", std::string(prefix),
+                file.string());
+    return false;
+  }
+  if (!BackupOnce(file))
+    return false;
+  const fs::path tmp = file.string() + ".new";
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out)
+      return false;
+    out.write(replaced.data(), std::streamsize(replaced.size()));
+    if (!out)
+      return false;
+  }
+  std::error_code ec;
+  fs::rename(tmp, file, ec);
+  if (ec) {
+    REXLOG_WARN("gta4-addons: could not update {}: {}", file.string(), ec.message());
+    return false;
+  }
+  REXLOG_INFO("gta4-addons: {} applied in {}", what, file.string());
+  return true;
+}
+
 struct NewFile {
   std::string name;              // name inside the archive
   std::vector<uint8_t> data;     // RSC file contents
@@ -258,24 +320,54 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     entries[i].name.assign(names + cursor, len);
     cursor += len + 1;
   }
-  for (const auto& add : files)
-    for (const auto& entry : entries)
-      if (entry.name == add.name) {
-        REXLOG_INFO("gta4-addons: {} already holds {}", img.filename().string(), add.name);
-        return true;  // installed on an earlier boot
-      }
-
-  // The new table: every existing entry keeps its order and sizes, only the
-  // offsets move; the added files go at the end.
-  std::vector<TocEntry> all = entries;
-  for (const auto& add : files) {
-    TocEntry entry;
+  // A bundled file whose name the archive already carries replaces that
+  // entry's payload (the IV engine only accepts vehicles it already knows,
+  // so car mods swap an existing model); an unknown name is appended. An
+  // entry whose stored byte size already equals the bundled file counts as
+  // current, so later boots change nothing.
+  auto fill_meta = [](TocEntry& entry, const NewFile& add) {
     entry.word0 = add.rsc_flags;  // IV resource flags carry the top bits
     entry.type = add.rsc_type;
     const uint32_t padded = uint32_t((add.data.size() + kBlock - 1) / kBlock) * kBlock;
     entry.used_blocks = uint16_t(padded / kBlock);
     entry.flags = uint16_t(0x2000 | ((padded - add.data.size()) & 0x7FF));
-    entry.name = add.name;
+  };
+  std::vector<int> replace_with(count, -1);
+  std::vector<bool> matched(files.size(), false);
+  std::vector<size_t> appended;
+  bool work = false;
+  for (size_t f = 0; f < files.size(); ++f) {
+    for (uint32_t i = 0; i < count; ++i) {
+      if (entries[i].name != files[f].name)
+        continue;
+      matched[f] = true;
+      const uint32_t stored =
+          uint32_t(entries[i].used_blocks) * kBlock - uint32_t(entries[i].flags & 0x7FF);
+      if (stored == files[f].data.size()) {
+        REXLOG_INFO("gta4-addons: {} already carries this {}", img.filename().string(),
+                    files[f].name);
+      } else {
+        replace_with[i] = int(f);
+        work = true;
+      }
+      break;
+    }
+    if (!matched[f]) {
+      appended.push_back(f);
+      work = true;
+    }
+  }
+  if (!work)
+    return true;
+
+  std::vector<TocEntry> all = entries;
+  for (uint32_t i = 0; i < count; ++i)
+    if (replace_with[i] >= 0)
+      fill_meta(all[i], files[size_t(replace_with[i])]);
+  for (const size_t f : appended) {
+    TocEntry entry;
+    fill_meta(entry, files[f]);
+    entry.name = files[f].name;
     all.push_back(std::move(entry));
   }
   size_t new_names = 0;
@@ -302,10 +394,22 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     out.write(zero.data(), std::streamsize(chunk));
     at += chunk;
   }
-  // Existing payloads, in order, re-offset.
+  // Payloads in order: copied from the original, or the replacement's bytes.
   std::vector<uint8_t> buffer(8u << 20);
+  auto write_bundled = [&](TocEntry& entry, const NewFile& add) {
+    entry.offset_block = block;
+    out.write(reinterpret_cast<const char*>(add.data.data()), std::streamsize(add.data.size()));
+    const size_t pad = size_t(entry.used_blocks) * kBlock - add.data.size();
+    for (size_t at = 0; at < pad; at += zero.size())
+      out.write(zero.data(), std::streamsize(std::min(zero.size(), pad - at)));
+    block += entry.used_blocks;
+  };
   for (uint32_t i = 0; i < count; ++i) {
     auto& entry = all[i];
+    if (replace_with[i] >= 0) {
+      write_bundled(entry, files[size_t(replace_with[i])]);
+      continue;
+    }
     uint64_t src = uint64_t(entries[i].offset_block) * kBlock;
     uint64_t bytes = uint64_t(entries[i].used_blocks) * kBlock;
     // A non-resource entry's blocks derive from its byte size.
@@ -330,17 +434,8 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
     }
     block += uint32_t(bytes / kBlock);
   }
-  // The added files.
-  for (size_t i = 0; i < files.size(); ++i) {
-    auto& entry = all[count + i];
-    entry.offset_block = block;
-    const auto& data = files[i].data;
-    out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
-    const size_t pad = size_t(entry.used_blocks) * kBlock - data.size();
-    for (size_t at = 0; at < pad; at += zero.size())
-      out.write(zero.data(), std::streamsize(std::min(zero.size(), pad - at)));
-    block += entry.used_blocks;
-  }
+  for (size_t a = 0; a < appended.size(); ++a)
+    write_bundled(all[count + a], files[appended[a]]);
   // The real TOC.
   {
     size_t name_at = all.size() * 16;
@@ -434,8 +529,13 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
     return;
   }
 
-  const std::string handling = ReadLineFile(batmobile / "handling.txt");
-  const std::string ide = ReadLineFile(batmobile / "vehicles_ide.txt");
+  // IV's vehicle registry is a fixed table (a brand-new vehicle line is
+  // ignored, as the earlier add-on attempt proved on the console), so the
+  // Batmobile ships the way its author shipped it on PC: in the FBI car's
+  // slot. The FBI only appears in high-wanted chases, so ordinary traffic
+  // is untouched; restore_fbi.txt and the .stock-bak files undo everything.
+  const std::string handling = ReadLineFile(batmobile / "handling_fbi.txt");
+  const std::string ide = ReadLineFile(batmobile / "vehicles_ide_fbi.txt");
   bool ok = true;
   // The base game and, when installed, each episode: the episodes read
   // their own copies of these files.
@@ -447,10 +547,11 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
   }
   for (const auto& data : data_roots) {
     if (!handling.empty() && fs::exists(data / "handling.dat", ec))
-      ok &= AppendLineIfMissing(data / "handling.dat", "BATMOBILE", handling,
-                                "Batmobile handling");
+      ok &= ReplaceLineStartingWith(data / "handling.dat", "FBI", handling,
+                                    "Batmobile handling (FBI slot)");
     if (!ide.empty())
-      ok &= AppendLineIfMissing(data / "vehicles.ide", "batmobile,", ide, "Batmobile vehicle");
+      ok &= ReplaceLineStartingWith(data / "vehicles.ide", "fbi,", ide,
+                                    "Batmobile vehicle (FBI slot)");
   }
 
   const fs::path img = FindVehiclesImg(game);
@@ -469,8 +570,8 @@ void InstallBundled(const fs::path& app_addons, const fs::path& user_data_root) 
       REXLOG_WARN("gta4-addons: {} has no aes_key.bin; only a plain archive can be edited",
                   game.string());
   }
-  if (InjectIntoImg(img, key, {batmobile / "batmobile.wft", batmobile / "batmobile.wtd"}) && ok)
-    REXLOG_INFO("gta4-addons: Batmobile add-on is installed");
+  if (InjectIntoImg(img, key, {batmobile / "fbi.wft", batmobile / "fbi.wtd"}) && ok)
+    REXLOG_INFO("gta4-addons: Batmobile is installed in the FBI slot");
 }
 
 }  // namespace gta4::addons
