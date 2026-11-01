@@ -3311,6 +3311,7 @@ struct CarEngineState {
   gta4::car::EngineSynth* synth;
   std::string_view label, model;
   std::array<float, 5> gear_top;  // m/s at the rev limit in each gear
+  float volume;                   // its level in the mix
   bool in_car = false, running = false;  // running: the voice plays (winding down too)
   int gear = 0;
   uint64_t next_probe = 0;
@@ -3319,9 +3320,10 @@ struct CarEngineState {
   gta4ps5::sound::Voice* voice = nullptr;
 #endif
 };
-CarEngineState g_bat_engine{&g_bat_synth, "Batmobile", "BATMOBILE", {12.0f, 21.0f, 31.0f, 42.0f, 56.0f}};
-CarEngineState g_deimos_engine{&g_deimos_synth, "Deimos", "DEIMOS", {14.0f, 24.0f, 35.0f, 47.0f, 62.0f}};
-constexpr float kCarEngineVolume = 1.0f;
+// (Levels: v1.7.11-v1.7.13 played the Batmobile at full level, much louder
+// than the game's own cars.)
+CarEngineState g_bat_engine{&g_bat_synth, "Batmobile", "BATMOBILE", {12.0f, 21.0f, 31.0f, 42.0f, 56.0f}, 0.35f};
+CarEngineState g_deimos_engine{&g_deimos_synth, "Deimos", "DEIMOS", {14.0f, 24.0f, 35.0f, 47.0f, 62.0f}, 0.4f};
 
 // Starts a car's voice (want) or stops it once its synth has gone quiet.
 void CarVoice(CarEngineState& e, bool want) {
@@ -3374,7 +3376,7 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
   auto& synth = *e.synth;
   if (!vehicle.car || vehicle.model != model) {
     if (e.in_car)
-      synth.SetTarget(0.0f, 0.0f, 0.0f, kCarEngineVolume);  // switched off: it winds down
+      synth.SetTarget(0.0f, 0.0f, 0.0f, e.volume);  // switched off: it winds down
     e.in_car = false;
     CarVoice(e, false);
 #if REX_PLATFORM_PS5
@@ -3388,7 +3390,7 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
   if (!e.in_car) {
     e.in_car = e.running = true;
     e.gear = 0;
-    synth.SetTarget(idle, 0.0f, 0.0f, kCarEngineVolume);  // the starter, then idle
+    synth.SetTarget(idle, 0.0f, 0.0f, e.volume);  // the starter, then idle
     CarVoice(e, true);
     if (e.log < 4) {
       ++e.log;
@@ -3407,7 +3409,7 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
   float rpm = idle + (1.0f - idle) * std::clamp(speed / e.gear_top[size_t(e.gear)], 0.0f, 1.0f);
   // Standing (or crawling) the throttle revs it.
   rpm = std::max(rpm, idle + (1.0f - idle) * 0.6f * throttle * (speed < 3.0f ? 1.0f : 0.35f));
-  synth.SetTarget(rpm, throttle, boost, kCarEngineVolume);
+  synth.SetTarget(rpm, throttle, boost, e.volume);
 }
 
 // Every frame in the F-16 (a look a few times a second otherwise, and while

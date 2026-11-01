@@ -136,6 +136,9 @@ network session.
 
 ## Changes
 
+- **v1.7.14**: the Batmobile's engine deeper (a slow-revving V8 with a dark
+  exhaust and weight in the low end, the turbine soft and low) and about half
+  as loud; the Deimos's engine at a similar level.
 - **v1.7.13**: the Grotti Deimos gets its own synthesized engine (a
   high-revving flat-plane Italian V8 with a carburettor howl) and a motor
   whir for its pop-up lamps; its game name is now `DEIMOS` (no Turismo

@@ -51,21 +51,29 @@ struct Character {
   float level, level_load, level_revs;
   float bright, bright_revs;      // the rumble's top: hz + revs x (0..1)
   float howl;                     // the carburettors' tone at twice the firing rate
+  float sub;                      // the firing rate's own tone: weight in the low end
   float turbine;                  // 0: none
+  float turbine_hz, turbine_range;  // the whine's pitch: hz + range x spool
   float intake, intake_load;      // rasp level, and under load
   float intake_hz, intake_revs;   // its band: hz + revs x (0..1)
   float pops;                     // lift-off pops (a rate)
   float flare;                    // the catch's flare, times idle
+  float roar_hz, roar_range;      // the booster's roar: its top, hz + range x boost
 };
-// The Batmobile: cross-plane V8 (an uneven beat, a lopey idle), turbine.
-constexpr Character kBatmobile{700.0f,  6500.0f, {1.00f, 0.80f, 1.12f, 0.93f, 0.86f, 1.06f, 0.78f, 1.16f},
-                               0.42f,   90.0f,   1.6f,  1.3f, 1.6f, 2.6f, 0.12f, 0.14f, 0.07f, 900.0f, 1700.0f,
-                               0.0f,    1.0f,    0.006f, 0.05f, 400.0f, 1400.0f, 22.0f, 1.9f};
+// The Batmobile: a big, slow-revving cross-plane V8 (an uneven beat, a lopey
+// idle, a deep exhaust, weight in the low end), a soft turbine under it.
+// (v1.7.11-v1.7.13 revved to 6,500 with a bright exhaust and a turbine
+// whining to 3.3 kHz: thin and shrill at speed.)
+constexpr Character kBatmobile{650.0f,  5200.0f, {1.00f, 0.80f, 1.12f, 0.93f, 0.86f, 1.06f, 0.78f, 1.16f},
+                               0.45f,   55.0f,   1.0f,  2.1f, 2.1f, 3.0f, 0.12f, 0.12f, 0.05f, 480.0f, 820.0f,
+                               0.0f,    0.07f,   0.35f, 420.0f, 900.0f, 0.004f, 0.022f, 220.0f, 520.0f, 16.0f,
+                               1.8f,    90.0f,   650.0f};
 // The Grotti Deimos: a flat-plane Italian V8 (an even beat alternating
 // between the banks, a busy idle, high revs, carburettor howl), no turbine.
 constexpr Character kDeimos{950.0f,  7700.0f, {1.00f, 0.93f, 1.02f, 0.95f, 1.00f, 0.93f, 1.02f, 0.95f},
                             0.14f,   150.0f,  2.3f,  0.75f, 1.35f, 2.2f, 0.10f, 0.10f, 0.08f, 1500.0f, 3200.0f,
-                            0.22f,   0.0f,    0.009f, 0.08f, 650.0f, 2700.0f, 14.0f, 2.2f};
+                            0.22f,   0.0f,    0.0f,  750.0f, 2550.0f, 0.009f, 0.08f, 650.0f, 2700.0f, 14.0f,
+                            2.2f,    120.0f,  1300.0f};
 
 class EngineSynth {
  public:
@@ -178,6 +186,10 @@ class EngineSynth {
       dc_y_ = rumble - dc_x_ + 0.9974f * dc_y_;
       dc_x_ = rumble;
       rumble = rumble_lp_.Lowpass(dc_y_, 3.14159265f * (c_.bright + c_.bright_revs * r) / kRate, 0.9f);
+      // weight: the firing rate's own tone, in step with the pulses, firmer
+      // under load
+      if (c_.sub > 0.0f && rpm_ > 0.002f)
+        rumble += Sin(fire_ph_) * c_.sub * (0.55f + 0.45f * throttle_) * std::min(1.0f, rpm_ / kIdle);
       // the carburettors' howl: a tone at twice the firing rate, opening with
       // the revs and the throttle
       if (c_.howl > 0.0f && rpm_ > 0.002f) {
@@ -189,7 +201,7 @@ class EngineSynth {
         rumble = 0.0f;
 
       // ---- turbine whine
-      const float tf = (750.0f + 2550.0f * std::pow(turb_, 1.15f)) * (1.0f + 0.004f * wander_);
+      const float tf = (c_.turbine_hz + c_.turbine_range * std::pow(turb_, 1.15f)) * (1.0f + 0.004f * wander_);
       if ((i & 255) == 0)
         wander_ += (Noise() - wander_) * 0.15f;
       t1_ = Wrap(t1_ + tf * dt);
@@ -198,8 +210,8 @@ class EngineSynth {
       t1r_ = Wrap(t1r_ + tf * 1.003f * dt);
       const float whine_amp =
           0.022f * c_.turbine * Smooth(0.02f, 0.4f, turb_) * (0.7f + 0.5f * turb_ + 0.4f * boost_);
-      const float whine_l = (Sin(t1_) + 0.45f * Sin(t2_) + 0.18f * Sin(t3_)) * whine_amp;
-      const float whine_r = (Sin(t1r_) + 0.45f * Sin(t2_) + 0.18f * Sin(t3_)) * whine_amp;
+      const float whine_l = (Sin(t1_) + 0.3f * Sin(t2_) + 0.08f * Sin(t3_)) * whine_amp;
+      const float whine_r = (Sin(t1r_) + 0.3f * Sin(t2_) + 0.08f * Sin(t3_)) * whine_amp;
 
       // ---- intake rasp: noise gated by the firing pulses
       const float rasp_g = 3.14159265f * std::min(c_.intake_hz + c_.intake_revs * r, 4500.0f) / kRate;
@@ -209,7 +221,7 @@ class EngineSynth {
       const float rasp_r = rasp_r_.Bandpass(Noise(), rasp_g * 1.07f, 1.3f) * rasp_amp * gate;
 
       // ---- booster: a deep roar opening up, and sparse crackles
-      const float roar_g = 3.14159265f * (120.0f + 1300.0f * boost_) / kRate;
+      const float roar_g = 3.14159265f * (c_.roar_hz + c_.roar_range * boost_) / kRate;
       const float roar_amp = 0.33f * boost_;
       const float roar_l = roar_l_.Lowpass(Noise(), roar_g, 0.8f) * roar_amp;
       const float roar_r = roar_r_.Lowpass(Noise(), roar_g, 0.8f) * roar_amp;
@@ -220,7 +232,7 @@ class EngineSynth {
       if (running_ && throttle_ < 0.15f && r > 0.35f && Uniform() < (r - 0.3f) * c_.pops * dt)
         crack_ = std::max(crack_, 0.35f + 0.45f * Uniform());
       if (crack_ > 1e-4f) {
-        crack = crack_bp_.Bandpass(Noise() * crack_, 0.09f, 1.2f) * 0.6f;
+        crack = crack_bp_.Bandpass(Noise() * crack_, 0.06f, 1.2f) * 0.6f;
         crack_ *= 0.9985f;  // (~15 ms)
       }
 

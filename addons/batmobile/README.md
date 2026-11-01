@@ -55,10 +55,14 @@ and let go a moment later, up to four times, then put back in the seat.
 ## Engine sound
 
 An original voice in the spirit of the 1989/1992 film car, synthesized from
-scratch (nothing from the films): a cross-plane V8's firing pulses (rpm / 15
-Hz, a lopey idle) through a low exhaust resonance and a growl that grows with
-load, a turbine's whine over it, an intake rasp, pops on lift-off, and a deep
-roar with crackles on the booster. The trainer works the revs out of the road
+scratch (nothing from the films): a big, slow-revving cross-plane V8's firing
+pulses (rpm / 15 Hz; 650 to 5,200 rpm, a lopey idle) through a deep exhaust
+resonance, with the firing rate's own tone for weight and a growl that grows
+with load, kept dark (nothing much above ~1.3 kHz), a soft turbine under it
+(420 Hz to ~1.3 kHz), a low intake rasp, pops on lift-off, and a deep roar
+with crackles on the booster, at 35% level. v1.7.11-v1.7.13 revved to 6,500
+with a bright exhaust and a turbine whining to 3.3 kHz, at full level: shrill
+and much louder than the game's cars. The trainer works the revs out of the road
 speed through five simulated gears (the throttle revs it standing still);
 getting in cranks the starter and it catches; getting out it winds down. The
 canopy's hiss and clunk come from the same voice (the F-16's canopy too).
