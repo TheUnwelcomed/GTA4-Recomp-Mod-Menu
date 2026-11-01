@@ -34,7 +34,7 @@ keeps going while you browse.
   long as it's the same kind (anything on wheels for a car or bike, a helicopter
   for a helicopter, a boat for a boat). A mission's own story vehicle is a
   different check and still counts
-- **Car Spawning**: 29 stock cars, bikes and helicopters plus eight bundled
+- **Car Spawning**: 29 stock cars, bikes and helicopters plus twelve bundled
   **add-on vehicles**, spawned in front of you. Episode-only vehicles are
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
@@ -62,6 +62,14 @@ keeps going while you browse.
     that bursts where it lands), and its side ramps fold down on their
     hydraulics to let you (and a passenger) in and out
   - **Bravado Gauntlet Classic** (Vanillaworks / Milcin), with opening doors
+  - **The DeLoreans** from Time Travel IV 2.0a (Sersorroza's models,
+    MrFusion92 and Lorenzo3024it's mod): the DMC-12 and the three films'
+    time machines, all with gullwing doors. The time machines travel in
+    time (the mod's .NET script re-done in the trainer): time circuits on
+    d-pad down with the TCD on screen, the destination set in the menu,
+    88 mph with the build-up, the flash and boom, fire trails, the clock
+    jumping to the destination, the return with a triple boom, frost and
+    steaming vents; plutonium or Mr. Fusion to reload; Part II flies
   - Each car has its own engine, synthesized in the trainer (no recordings):
     the Batmobile's turbine over a V8, the F-16's jet, and for the Deimos,
     the Nexus, the Arbiter X and the Dominator 645 a physically informed
@@ -69,9 +77,11 @@ keeps going while you browse.
     firing in its real order into its bank's exhaust, the pipes' and
     mufflers' own resonances, the intake, the valve gear): a late-70s
     Ferrari's flat-plane V8, the NSX's VTEC V6, the GTO's Ram Air 400, the
-    '65 Mustang's 289, the Challenger's 440 Six Pack, and the Lazar's
-    turbo-diesel six (its knock, its turbo, its air brakes). Their doors
-    latch and slam (their game names have no IV sounds)
+    '65 Mustang's 289, the Challenger's 440 Six Pack, the Lazar's
+    turbo-diesel six (its knock, its turbo, its air brakes) and the
+    DeLorean's odd-firing PRV V6; the time machines' effects too
+    (`src/gta4_time_machine.h`). Their doors latch and slam (their game
+    names have no IV sounds)
   - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets.
   The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
@@ -157,6 +167,23 @@ network session.
 
 ## Changes
 
+- **v1.7.21**: the DeLoreans (DMC-12, and the time machines of Parts I, II
+  and III) from Time Travel IV 2.0a: gullwing doors on pivots following the
+  game's doors, the PRV V6, and time travel (time circuits and a TCD drawn
+  in the overlay, a Time Machine menu page with the films' dates, the
+  build-up from 60 mph, the departure at 88 with `START_SCRIPT_FIRE` trails
+  and the car hidden and frozen, `SET_TIME_OF_DAY` to the destination, the
+  return with a triple boom, frost through the paint, `shot_directed_steam`
+  vents; plutonium or Mr. Fusion reloads on L1; Part II's flight swaps in
+  the mod's hover model and flies it with the quaternion and forward speed
+  like the F-16, holding its height). Fixes the Lazar 3 (v1.7.20): the
+  installer now places an add-on's handling after its donor's handling id
+  (the Cavalcade's is CAVCADE; the Lazar had none: no wheels, floating,
+  gone when left), and the turret aims along the camera's line to the car.
+  Converter: IMG archives (`img3.py`), shared/parent texture dictionaries,
+  per-car options (`lods=0:0:2` leaves a middle LOD out, `tex=`/`detail=`
+  cap texture sides), texture names with their own `.dds` kept whole (and
+  aliased), a PC env map in a dirt slot left to the template's texture.
 - **v1.7.20**: the Lazar 3 (armed) and the Bravado Gauntlet Classic added.
   The Lazar's turret follows the game camera (`GET_GAME_CAM`,
   `GET_CAM_ROT` against `GET_CAR_HEADING`) at its motors' speeds, the gun
@@ -260,6 +287,7 @@ network session.
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
 | `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
+| `src/gta4_time_machine.h` | the DeLorean time machines' synthesized effects (keypad, circuits, flux capacitor, build-up, departure and fire trails, triple boom, vents, plutonium, Mr. Fusion, flight conversion, hover thrusters; `tools/car/render_time_machine.cpp` renders them) |
 | `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's, the Gauntlet's and the Lazar's physically informed model) and their canopy, door, gullwing, pop-up lamp, cannon, ramp and turret sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
@@ -299,6 +327,8 @@ one in `/data/homebrew/` — your installed game, saves and settings stay.
   port): the Lazar 3.
 - The **Vanillaworks Team** (original model) and **Milcin** (IV port): the
   Bravado Gauntlet Classic.
+- **Sersorroza** (DeLorean models), **MrFusion92** and **Lorenzo3024it**
+  (Time Travel IV 2.0a): the DeLorean DMC-12 and the time machines.
 - **johndoe968** (original model) and **Milcin** (IV port): the Imponte
   Arbiter X.
 

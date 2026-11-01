@@ -193,8 +193,21 @@ constexpr Physical kLazarEngine{6, {0, 120, 240, 360, 480, 600}, {0, 0, 0, 0, 0,
                                 430.0f, 70.0f, 0.45f, 1.7f, 0.3f, 0.035f, 0.0f, 0.35f, 85.0f,
                                 0.07f, 1300.0f, 0.0f, 0.03f, 0.0f, 0.0f, 1.15f,
                                 0.22f, 1300.0f, 0.22f, 3800.0f};
+// The DeLorean DMC-12 (and the time machines built on it): the PRV
+// ZMJ-159, a 2.85-litre 90-degree V6 on common crankpins, so it fires
+// unevenly, 90 and 150 degrees apart in turn (1-6-3-5-2-4, the banks taking
+// turns): each bank even, the two a quarter turn apart, which through the
+// Y-pipe into one muffler is its uneven throb. Bosch K-Jetronic injection (a
+// steady idle, the air's rush when it opens up), a short run to the muffler
+// behind the rear-mounted engine, twin tips, revving to 6,000.
+constexpr Physical kDeloreanEngine{6, {0, 90, 240, 330, 480, 570}, {0, 1, 0, 1, 0, 1},
+                                   245.0f, 1.15f, 0.55f, 1.2f, 0.45f, -0.25f, 0.25f, -0.3f, 0.48f,
+                                   1000.0f, 170.0f, 0.25f, 0.85f, 0.32f, 0.045f, 0.18f, 0.3f, 210.0f,
+                                   0.12f, 2100.0f, 0.0f, 0.035f, 0.0f, 0.0f, 1.89f};
 constexpr Character kDeimos{.idle_rpm = 950.0f, .limit_rpm = 7700.0f, .pops = 8.0f, .flare = 2.0f,
                             .physical = &kDeimosEngine};
+constexpr Character kDelorean{.idle_rpm = 800.0f, .limit_rpm = 6000.0f, .pops = 4.0f, .flare = 1.8f,
+                              .physical = &kDeloreanEngine};
 constexpr Character kGauntlet{.idle_rpm = 800.0f, .limit_rpm = 5800.0f, .pops = 11.0f, .flare = 1.9f,
                               .physical = &kGauntletEngine};
 constexpr Character kLazar{.idle_rpm = 650.0f, .limit_rpm = 2300.0f, .pops = 0.0f, .flare = 1.5f,

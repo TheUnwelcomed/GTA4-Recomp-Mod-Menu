@@ -1,0 +1,1 @@
+delthr, delthr, car, DELTHR, BTTF3, VEH@LOW, VEH@LOW_INFERNUS, 0, 10, 0.2747, 0.2947, 0, 15, 1.0, 0, sports

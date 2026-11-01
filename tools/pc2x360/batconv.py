@@ -18,6 +18,7 @@ into the .xtd), bounds, and the positions of the template's point bones
 copy of the skeleton's pose (see "the transplant" below).
 """
 import math
+import re
 import struct
 import sys
 
@@ -589,7 +590,7 @@ def meets(pos, cond):
 
 
 class Converter:
-    def __init__(self, tmpl, donor, log=print, pivots=None, shader_sources=()):
+    def __init__(self, tmpl, donor, log=print, pivots=None, shader_sources=(), options=None):
         """`pivots`: parse_pivots() output (or {template bone: [donor bones]}):
         the donor bones' geometry is bound to that template bone, moved to the
         hinge; the trainer turns it (pop-up lamps, landing gear).
@@ -608,6 +609,7 @@ class Converter:
         self.decls = {}
         self.uv_filled = 0
         self.texture_names = set()
+        self.options = options or {}
         self.shader_sources = list(shader_sources)
         self._templates()
 
@@ -1139,6 +1141,16 @@ class Converter:
                     np_ = d.vptr(dp['value'] + 20)
                     name = d.cstr(np_) if np_ is not None else None
                 use = name is not None
+                # A PC reflection map ("vehicleenvmap128", in no dictionary
+                # the console has; the BTTF IV DeLoreans name it in their dirt
+                # slot) leaves the template's own texture there, or none.
+                if use and 'envmap' in name.lower():
+                    self.env_kept = getattr(self, 'env_kept', 0) + 1
+                    name = None
+                    use = p['value'] is not None
+                    if use:
+                        np_ = src.vptr(p['value'] + 20)
+                        name = src.cstr(np_) if np_ is not None else None
             else:
                 use = p['value'] is not None  # donor lacks it: keep the source's
                 if use and foreign:
@@ -1151,7 +1163,10 @@ class Converter:
             obj = v.put(srcobj, 16)
             if name is not None:
                 v.w32(obj + 20, VP | v.cstr(name))
-                bare = name.split('/')[-1].lower().replace('.dds', '')
+                # (a reference is looked up by its whole name: a mod's
+                # "x.dds" means the dictionary entry "x.dds.dds", hashed as
+                # "x.dds", as the BTTF IV DeLoreans' time machine parts are)
+                bare = name.split('/')[-1].lower()
                 # a name kept from another car resolves in the shared pack or gets a stand-in
                 if dp is not None or not bare.startswith('vehicle'):
                     self.texture_names.add(bare)
@@ -1381,6 +1396,10 @@ class Converter:
         self.v.w32(tdraw + 8, VP | sg)
 
         main = self.convert_drawable_lods(ddraw)
+        lod_map = (self.options or {}).get('lods')
+        if lod_map:
+            # (a donor LOD no slot draws is left out of the file)
+            main = [l if i in lod_map else None for i, l in enumerate(main)]
         wheel_d = self._donor_wheel()
         wheel = self.convert_drawable_lods(wheel_d) if wheel_d else []
         self.check_shader_inputs(main)
@@ -1394,6 +1413,8 @@ class Converter:
             if not used:
                 continue
             src = dlods[min(slot, len(dlods) - 1)]
+            if lod_map and lod_map[min(slot, len(lod_map) - 1)] < len(main) and main[lod_map[min(slot, len(lod_map) - 1)]]:
+                src = main[lod_map[min(slot, len(lod_map) - 1)]]
             self.v.w32(tdraw + 64 + 4 * slot, VP | self.emit_lod(src, self.t_model_main))
         self.copy_bounds(tdraw, ddraw['off'])
 
@@ -1461,6 +1482,31 @@ def linear_texture(src):
 MAX_TEXTURE_SIDE = 1024
 
 
+# A detail map (a normal, specular or bump map: a name ending _n, _s, _nrm,
+# _normal, _spec, spec or bump) may be held to a smaller side than the
+# colour maps (a heavy model's dictionary, the BTTF IV DeLoreans').
+DETAIL_MAP = re.compile(r'(_n|_s|_nrm|_normal|_spec|spec|bump)(\.dds)?$')
+
+
+def parse_options(text):
+    """'lods=0:0:2,tex=512,detail=256' -> {'lods': [0, 0, 2], 'tex': 512, 'detail': 256}.
+    lods: the donor LOD drawn in each of the template's LOD slots (a
+    heavy model can leave out a middle LOD); tex / detail: the biggest side
+    kept for colour maps / detail maps."""
+    out = {}
+    for item in filter(None, (text or '').split(',')):
+        key, value = item.split('=', 1)
+        out[key] = [int(v) for v in value.split(':')] if key == 'lods' else int(value)
+    return out
+
+
+def texture_side(name, options):
+    side = (options or {}).get('tex', MAX_TEXTURE_SIDE)
+    if DETAIL_MAP.search(name):
+        side = min(side, (options or {}).get('detail', side))
+    return side
+
+
 def fit_texture(src, side=MAX_TEXTURE_SIDE):
     """`src` (a pc_textures entry), or its first level no wider or taller
     than `side`, as an entry of its own (label 'from' says what it was)."""
@@ -1497,7 +1543,7 @@ def pc_textures(r, dict_off):
     return out
 
 
-def build_xtd(tmpl, sources, wanted, log=print):
+def build_xtd(tmpl, sources, wanted, log=print, options=None):
     """Template 360 dictionary kept whole (its textures stay valid); donor
     textures appended; hash table and list rebuilt, sorted by hash."""
     t = tmpl
@@ -1525,21 +1571,13 @@ def build_xtd(tmpl, sources, wanted, log=print):
         src = next((s[name] for s in sources if name in s), None)
         if src is None:
             continue
-        src = fit_texture(src)
+        src = fit_texture(src, texture_side(name, options))
         w, h = src['w'], src['h']
         bw, bh = max(1, w // 4), max(1, h // 4)
         fmt, bpp, lin, label = linear_texture(src)
         if label:
             src = dict(src, fmt=label)
         tiled = xenos.tile_level(xenos.swap16(lin), bw, bh, bpp)
-        info = v.put(t_info)
-        d3d = v.put(t_d3d)
-        nm = v.cstr('pack:/%s.dds' % name)
-        v.w32(info + 20, VP | nm)
-        v.w32(info + 24, VP | d3d)
-        v.w16(info + 28, w)
-        v.w16(info + 30, h)
-        v.w32(info + 32, 1)
         f = list(struct.unpack_from('>6I', t_d3d, 28))
         pitch = (align(bw, 32) * 4) >> 5
         f[0] = (f[0] & ~(0x1FF << 22)) | (pitch << 22)
@@ -1547,9 +1585,22 @@ def build_xtd(tmpl, sources, wanted, log=print):
         f[2] = (f[2] & ~0x03FFFFFF) | (w - 1) | ((h - 1) << 13)
         f[4] = f[4] & ~(0xFF << 2)                      # mip min = max = 0
         f[5] = (f[5] & ~0xFFFFF800) | (1 << 9) & 0x600  # 2D, no packed mips, no mip address
-        patches.append((d3d, f, len(p_objs)))
+        # A name with its own ".dds" also answers to the bare name (the same
+        # data): whichever way a reference asks for it, it is found.
+        names = [name] + ([name[:-4]] if name.endswith('.dds') and name[:-4] not in wanted else [])
+        for alias in names:
+            info = v.put(t_info)
+            d3d = v.put(t_d3d)
+            nm = v.cstr('pack:/%s.dds' % alias)
+            v.w32(info + 20, VP | nm)
+            v.w32(info + 24, VP | d3d)
+            v.w16(info + 28, w)
+            v.w16(info + 30, h)
+            v.w32(info + 32, 1)
+            patches.append((d3d, list(f), len(p_objs)))
+            entries.append((joaat(alias), info))
+            have.add(alias)
         p_objs.append((tiled, 0x1000))
-        entries.append((joaat(name), info))
         added.append('%s %dx%d %s%s' % (name, w, h, src['fmt'],
                                         ' (from %dx%d)' % src['source_size'] if src.get('dropped') else ''))
         have.add(name)

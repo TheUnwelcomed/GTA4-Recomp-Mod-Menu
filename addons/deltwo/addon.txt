@@ -1,0 +1,4 @@
+# DeLorean time machine, Back to the Future Part II (Sersorroza's model, MrFusion92 and Lorenzo3024it's Time Travel IV 2.0a), converted for the 360 build
+model=deltwo
+donor=banshee
+template=banshee

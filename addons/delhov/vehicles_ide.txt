@@ -1,0 +1,1 @@
+delhov, delhov, car, DELHOV, BTTF2H, VEH@LOW, VEH@LOW_INFERNUS, 0, 10, 0.2747, 0.2747, 0, 15, 1.0, 0, sports

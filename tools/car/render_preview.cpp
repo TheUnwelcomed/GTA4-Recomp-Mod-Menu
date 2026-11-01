@@ -9,7 +9,7 @@
 // boundaries (seconds) for a level check.
 //   c++ -std=c++20 -O2 -Wall -Wextra -I../../src render_preview.cpp -o render_preview
 //   ./render_preview batmobile bat_preview.wav [sections.txt]
-//   ./render_preview deimos|nexus|arbiterx|dom645t|gauntletc|lazar3 <car>_preview.wav [sections.txt]
+//   ./render_preview deimos|nexus|arbiterx|dom645t|gauntletc|lazar3|delorean <car>_preview.wav [sections.txt]
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -39,6 +39,7 @@ constexpr Car kCars[] = {
     {"dom645t", &gta4::car::kDominator, false, Extras::kDoors},
     {"gauntletc", &gta4::car::kGauntlet, false, Extras::kDoors},
     {"lazar3", &gta4::car::kLazar, false, Extras::kArmour},
+    {"delorean", &gta4::car::kDelorean, false, Extras::kGullwings},
 };
 }  // namespace
 

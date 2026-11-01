@@ -10,9 +10,11 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -33,6 +35,7 @@
 #include "gta4_init.h"
 #include "gta4_jet_engine.h"
 #include "gta4_car_engine.h"
+#include "gta4_time_machine.h"
 
 #include <rex/platform.h>
 #if REX_PLATFORM_PS5
@@ -199,6 +202,12 @@ std::array g_natives = {
     NativeEntry{"GET_DOOR_ANGLE_RATIO"},
     // The Lazar 3's turret follows the camera: where it looks, and the car's heading.
     NativeEntry{"GET_GAME_CAM"}, NativeEntry{"GET_CAM_ROT"}, NativeEntry{"GET_CAR_HEADING"},
+    NativeEntry{"GET_CAM_POS"},
+    // The DeLorean time machines: the fire trails, the effects, the car
+    // vanishing and coming back, its frost, the hover conversion's swap.
+    NativeEntry{"START_SCRIPT_FIRE"}, NativeEntry{"REMOVE_SCRIPT_FIRE"}, NativeEntry{"START_PTFX"},
+    NativeEntry{"SET_CAR_VISIBLE"}, NativeEntry{"SET_CAR_COLLISION"}, NativeEntry{"DELETE_CAR"},
+    NativeEntry{"SET_CAR_COLOURS"}, NativeEntry{"SET_CAR_COORDINATES_NO_OFFSET"},
     NativeEntry{"GET_TIME_OF_DAY"},
     NativeEntry{"GET_CURRENT_WEATHER"}, NativeEntry{"FORCE_CAR_LIGHTS"},
     // Bring Your Own Ride: the checks it answers and the vehicle kinds.
@@ -602,6 +611,10 @@ constexpr std::array kVehicles = {
     VehicleChoice{"Imponte Arbiter X", "ARBITERX"},
     VehicleChoice{"Lazar 3 (armed)", "LAZAR3", 7.5f},
     VehicleChoice{"Bravado Gauntlet Classic", "GAUNTLETC"},
+    VehicleChoice{"DeLorean DMC-12", "DELNOR"},
+    VehicleChoice{"DeLorean Time Machine (Part I)", "DELONE"},
+    VehicleChoice{"DeLorean Time Machine (Part II)", "DELTWO"},
+    VehicleChoice{"DeLorean Time Machine (Part III)", "DELTHR"},
 };
 struct WeaponChoice {
   std::string_view label;
@@ -633,7 +646,7 @@ constexpr std::array kTeleports = {
     TeleportChoice{"Broker Bridge (east)", 553.0f, 185.0f},
 };
 
-enum class Page { kMain, kPlayer, kVehicle, kSpawn, kTeleport, kWorld, kWeapons, kChaos, kStatus };
+enum class Page { kMain, kPlayer, kVehicle, kSpawn, kTeleport, kWorld, kWeapons, kChaos, kStatus, kTimeMachine };
 enum class Action {
   kNone, kOpenPlayer, kOpenVehicle, kOpenSpawn, kOpenTeleport, kOpenWorld,
   kOpenWeapons, kOpenChaos, kOpenStatus,
@@ -646,11 +659,32 @@ enum class Action {
   kHourUp, kHourDown, kMinuteUp, kMinuteDown, kTimeApply,
   kWeatherNext, kWeatherPrevious, kWeatherApply, kWeatherRelease,
   kGiveLoadout, kRemoveWeapons,
+  kOpenTimeMachine, kTmPreset, kTmField, kTmCircuits, kTmRefuel, kTmHover,
 };
 struct Item {
   std::string_view label;
   Action action = Action::kNone;
   int index = -1;  // list index for spawn/teleport pages
+};
+
+// A date on the DeLorean's time circuits (24-hour clock).
+struct TcdDate {
+  int year = 1955, month = 11, day = 5, hour = 6, minute = 0;
+};
+// Destinations from the films (the first is worked out: today).
+struct TcdPreset {
+  std::string_view name;
+  TcdDate date;
+};
+constexpr std::array kTcdPresets = {
+    TcdPreset{"Today", {}},
+    TcdPreset{"Nov 5, 1955 (Hill Valley)", {1955, 11, 5, 6, 0}},
+    TcdPreset{"Nov 12, 1955 (the storm)", {1955, 11, 12, 22, 4}},
+    TcdPreset{"Oct 26, 1985 (Twin Pines Mall)", {1985, 10, 26, 1, 21}},
+    TcdPreset{"Oct 21, 2015 (the future)", {2015, 10, 21, 16, 29}},
+    TcdPreset{"Sep 2, 1885 (the Old West)", {1885, 9, 2, 8, 0}},
+    TcdPreset{"Jul 4, 1776 (Independence)", {1776, 7, 4, 12, 0}},
+    TcdPreset{"Dec 25, 0000", {0, 12, 25, 0, 0}},
 };
 
 // Shared trainer state: written on the game thread, drawn on the UI thread.
@@ -673,6 +707,11 @@ struct State {
   bool car_lights = true;    // any car's headlights on d-pad left (the one option on by default)
   int wanted_target = 0;
   int hour = 12, minute = 0, weather = 1;
+  // The DeLorean's destination (set from the menu: a preset, or each field),
+  // and the menu's requests the time machine acts on in the car.
+  TcdDate tm_dest;
+  int tm_preset = 1;
+  bool tm_toggle_circuits = false, tm_refuel = false, tm_toggle_hover = false;
   // Async vehicle spawn.
   int pending_model = -1;
   uint32_t pending_hash = 0;
@@ -758,6 +797,8 @@ uint64_t NowNs() {
 bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false, g_have_batmobile = false;
 bool g_have_nexus = false, g_have_arbiter = false, g_have_dominator = false;
 bool g_have_lazar = false, g_have_gauntlet = false;
+bool g_have_dmc12 = false, g_have_bttf1 = false, g_have_bttf2 = false, g_have_bttf3 = false, g_have_bttf2h = false;
+bool HaveTimeMachines() { return g_have_bttf1 || g_have_bttf2 || g_have_bttf3; }
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
 std::atomic<uint32_t> g_pad_adjust{0};
@@ -779,7 +820,7 @@ bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_deimos ||
          g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator || g_have_lazar ||
-         g_have_gauntlet || s.car_lights;
+         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || s.car_lights;
 }
 
 std::vector<Item> PageItems(const State& s) {
@@ -793,6 +834,7 @@ std::vector<Item> PageItems(const State& s) {
                {"Time and Weather", Action::kOpenWorld},
                {"Weapons", Action::kOpenWeapons},
                {"Chaos", Action::kOpenChaos},
+               {"Time Machine (DeLorean)", Action::kOpenTimeMachine},
                {"Trainer Status", Action::kOpenStatus}};
       break;
     case Page::kPlayer:
@@ -842,6 +884,17 @@ std::vector<Item> PageItems(const State& s) {
                {"Weather (left/right)", Action::kWeatherApply},
                {"Force Weather Now", Action::kWeatherApply},
                {"Release Weather", Action::kWeatherRelease}};
+      break;
+    case Page::kTimeMachine:
+      items = {{"Destination", Action::kTmPreset},  // (labels filled in by PublishDraw)
+               {"Month", Action::kTmField},
+               {"Day", Action::kTmField},
+               {"Year", Action::kTmField},
+               {"Hour", Action::kTmField},
+               {"Minute", Action::kTmField},
+               {"Time Circuits On/Off (d-pad down in the car)", Action::kTmCircuits},
+               {"Refuel: Plutonium / Mr. Fusion (L1 in the car)", Action::kTmRefuel},
+               {"Part II: Fly / Land (d-pad right in the car)", Action::kTmHover}};
       break;
     case Page::kWeapons:
       items = {{"Give Weapon Loadout", Action::kGiveLoadout},
@@ -1345,9 +1398,11 @@ void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const Mode
 // (entry 0) and gullwing doors (entries 1 and 2). The pose last set for each
 // is re-applied by the per-frame hook below (sub_82381FA0), right after the
 // game's own per-frame bone edits for that car.
-// The Lazar 3's: its turret (entry 0), its gun (1), its ramps (2, 3).
+// The Lazar 3's: its turret (entry 0), its gun (1), its ramps (2, 3). The
+// DeLoreans': their gullwings (entries 1 and 2, as the Nexus's).
 enum PoseSlot : int {
-  kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2, kPoseNexus = 3, kPoseLazar = 4, kPoseSlots = 5
+  kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2, kPoseNexus = 3, kPoseLazar = 4, kPoseDelorean = 5,
+  kPoseSlots = 6
 };
 
 // Pop-up headlights: the Grotti Deimos's and the Dinka Nexus's. The converter
@@ -1713,8 +1768,17 @@ bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
 // the mod's own travel. The game's ordinary doors are still there, unseen,
 // and each gullwing follows its door, raised as far as the game has it open;
 // its gas struts hiss going up and coming down.
-enum DoorCar : int { kDoorDeimos = 0, kDoorDominator, kDoorArbiter, kDoorNexus, kDoorGauntlet, kDoorCars };
-constexpr std::string_view kDoorModels[kDoorCars] = {"DEIMOS", "DOM645T", "ARBITERX", "NEXUS", "GAUNTLETC"};
+enum DoorCar : int {
+  kDoorDeimos = 0, kDoorDominator, kDoorArbiter, kDoorNexus, kDoorGauntlet,
+  kDoorDmc12, kDoorBttf1, kDoorBttf2, kDoorBttf3, kDoorBttf2Hover, kDoorCars
+};
+constexpr std::string_view kDoorModels[kDoorCars] = {"DEIMOS", "DOM645T", "ARBITERX", "NEXUS", "GAUNTLETC",
+                                                     "DELNOR", "DELONE", "DELTWO", "DELTHR", "DELHOV"};
+// The Nexus's and the DeLoreans' doors are gullwings: the converter hangs them
+// on the template's overheat points, hinged along the roof, and they lift as
+// the game's own (unseen) doors swing.
+bool DoorIsGullwing(int kind) { return kind == kDoorNexus || kind >= kDoorDmc12; }
+int DoorPoseSlot(int kind) { return kind >= kDoorDmc12 ? kPoseDelorean : kPoseNexus; }
 enum class DoorEvent { kOpening, kLowering, kShut };
 void DoorSound(int car, DoorEvent event);  // (with the cars' engines, below)
 struct DoorWatch {
@@ -1732,7 +1796,8 @@ constexpr std::string_view kGullwingPivots[2] = {"overheat", "overheat_2"};
 constexpr float kGullwingDegrees = 71.0f;
 
 bool HaveDoorCars() {
-  return g_have_deimos || g_have_dominator || g_have_arbiter || g_have_nexus || g_have_gauntlet;
+  return g_have_deimos || g_have_dominator || g_have_arbiter || g_have_nexus || g_have_gauntlet || g_have_dmc12 ||
+         HaveTimeMachines();
 }
 
 bool DoorsBusy(const DoorWatch& d, uint64_t now) {
@@ -1813,14 +1878,15 @@ void FollowDoors(PPCContext& ctx, uint8_t* base, const GameContext& game) {
     d.car = 0;  // gone (or the slot reused)
     return;
   }
-  const bool gullwing = kind == kDoorNexus;
+  const bool gullwing = DoorIsGullwing(kind);
   if (gullwing && d.info != info) {
     d.info = info;
     for (int k = 0; k < 2; ++k)
       d.bone[k] = FindBone(ctx, base, vehicle_at, kGullwingPivots[k]);
     if (d.log < 3) {
       ++d.log;
-      REXLOG_INFO("gta4-trainer: Nexus gullwings on bones {} and {}{}", d.bone[0], d.bone[1],
+      REXLOG_INFO("gta4-trainer: {} gullwings on bones {} and {}{}", std::string(kDoorModels[size_t(kind)]),
+                  d.bone[0], d.bone[1],
                   NativeKnown("GET_DOOR_ANGLE_RATIO") ? "" : " (no GET_DOOR_ANGLE_RATIO: they stay shut)");
     }
   }
@@ -1852,7 +1918,7 @@ void FollowDoors(PPCContext& ctx, uint8_t* base, const GameContext& game) {
       }
     }
     if (gullwing && d.bone[k] >= 0 && (ratio != d.ratio[k] || rewrite))
-      PoseBone(ctx, base, vehicle_at, info, kPoseNexus, 1 + k, d.bone[k], 1,
+      PoseBone(ctx, base, vehicle_at, info, DoorPoseSlot(kind), 1 + k, d.bone[k], 1,
                (k == 0 ? 1.0f : -1.0f) * kGullwingDegrees * ratio, 1.0f);
     if (d.log < 8 && ratio > 0.5f && d.ratio[k] <= 0.5f) {
       ++d.log;
@@ -3784,6 +3850,9 @@ gta4::car::EngineSynth g_bat_synth{gta4::car::kBatmobile}, g_deimos_synth{gta4::
 gta4::car::EngineSynth g_nexus_synth{gta4::car::kNexus}, g_arbiter_synth{gta4::car::kArbiter},
     g_dominator_synth{gta4::car::kDominator};
 gta4::car::EngineSynth g_lazar_synth{gta4::car::kLazar}, g_gauntlet_synth{gta4::car::kGauntlet};
+// The DeLoreans: each its own voice of the same PRV V6.
+gta4::car::EngineSynth g_dmc_synth{gta4::car::kDelorean}, g_bttf1_synth{gta4::car::kDelorean},
+    g_bttf2_synth{gta4::car::kDelorean}, g_bttf3_synth{gta4::car::kDelorean};
 #if REX_PLATFORM_PS5
 class SynthSource final : public gta4ps5::sound::Source {
  public:
@@ -3804,6 +3873,7 @@ struct CarEngineState {
   std::array<float, 5> gear_top;  // m/s at the rev limit in each gear
   float volume;                   // its level in the mix
   bool air_brakes = false;        // a truck's: their hiss at a stop
+  std::string_view model2 = {};   // a second model it also is (Part II's DeLorean in hover form)
   bool in_car = false, running = false;  // running: the voice plays (winding down too)
   bool rolling = false;
   int gear = 0;
@@ -3828,6 +3898,12 @@ CarEngineState g_dominator_engine{&g_dominator_synth, "Dominator 645", "DOM645T"
 CarEngineState g_lazar_engine{&g_lazar_synth, "Lazar 3", "LAZAR3", {5.5f, 10.0f, 15.0f, 21.0f, 28.0f}, 0.42f, true};
 CarEngineState g_gauntlet_engine{&g_gauntlet_synth, "Gauntlet Classic", "GAUNTLETC",
                                  {13.0f, 23.0f, 34.0f, 46.0f, 61.0f}, 0.38f};
+// The DMC-12's five-speed: about 110 mph flat out (88 needs fourth).
+constexpr std::array<float, 5> kDmcGears = {14.0f, 24.0f, 34.0f, 43.0f, 50.0f};
+CarEngineState g_dmc_engine{&g_dmc_synth, "DeLorean DMC-12", "DELNOR", kDmcGears, 0.38f};
+CarEngineState g_bttf1_engine{&g_bttf1_synth, "Time Machine (Part I)", "DELONE", kDmcGears, 0.38f};
+CarEngineState g_bttf2_engine{&g_bttf2_synth, "Time Machine (Part II)", "DELTWO", kDmcGears, 0.38f, false, "DELHOV"};
+CarEngineState g_bttf3_engine{&g_bttf3_synth, "Time Machine (Part III)", "DELTHR", kDmcGears, 0.38f};
 
 // Starts a car's voice (want) or stops it once its synth has gone quiet.
 void CarVoice(CarEngineState& e, bool want) {
@@ -3873,11 +3949,13 @@ void PopupMotorSound(const PopupSpec& spec, float seconds) {
 // struts (going up with the latch, and on the way down), the slam.
 void DoorSound(int car, DoorEvent event) {
   CarEngineState* const engines[kDoorCars] = {&g_deimos_engine, &g_dominator_engine, &g_arbiter_engine,
-                                              &g_nexus_engine, &g_gauntlet_engine};
+                                              &g_nexus_engine,  &g_gauntlet_engine,  &g_dmc_engine,
+                                              &g_bttf1_engine,  &g_bttf2_engine,     &g_bttf3_engine,
+                                              &g_bttf2_engine};
   if (car < 0 || car >= kDoorCars)
     return;
   auto& e = *engines[car];
-  const bool gullwing = car == kDoorNexus;
+  const bool gullwing = DoorIsGullwing(car);
   switch (event) {
     case DoorEvent::kOpening:
       e.synth->DoorOpen();
@@ -4022,18 +4100,45 @@ void LazarGunLine(const LazarState& z, float (&muzzle)[3], float (&dir)[3]) {
 }
 
 // Where the camera looks, relative to the car: degrees left of its nose,
-// and up from level.
-std::optional<std::pair<float, float>> CameraAim(PPCContext& ctx, uint8_t* base, uint32_t car) {
+// and up from level. The chase camera always looks at the car, so the line
+// from the camera to the car is where it looks, read in the car's own axes
+// (no angle conventions involved: v1.7.20 took GET_CAM_ROT's yaw for a
+// heading, and it is a quarter turn off one, log 076). Pitch is the camera's
+// own. Close in (a camera in the car) its yaw is used, turned a quarter.
+std::optional<std::pair<float, float>> CameraAim(PPCContext& ctx, uint8_t* base, uint32_t car, bool log) {
   const auto cam = Invoke(ctx, base, "GET_GAME_CAM", {0}, 0);
   if (!cam || !cam->words[0])
     return std::nullopt;
   const auto rot = Invoke(ctx, base, "GET_CAM_ROT", {cam->words[0], 0, 0, 0}, 1, 0, 3);
-  const auto heading = Invoke(ctx, base, "GET_CAR_HEADING", {car, 0}, 1);
-  if (!rot || !heading)
+  const auto pos = Invoke(ctx, base, "GET_CAM_POS", {cam->words[0], 0, 0, 0}, 1, 0, 3);
+  const auto at = CarPosition(ctx, base, car);
+  static constexpr float kAhead[3] = {0.0f, 1.0f, 0.0f}, kRight[3] = {1.0f, 0.0f, 0.0f};
+  const auto ahead = CarPoint(ctx, base, car, kAhead), right = CarPoint(ctx, base, car, kRight);
+  if (!rot || !at || !ahead || !right || !std::isfinite(rot->f(0)))
     return std::nullopt;
-  const float pitch = rot->f(0), yaw = rot->f(2) - heading->f(0);
-  if (!std::isfinite(pitch) || !std::isfinite(yaw))
-    return std::nullopt;
+  const float pitch = rot->f(0);
+  float yaw = 0.0f;
+  bool from_line = false;
+  if (pos && std::isfinite(pos->f(0))) {
+    const float look[2] = {(*at)[0] - pos->f(0), (*at)[1] - pos->f(1)};
+    const float fwd[2] = {(*ahead)[0] - (*at)[0], (*ahead)[1] - (*at)[1]};
+    const float side[2] = {(*right)[0] - (*at)[0], (*right)[1] - (*at)[1]};
+    if (look[0] * look[0] + look[1] * look[1] > 2.0f * 2.0f) {
+      yaw = std::atan2(-(look[0] * side[0] + look[1] * side[1]), look[0] * fwd[0] + look[1] * fwd[1]) *
+            180.0f / 3.14159265f;
+      from_line = true;
+    }
+  }
+  if (!from_line) {
+    const auto heading = Invoke(ctx, base, "GET_CAR_HEADING", {car, 0}, 1);
+    if (!heading || !std::isfinite(rot->f(2)))
+      return std::nullopt;
+    yaw = rot->f(2) + 90.0f - heading->f(0);
+  }
+  if (log)
+    REXLOG_INFO("gta4-trainer: Lazar 3 aim: camera {:.1f} degrees from the nose ({}), {:.1f} up (its yaw {:.1f})",
+                std::remainder(yaw, 360.0f), from_line ? "from its line to the car" : "from its yaw", pitch,
+                rot->f(2));
   return std::pair{std::remainder(yaw, 360.0f), pitch};
 }
 
@@ -4225,14 +4330,12 @@ uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   // The camera's line, the gun a little above it (the chase camera looks
   // down on the car), within the gun's travel.
   float want_yaw = z.yaw, want_pitch = z.pitch;
-  if (const auto aim = CameraAim(ctx, base, z.car)) {
+  const bool log_aim = z.aim_log < 6 && now >= z.next_pose;
+  if (log_aim)
+    ++z.aim_log;
+  if (const auto aim = CameraAim(ctx, base, z.car, log_aim)) {
     want_yaw = aim->first;
     want_pitch = std::clamp(aim->second + kLazarAimLift, kLazarPitchMin, kLazarPitchMax);
-    if (z.aim_log < 3 && now >= z.next_pose) {
-      ++z.aim_log;
-      REXLOG_INFO("gta4-trainer: Lazar 3 aim: camera {:.1f} degrees from the nose, {:.1f} up", aim->first,
-                  aim->second);
-    }
   }
   const float yaw_step = std::clamp(std::remainder(want_yaw - z.yaw, 360.0f), -kLazarYawRate * dt, kLazarYawRate * dt);
   const float pitch_step = std::clamp(want_pitch - z.pitch, -kLazarPitchRate * dt, kLazarPitchRate * dt);
@@ -4256,6 +4359,646 @@ uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   return X_INPUT_GAMEPAD_LEFT_SHOULDER;
 }
 
+// ---------------------------------------------------------------------------
+// The DeLorean time machines (the cars of Time Travel IV 2.0a: Sersorroza's
+// models, MrFusion92 and Lorenzo3024it's mod, whose .NET script can't run
+// here; its time travel is re-created through natives). In Part I's, Part
+// II's or Part III's car:
+//  - d-pad down: the time circuits on or off (the TCD on screen: destination,
+//    present and last time departed, the speedometer, the EMPTY lamp);
+//  - the destination is set in the menu's Time Machine page (presets, or
+//    month, day, year, hour and minute; the keypad beeps);
+//  - at 88 mph, circuits on and the reactor charged: the build-up (the flux
+//    capacitor quickening, a blue glow, sparks), then the car is gone in a
+//    flash and a boom, leaving two trails of fire on the road (none in the
+//    air); the game's clock goes to the destination's time; seconds later it
+//    is back with a triple boom, frosted over, its vents steaming;
+//  - after a trip the reactor is spent: L1 standing still reloads it
+//    (plutonium in Part I, Mr. Fusion in Parts II and III);
+//  - Part II: d-pad right folds the wheels and it flies (the left stick
+//    drives and turns, R2 climbs, L2 sinks; d-pad right again lands it).
+//    The flying car is the mod's hover model, swapped in on the spot.
+// Those buttons are hidden from the game in the car (no radio on d-pad
+// down / right, no drive-by on L1). The sounds are the trainer's own
+// (gta4_time_machine.h): made from scratch, nothing from the films.
+// ---------------------------------------------------------------------------
+gta4::car::TimeMachineSynth g_tm_synth;
+#if REX_PLATFORM_PS5
+class TimeMachineSource final : public gta4ps5::sound::Source {
+ public:
+  size_t Read(float* lr, size_t frames) override {
+    g_tm_synth.Render(lr, frames);
+    return frames;
+  }
+  bool Rewind() override { return true; }
+};
+gta4ps5::sound::Voice* g_tm_voice = nullptr;
+#endif
+// Starts the time machine's voice (want), or stops it once quiet.
+void TimeMachineVoice(bool want) {
+#if REX_PLATFORM_PS5
+  if (!g_tm_voice) {
+    if (!want)
+      return;
+    gta4ps5::sound::StartOutput();
+    g_tm_voice = gta4ps5::sound::NewVoice();
+    g_tm_voice->game_sound = true;
+  }
+  if (want && !g_tm_voice->Active()) {
+    g_tm_voice->SetVolume(1.0f);
+    g_tm_voice->Play(std::make_unique<TimeMachineSource>(), true);
+  } else if (!want && g_tm_voice->Active() && g_tm_synth.Quiet()) {
+    g_tm_voice->Stop();
+  }
+#else
+  (void)want;
+#endif
+}
+
+constexpr float kMph88 = 88.0f * 0.44704f;  // m/s
+constexpr float kMph60 = 60.0f * 0.44704f;
+constexpr uint64_t kGoneMs = 2400;          // the car away between the departure and the arrival
+constexpr int kTrailPoints = 9;             // fire points along each wheel's track
+// Car space (the mod's body): its rear wheels' contact patches, the vents
+// behind the cabin, the nose.
+constexpr float kRearWheels[2][3] = {{-0.77f, -1.25f, -0.55f}, {0.77f, -1.25f, -0.55f}};
+constexpr float kVents[2][3] = {{-0.45f, -1.55f, 0.55f}, {0.45f, -1.55f, 0.55f}};
+constexpr float kNose[3] = {0.0f, 2.2f, 0.0f};
+
+const char* const kMonths[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                 "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+int DaysIn(int year, int month) {
+  static constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  return month == 2 && leap ? 29 : kDays[std::clamp(month, 1, 12) - 1];
+}
+TcdDate TodaysDate() {
+  const std::time_t t = std::time(nullptr);
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s(&local, &t);
+#else
+  localtime_r(&t, &local);
+#endif
+  return TcdDate{local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min};
+}
+
+struct TimeMachineState {
+  uint32_t car = 0, model = 0;
+  int film = 0;  // 1-3; 0: not in one
+  bool in_car = false, hover_form = false;
+  bool circuits = false, charged = true;
+  TcdDate present, last;
+  bool dated = false;
+  int last_minutes = -1;
+  // The trip: 0 ready; 1 gone; 2 just back (the frost and the vents).
+  int phase = 0;
+  uint64_t phase_at = 0;
+  float charge = 0.0f, speed = 0.0f;
+  bool flying = false;
+  float at[3]{};          // where it left
+  Quat q;                 // its attitude then
+  float gone_speed = 0.0f;
+  float tracks[2][kTrailPoints][3]{};  // the rear wheels' last points (a ring)
+  int track_head = 0, track_count = 0;
+  float last_track[3]{};
+  std::array<uint32_t, 2 * kTrailPoints> fires{};
+  uint64_t fires_out = 0;
+  uint64_t next_spark = 0;
+  uint32_t vents[2]{}, drips = 0;
+  uint64_t vents_out = 0;
+  int colours[2] = {-1, -1};
+  uint64_t frost_until = 0;
+  int booms_left = 0;
+  uint64_t next_boom = 0;
+  uint16_t prev_buttons = 0;
+  uint64_t next_probe = 0, last_ms = 0;
+  int log = 0;
+  // Part II's flight
+  bool hover = false, landing = false, swap_pending = false, models_requested = false;
+  float altitude = 0.0f, heading = 0.0f, fwd = 0.0f, climb = 0.0f, bank = 0.0f, pitch = 0.0f;
+  int hover_log = 0;
+};
+TimeMachineState g_tm;
+std::atomic<bool> g_tm_in_car{false};
+
+// What the screen shows (the TCD, the flash), published for the overlay.
+struct TcdModel {
+  bool visible = false, empty = false, hover = false;
+  TcdDate dest, present, last;
+  int mph = 0;
+  float flash = 0.0f;  // 0..1, a white flash over the screen
+};
+std::mutex g_tcd_mutex;
+TcdModel g_tcd;
+std::atomic<bool> g_tcd_active{false};
+uint64_t g_flash_until = 0, g_flash_start = 0;
+
+// Puts a car exactly there (its own origin), or as SET_CAR_COORDINATES puts it.
+void PlaceCar(PPCContext& ctx, uint8_t* base, uint32_t car, float x, float y, float z) {
+  Invoke(ctx, base, NativeKnown("SET_CAR_COORDINATES_NO_OFFSET") ? "SET_CAR_COORDINATES_NO_OFFSET" : "SET_CAR_COORDINATES",
+         {car, Bits(x), Bits(y), Bits(z)});
+}
+
+int TimeMachineFilm(uint32_t model) {
+  static const uint32_t one = ModelHash("DELONE"), two = ModelHash("DELTWO"), three = ModelHash("DELTHR"),
+                        hover = ModelHash("DELHOV");
+  if (model == one) return 1;
+  if (model == two || model == hover) return 2;
+  if (model == three) return 3;
+  return 0;
+}
+
+void Flash(uint64_t ms) {
+  const uint64_t now = NowMs();
+  g_flash_start = now;
+  g_flash_until = now + ms;
+}
+
+// The game's clock read for the TCD's present: the date moves on a day each
+// time the clock passes midnight.
+void FollowClock(PPCContext& ctx, uint8_t* base, TimeMachineState& m) {
+  const auto t = Invoke(ctx, base, "GET_TIME_OF_DAY", {0, 0}, 0, 0, 2);
+  if (!t)
+    return;
+  const int hour = int(t->words[0]) % 24, minute = int(t->words[1]) % 60, minutes = hour * 60 + minute;
+  if (!m.dated) {
+    m.dated = true;
+    m.present = TodaysDate();
+    m.last = m.present;
+  } else if (m.last_minutes >= 0 && minutes + 6 * 60 < m.last_minutes) {
+    if (++m.present.day > DaysIn(m.present.year, m.present.month)) {
+      m.present.day = 1;
+      if (++m.present.month > 12)
+        m.present.month = 1, ++m.present.year;
+    }
+  }
+  m.last_minutes = minutes;
+  m.present.hour = hour;
+  m.present.minute = minute;
+}
+
+// Every frame of the trip and the build-up: where the rear wheels have been
+// (for the fire trails), a point every couple of metres.
+void TrackWheels(PPCContext& ctx, uint8_t* base, TimeMachineState& m) {
+  const auto c = CarPosition(ctx, base, m.car);
+  if (!c)
+    return;
+  float d2 = 0;
+  for (int a = 0; a < 3; ++a)
+    d2 += ((*c)[a] - m.last_track[a]) * ((*c)[a] - m.last_track[a]);
+  if (m.track_count && d2 < 2.5f * 2.5f)
+    return;
+  for (int a = 0; a < 3; ++a)
+    m.last_track[a] = (*c)[a];
+  for (int w = 0; w < 2; ++w)
+    if (const auto p = CarPoint(ctx, base, m.car, kRearWheels[w]))
+      for (int a = 0; a < 3; ++a)
+        m.tracks[w][m.track_head][a] = (*p)[a];
+  m.track_head = (m.track_head + 1) % kTrailPoints;
+  m.track_count = std::min(m.track_count + 1, kTrailPoints);
+}
+
+void ClearFires(PPCContext& ctx, uint8_t* base, TimeMachineState& m) {
+  for (auto& f : m.fires) {
+    if (f)
+      Invoke(ctx, base, "REMOVE_SCRIPT_FIRE", {f});
+    f = 0;
+  }
+  m.fires_out = 0;
+}
+
+void StopVents(PPCContext& ctx, uint8_t* base, TimeMachineState& m) {
+  for (auto& v : m.vents) {
+    if (v)
+      Invoke(ctx, base, "STOP_PTFX", {v});
+    v = 0;
+  }
+  if (m.drips)
+    Invoke(ctx, base, "STOP_PTFX", {m.drips});
+  m.drips = 0;
+  m.vents_out = 0;
+}
+
+// 88 mph: the car is gone, its trails burning behind it.
+void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m, State& s) {
+  const auto c = CarPosition(ctx, base, m.car);
+  const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {m.car, 0, 0, 0, 0}, 1, 0, 4);
+  if (!c || !q)
+    return;
+  for (int a = 0; a < 3; ++a)
+    m.at[a] = (*c)[a];
+  m.q = {q->f(0), q->f(1), q->f(2), q->f(3)};
+  m.gone_speed = std::max(m.speed, kMph88);
+  m.flying = m.hover;
+  g_tm_synth.SetCharge(0.0f);
+  g_tm_synth.Depart(m.flying);
+  if (const auto nose = CarPoint(ctx, base, m.car, kNose))
+    WorldEffect(ctx, base, "qub_lg_explode_blue", nose->data(), 1.6f);
+  Flash(380);
+  // The fire trails: where the rear wheels ran, both sides (none in the air).
+  ClearFires(ctx, base, m);
+  int lit = 0;
+  if (!m.flying)
+    for (int w = 0; w < 2; ++w)
+      for (int k = 0; k < m.track_count; ++k) {
+        float p[3];
+        for (int a = 0; a < 3; ++a)
+          p[a] = m.tracks[w][k][a];
+        if (const auto gz = GroundZ(ctx, base, p[0], p[1], p[2] + 1.5f); gz && std::fabs(*gz - p[2]) < 2.0f)
+          p[2] = *gz;
+        const auto f = Invoke(ctx, base, "START_SCRIPT_FIRE", {Bits(p[0]), Bits(p[1]), Bits(p[2]), 0, 0});
+        if (f && f->r0())
+          m.fires[size_t(w * kTrailPoints + k)] = f->r0(), ++lit;
+      }
+  m.fires_out = NowMs() + 7000;
+  // Gone: hidden, still, passing through nothing, the driver with it.
+  Invoke(ctx, base, "SET_CAR_VISIBLE", {m.car, 0});
+  Invoke(ctx, base, "SET_CAR_COLLISION", {m.car, 0});
+  Invoke(ctx, base, "FREEZE_CAR_POSITION", {m.car, 1});
+  Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 0});
+  // The time circuits: the clock goes to the destination's time; the
+  // present becomes the destination, the last time departed the old present.
+  m.last = m.present;
+  m.present = s.tm_dest;
+  m.last_minutes = s.tm_dest.hour * 60 + s.tm_dest.minute;
+  Invoke(ctx, base, "SET_TIME_OF_DAY", {uint32_t(s.tm_dest.hour), uint32_t(s.tm_dest.minute)});
+  m.charged = false;
+  m.phase = 1;
+  m.phase_at = NowMs();
+  m.track_count = 0;
+  REXLOG_INFO("gta4-trainer: time machine (Part {}) departed at {:.0f} mph{} for {} {} {:04d} {:02d}:{:02d}; {} fire "
+              "points",
+              m.film, m.speed / 0.44704f, m.flying ? " in the air" : "", kMonths[std::clamp(s.tm_dest.month, 1, 12) - 1],
+              s.tm_dest.day, s.tm_dest.year, s.tm_dest.hour, s.tm_dest.minute, lit);
+}
+
+// Back: where it left (a little further on, when the road is there), moving
+// as it was, with a triple boom; frosted over, its vents steaming.
+void Arrive(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m) {
+  const uint64_t away = NowMs() - m.phase_at;
+  float p[3] = {m.at[0], m.at[1], m.at[2]};
+  // a little further along its line
+  const float fx = 2.0f * (m.q.x * m.q.y - m.q.w * m.q.z), fy = 1.0f - 2.0f * (m.q.x * m.q.x + m.q.z * m.q.z);
+  const float ahead[3] = {p[0] + fx * 12.0f, p[1] + fy * 12.0f, p[2]};
+  if (!m.flying) {
+    if (const auto gz = GroundZ(ctx, base, ahead[0], ahead[1], ahead[2] + 2.0f); gz && std::fabs(*gz + 0.6f - p[2]) < 1.5f)
+      p[0] = ahead[0], p[1] = ahead[1];
+  } else {
+    p[0] = ahead[0], p[1] = ahead[1];
+  }
+  PlaceCar(ctx, base, m.car, p[0], p[1], p[2]);
+  Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {m.car, Bits(m.q.x), Bits(m.q.y), Bits(m.q.z), Bits(m.q.w)});
+  Invoke(ctx, base, "FREEZE_CAR_POSITION", {m.car, 0});
+  Invoke(ctx, base, "SET_CAR_COLLISION", {m.car, 1});
+  Invoke(ctx, base, "SET_CAR_VISIBLE", {m.car, 1});
+  Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
+  Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {m.car, Bits(m.hover ? m.fwd : m.gone_speed * 0.92f)});
+  g_tm_synth.Arrive();
+  m.booms_left = 3;
+  m.next_boom = NowMs();
+  // Frost: its stainless paint goes icy (put back in a while).
+  if (const auto cols = Invoke(ctx, base, "GET_CAR_COLOURS", {m.car, 0, 0}, 1, 0, 2)) {
+    m.colours[0] = int(cols->words[0]);
+    m.colours[1] = int(cols->words[1]);
+    Invoke(ctx, base, "SET_CAR_COLOURS", {m.car, 24, 24});
+    m.frost_until = NowMs() + 14000;
+  }
+  m.phase = 2;
+  m.phase_at = NowMs();
+  REXLOG_INFO("gta4-trainer: time machine back after {} ms ({:.1f}, {:.1f}, {:.1f})", away, p[0], p[1], p[2]);
+}
+
+// The cold vents and the frost after a trip; the trails going out.
+void AfterTrip(PPCContext& ctx, uint8_t* base, TimeMachineState& m, uint64_t now) {
+  if (m.booms_left > 0 && now >= m.next_boom) {
+    // the three flashes with the three booms
+    if (const auto c = CarPosition(ctx, base, m.car))
+      WorldEffect(ctx, base, "qub_lg_explode_blue", c->data(), 1.3f);
+    Flash(220);
+    --m.booms_left;
+    m.next_boom = now + 170;
+    if (m.booms_left == 0) {
+      g_tm_synth.Vents();
+      for (int v = 0; v < 2; ++v) {
+        const auto r = Invoke(ctx, base, "START_PTFX_ON_VEH",
+                              {0, m.car, Bits(kVents[v][0]), Bits(kVents[v][1]), Bits(kVents[v][2]), Bits(-30.0f), 0,
+                               Bits(v ? 25.0f : -25.0f), Bits(1.2f)},
+                              -1, 0, 1, 0, "shot_directed_steam");
+        m.vents[v] = r ? r->r0() : 0;
+      }
+      if (const auto r = Invoke(ctx, base, "START_PTFX_ON_VEH",
+                                {0, m.car, 0, 0, Bits(0.4f), 0, 0, 0, Bits(1.0f)}, -1, 0, 1, 0, "water_carwash_drips"))
+        m.drips = r->r0();
+      m.vents_out = now + 7000;
+    }
+  }
+  if (m.vents_out && now >= m.vents_out)
+    StopVents(ctx, base, m);
+  if (m.fires_out && now >= m.fires_out)
+    ClearFires(ctx, base, m);
+  if (m.frost_until && now >= m.frost_until) {
+    m.frost_until = 0;
+    if (m.colours[0] >= 0 && VehicleAddress(base, m.car))
+      Invoke(ctx, base, "SET_CAR_COLOURS", {m.car, uint32_t(m.colours[0]), uint32_t(m.colours[1])});
+  }
+  if (m.phase == 2 && now - m.phase_at > 8000)
+    m.phase = 0;
+}
+
+// The build-up towards 88: a blue glow, sparks around the body.
+void BuildUp(PPCContext& ctx, uint8_t* base, TimeMachineState& m, uint64_t now) {
+  if (m.charge < 0.25f)
+    return;
+  if (const auto c = CarPosition(ctx, base, m.car)) {
+    const float k = (m.charge - 0.25f) / 0.75f;
+    Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
+           {Bits((*c)[0]), Bits((*c)[1]), Bits((*c)[2] + 0.4f), 120, 170, 255, Bits(3.0f + 6.0f * k),
+            Bits(1.0f + 5.0f * k)});
+  }
+  if (now >= m.next_spark) {
+    m.next_spark = now + uint64_t(260 - 190 * m.charge);
+    static uint32_t seed = 0x88u;
+    seed = seed * 1664525u + 1013904223u;
+    const float x = (float((seed >> 8) & 0xFF) / 255.0f - 0.5f) * 1.8f;
+    const float y = (float((seed >> 16) & 0xFF) / 255.0f - 0.5f) * 4.0f;
+    const float at[3] = {x, y, 0.2f + 0.5f * float((seed >> 24) & 0x7) / 7.0f};
+    const bool sparked = CarEffect(ctx, base, m.car, "ambient_electrical_sparks", at, 0.8f + 0.8f * m.charge);
+    static int s_spark_log = 0;
+    if (s_spark_log < 2) {
+      ++s_spark_log;
+      REXLOG_INFO("gta4-trainer: time machine build-up at {:.0f} mph (sparks {})", m.speed / 0.44704f,
+                  sparked ? "started" : "not started");
+    }
+  }
+}
+
+// Part II: the wheels folded (the hover model swapped in) or down again.
+// The new car takes the old one's place, attitude and speed, the player in
+// its seat; the old one goes.
+bool SwapForm(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m, bool to_flight, State& s) {
+  const uint32_t want = ModelHash(to_flight ? "DELHOV" : "DELTWO");
+  const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {want});
+  if (!loaded || !loaded->r0()) {
+    Invoke(ctx, base, "REQUEST_MODEL", {want});
+    Toast(s, to_flight ? "Flight conversion loading..." : "Wheels loading...", 900);
+    return false;
+  }
+  const auto c = CarPosition(ctx, base, m.car);
+  const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {m.car, 0, 0, 0, 0}, 1, 0, 4);
+  if (!c || !q)
+    return false;
+  float speed = 0.0f;
+  if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {m.car, 0}, 1))
+    speed = v->f(0);
+  const float lift = to_flight ? 0.35f : 0.0f;
+  const auto made = Invoke(ctx, base, "CREATE_CAR", {want, Bits((*c)[0]), Bits((*c)[1]), Bits((*c)[2] + lift), 0, 1}, 4);
+  if (!made || !made->words[0])
+    return false;
+  const uint32_t old = m.car, car = made->words[0];
+  Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {car, q->words[0], q->words[1], q->words[2], q->words[3]});
+  PlaceCar(ctx, base, car, (*c)[0], (*c)[1], (*c)[2] + lift);
+  // its colours as the old one's
+  if (const auto cols = Invoke(ctx, base, "GET_CAR_COLOURS", {old, 0, 0}, 1, 0, 2))
+    Invoke(ctx, base, "SET_CAR_COLOURS", {car, cols->words[0], cols->words[1]});
+  Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, car});
+  // Only once the player is in the new one does the old one go.
+  const auto now_in = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {game.ped, 0}, 1);
+  if (!now_in || now_in->words[0] != car) {
+    Invoke(ctx, base, "DELETE_CAR", {0}, 0, car);
+    REXLOG_WARN("gta4-trainer: time machine (Part II): the player could not be put in the {} form",
+                to_flight ? "flying" : "driving");
+    return false;
+  }
+  Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {car, Bits(speed)});
+  Invoke(ctx, base, "DELETE_CAR", {0}, 0, old);
+  Invoke(ctx, base, "MARK_CAR_AS_NO_LONGER_NEEDED", {0}, 0, car);
+  WorldEffect(ctx, base, "veh_respray_smoke", c->data(), 0.6f);
+  m.car = car;
+  m.hover_form = to_flight;
+  g_pass_vehicle.pass = ~0ull;  // (the pass's vehicle changed: look again)
+  g_tm_synth.Convert(to_flight);
+  REXLOG_INFO("gta4-trainer: time machine (Part II) {} (car {:08X} -> {:08X})",
+              to_flight ? "wheels folded: flying" : "wheels down: driving", old, car);
+  return true;
+}
+
+// Part II in the air: the left stick drives and turns, R2 climbs, L2 sinks;
+// it hovers where it is with nothing pressed. Its attitude (the heading, a
+// lean into the turn and the acceleration) and its speed along the nose
+// are set every frame as the F-16's are; the height is held by moving it
+// up or down a little each frame.
+void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& pad, float dt) {
+  const auto c = CarPosition(ctx, base, m.car);
+  if (!c)
+    return;
+  const float lx = Axis(pad.lx), ly = Axis(pad.ly);
+  const float up = pad.right_trigger / 255.0f - pad.left_trigger / 255.0f;
+  const float want_fwd = ly >= 0 ? ly * 48.0f : ly * 12.0f;
+  const float accel = std::clamp(want_fwd - m.fwd, -18.0f * dt, 12.0f * dt);
+  m.fwd += accel;
+  m.heading -= lx * 1.25f * dt * (0.4f + 0.6f * std::min(1.0f, std::fabs(m.fwd) / 15.0f));
+  const float want_climb = m.landing ? -4.0f : up * 8.0f;
+  m.climb += std::clamp(want_climb - m.climb, -14.0f * dt, 14.0f * dt);
+  m.bank += (lx * 0.35f - m.bank) * std::min(1.0f, 4.0f * dt);
+  m.pitch += (std::clamp(-accel / std::max(dt, 1e-3f) * 0.012f + m.climb * 0.02f, -0.25f, 0.25f) - m.pitch) *
+             std::min(1.0f, 3.0f * dt);
+  float z = (*c)[2] + m.climb * dt;
+  const auto gz = GroundZ(ctx, base, (*c)[0], (*c)[1], (*c)[2] + 1.0f);
+  if (gz && z < *gz + 0.85f) {
+    z = *gz + 0.85f;
+    m.climb = std::max(m.climb, 0.0f);
+  }
+  m.altitude = gz ? z - *gz : 99.0f;
+  const Quat q = QNormalize(QMul(QMul(QAxis(0, 0, 1, m.heading), QAxis(1, 0, 0, m.pitch)), QAxis(0, 1, 0, m.bank)));
+  Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {m.car, Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
+  PlaceCar(ctx, base, m.car, (*c)[0], (*c)[1], z);
+  Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {m.car, Bits(m.fwd)});
+  g_tm_synth.SetHover(0.35f + 0.45f * std::min(1.0f, std::fabs(m.fwd) / 40.0f) + 0.2f * std::fabs(up));
+  if (m.hover_log < 4 && dt > 0.0f) {
+    ++m.hover_log;
+    REXLOG_INFO("gta4-trainer: time machine flying: {:.1f} m up, {:.1f} m/s ahead, climbing {:.1f} m/s", m.altitude,
+                m.fwd, m.climb);
+  }
+}
+
+// Every frame in a time machine (a look a few times a second otherwise, and
+// while a trip's effects play out). Returns the buttons it keeps from the
+// game.
+uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons,
+                     const DrivePad& pad) {
+  auto& m = g_tm;
+  const uint64_t now = NowMs();
+  const float dt = m.last_ms ? std::clamp(float(now - m.last_ms) / 1000.0f, 0.0f, 0.05f) : 0.0f;
+  m.last_ms = now;
+  const bool effects = m.phase != 0 || m.fires_out || m.vents_out || m.frost_until;
+  if (!m.in_car && !effects && now < m.next_probe)
+    return 0;
+  m.next_probe = now + 300;
+  const uint16_t prev = m.prev_buttons;
+  m.prev_buttons = buttons;
+  auto pressed = [&](uint16_t b) { return (buttons & b) && !(prev & b) && !s.open; };
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  const int film = vehicle.car ? TimeMachineFilm(vehicle.model) : 0;
+  // A trip under way carries on whatever happens (the car is ours till it is back).
+  if (m.phase == 1) {
+    if (now - m.phase_at >= kGoneMs || !VehicleAddress(base, m.car))
+      Arrive(ctx, base, game, m);
+    return film ? uint32_t(X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_DPAD_RIGHT | X_INPUT_GAMEPAD_LEFT_SHOULDER) : 0;
+  }
+  if (effects && VehicleAddress(base, m.car)) {
+    AfterTrip(ctx, base, m, now);
+  } else if (effects) {
+    // (the car gone or wrecked meanwhile: the trails put out, the rest let go)
+    ClearFires(ctx, base, m);
+    StopVents(ctx, base, m);
+    m.frost_until = 0;
+    m.booms_left = 0;
+    m.phase = 0;
+  }
+  if (!film) {
+    if (m.in_car) {
+      g_tm_synth.SetFlux(0.0f);
+      g_tm_synth.SetCharge(0.0f);
+      g_tm_synth.SetHover(0.0f);
+      m.hover = false;
+    }
+    m.in_car = false;
+    g_tm_in_car.store(false, std::memory_order_relaxed);
+    TimeMachineVoice(false);
+    return 0;
+  }
+  if (!m.in_car || m.car != *vehicle.car) {
+    if (!(m.in_car && m.film == 2 && film == 2))  // (the hover swap keeps everything)
+      m.hover = false;
+    m.car = *vehicle.car;
+    m.model = vehicle.model;
+    m.hover_form = vehicle.model == ModelHash("DELHOV");
+    m.film = film;
+    m.prev_buttons = buttons;  // (no edge from a button held getting in)
+    if (m.log < 6) {
+      ++m.log;
+      REXLOG_INFO("gta4-trainer: in the time machine (Part {}{}); circuits {}, reactor {}", film,
+                  m.hover_form ? ", flying form" : "", m.circuits ? "on" : "off", m.charged ? "charged" : "spent");
+    }
+  }
+  m.in_car = true;
+  g_tm_in_car.store(true, std::memory_order_relaxed);
+  TimeMachineVoice(true);
+  FollowClock(ctx, base, m);
+  float speed = 0.0f;
+  if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {m.car, 0}, 1))
+    speed = std::fabs(v->f(0));
+  m.speed = speed;
+  // Part II's models: both kept loaded for the conversion.
+  if (film == 2 && !m.models_requested) {
+    Invoke(ctx, base, "REQUEST_MODEL", {ModelHash("DELHOV")});
+    Invoke(ctx, base, "REQUEST_MODEL", {ModelHash("DELTWO")});
+    m.models_requested = true;
+  }
+  // d-pad down: the time circuits.
+  if (pressed(X_INPUT_GAMEPAD_DPAD_DOWN) || s.tm_toggle_circuits) {
+    s.tm_toggle_circuits = false;
+    m.circuits = !m.circuits;
+    if (m.circuits)
+      g_tm_synth.CircuitsOn();
+    else
+      g_tm_synth.CircuitsOff();
+    Toast(s, m.circuits ? "Time circuits on." : "Time circuits off.", 1200);
+  }
+  // L1 at a standstill (or the menu): the reactor reloaded.
+  if ((pressed(X_INPUT_GAMEPAD_LEFT_SHOULDER) || s.tm_refuel) && speed < 1.5f) {
+    s.tm_refuel = false;
+    if (m.charged) {
+      Toast(s, film == 1 ? "The reactor is already loaded." : "Mr. Fusion is already charged.", 1500);
+    } else {
+      m.charged = true;
+      if (film == 1)
+        g_tm_synth.Plutonium();
+      else
+        g_tm_synth.Fusion();
+      Toast(s, film == 1 ? "Plutonium loaded: 1.21 gigawatts." : "Mr. Fusion charged.", 2000);
+    }
+  } else if (s.tm_refuel && speed >= 1.5f) {
+    s.tm_refuel = false;
+    Toast(s, "Stop the car first.", 1200);
+  }
+  // Part II, d-pad right: fly (the wheels fold) or land.
+  uint32_t keep = X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  if (film == 2) {
+    keep |= X_INPUT_GAMEPAD_DPAD_RIGHT;
+    if (pressed(X_INPUT_GAMEPAD_DPAD_RIGHT) || s.tm_toggle_hover) {
+      s.tm_toggle_hover = false;
+      if (!m.hover) {
+        if (m.hover_form || SwapForm(ctx, base, game, m, true, s)) {
+          m.hover = true;
+          m.landing = false;
+          m.fwd = speed;
+          m.climb = 3.0f;  // up off the road
+          m.pitch = m.bank = 0.0f;
+          if (const auto h = Invoke(ctx, base, "GET_CAR_HEADING", {m.car, 0}, 1))
+            m.heading = h->f(0) * 3.14159265f / 180.0f;
+          Toast(s, "Flight mode: left stick to fly, R2 up, L2 down. D-pad right lands.", 3500);
+        }
+      } else {
+        m.landing = true;
+        Toast(s, "Landing...", 1500);
+      }
+    }
+  }
+  if (m.hover) {
+    Hover(ctx, base, m, pad, dt);
+    if (m.landing && m.altitude < 1.05f) {
+      if (SwapForm(ctx, base, game, m, false, s)) {
+        m.hover = m.landing = false;
+        g_tm_synth.SetHover(0.0f);
+      }
+    }
+  } else {
+    g_tm_synth.SetHover(0.0f);
+  }
+  // The build-up and the trip.
+  const bool ready = m.circuits && m.charged && m.phase == 0;
+  m.charge = ready ? std::clamp((speed - kMph60) / (kMph88 - kMph60), 0.0f, 1.0f) : 0.0f;
+  g_tm_synth.SetFlux(m.circuits && m.charged ? 0.3f + 0.7f * m.charge : 0.0f);
+  g_tm_synth.SetCharge(m.charge * m.charge);
+  if (ready && speed > kMph60 - 5.0f)
+    TrackWheels(ctx, base, m);
+  if (ready)
+    BuildUp(ctx, base, m, now);
+  if (ready && speed >= kMph88)
+    Depart(ctx, base, game, m, s);
+  else if (m.circuits && !m.charged && speed >= kMph88 && now >= m.next_spark) {
+    m.next_spark = now + 4000;
+    g_tm_synth.Empty();
+    Toast(s, film == 1 ? "No plutonium: the reactor is spent (L1 standing still)." :
+                         "Mr. Fusion is empty: refuel with L1 standing still.", 2500);
+  }
+  return keep;
+}
+
+// The TCD and the speedometer as the overlay shows them.
+void PublishTcd(const State& s) {
+  const auto& m = g_tm;
+  TcdModel t;
+  t.visible = m.in_car && m.circuits;
+  t.empty = !m.charged;
+  t.hover = m.hover;
+  t.dest = s.tm_dest;
+  t.present = m.present;
+  t.last = m.last;
+  t.mph = int(m.speed / 0.44704f + 0.5f);
+  const uint64_t now = NowMs();
+  if (now < g_flash_until && g_flash_until > g_flash_start)
+    t.flash = float(g_flash_until - now) / float(g_flash_until - g_flash_start);
+  const bool active = t.visible || t.flash > 0.0f;
+  {
+    std::lock_guard lock(g_tcd_mutex);
+    g_tcd = t;
+  }
+  g_tcd_active.store(active, std::memory_order_relaxed);
+}
+
 // Every frame in the car, and while its voice still sounds after getting
 // out; a look a few times a second otherwise.
 void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const DrivePad& pad, CarEngineState& e,
@@ -4264,10 +5007,10 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
   if (!e.in_car && !e.running && now < e.next_probe)
     return;
   e.next_probe = now + 300;
-  const uint32_t model = ModelHash(e.model);
+  const uint32_t model = ModelHash(e.model), model2 = e.model2.empty() ? 0u : ModelHash(e.model2);
   const auto& vehicle = PlayerVehicle(ctx, base, game);
   auto& synth = *e.synth;
-  if (!vehicle.car || vehicle.model != model) {
+  if (!vehicle.car || (vehicle.model != model && (!model2 || vehicle.model != model2))) {
     if (e.in_car)
       synth.SetTarget(0.0f, 0.0f, 0.0f, e.volume);  // switched off: it winds down
     e.in_car = false;
@@ -4630,6 +5373,30 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     case Action::kOpenWeapons: s.page = Page::kWeapons; s.selected = 0; break;
     case Action::kOpenChaos: s.page = Page::kChaos; s.selected = 0; break;
     case Action::kOpenStatus: s.page = Page::kStatus; s.selected = 0; break;
+    case Action::kOpenTimeMachine: s.page = Page::kTimeMachine; s.selected = 0; break;
+    case Action::kTmPreset:
+    case Action::kTmField:
+      g_tm_synth.Enter();
+      Toast(s, "Destination set.", 1000);
+      break;
+    case Action::kTmCircuits:
+      if (g_tm.in_car)
+        s.tm_toggle_circuits = true;
+      else
+        Toast(s, "Get in a DeLorean time machine first.", 1800);
+      break;
+    case Action::kTmRefuel:
+      if (g_tm.in_car)
+        s.tm_refuel = true;
+      else
+        Toast(s, "Get in a DeLorean time machine first.", 1800);
+      break;
+    case Action::kTmHover:
+      if (g_tm.in_car && g_tm.film == 2)
+        s.tm_toggle_hover = true;
+      else
+        Toast(s, "Only the Part II time machine flies.", 1800);
+      break;
     case Action::kToggleGod:
       s.god = !s.god;
       ApplyGod(ctx, base, game, s.god);
@@ -4792,6 +5559,28 @@ void Adjust(State& s, int direction) {
       else if (s.selected == 3 || s.selected == 4)
         s.weather = (s.weather + direction + int(kWeathers.size())) % int(kWeathers.size());
       break;
+    case Page::kTimeMachine: {
+      // The keypad beeps as the date is keyed in (in the car).
+      auto& d = s.tm_dest;
+      int digit = -1;
+      switch (s.selected) {
+        case 0:
+          s.tm_preset = (s.tm_preset + direction + int(kTcdPresets.size())) % int(kTcdPresets.size());
+          d = s.tm_preset == 0 ? TodaysDate() : kTcdPresets[size_t(s.tm_preset)].date;
+          digit = 10;
+          break;
+        case 1: d.month = (d.month - 1 + direction + 12) % 12 + 1; digit = d.month % 10; break;
+        case 2: d.day = (d.day - 1 + direction + DaysIn(d.year, d.month)) % DaysIn(d.year, d.month) + 1; digit = d.day % 10; break;
+        case 3: d.year = std::clamp(d.year + direction, 0, 9999); digit = d.year % 10; break;
+        case 4: d.hour = (d.hour + direction + 24) % 24; digit = d.hour % 10; break;
+        case 5: d.minute = (d.minute + direction + 60) % 60; digit = d.minute % 10; break;
+        default: break;
+      }
+      d.day = std::min(d.day, DaysIn(d.year, d.month));
+      if (digit >= 0 && g_tm_in_car.load(std::memory_order_relaxed))
+        g_tm_synth.Key(digit);
+      break;
+    }
     default:
       break;
   }
@@ -4841,6 +5630,7 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
       case Page::kWeapons: model.title = "WEAPONS"; break;
       case Page::kChaos: model.title = "CHAOS"; break;
       case Page::kStatus: model.title = "TRAINER STATUS"; break;
+      case Page::kTimeMachine: model.title = "TIME MACHINE"; break;
     }
     if (s.page == Page::kStatus) {
       model.lines.push_back({"Natives resolved: " + std::to_string(native_total - native_missing) +
@@ -4866,6 +5656,15 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
           if (i == 0) text = "Hour: " + std::to_string(s.hour);
           if (i == 1) text = "Minute: " + std::to_string(s.minute);
           if (i == 3) text = "Weather: " + std::string(kWeathers[size_t(s.weather)]);
+        }
+        if (s.page == Page::kTimeMachine) {
+          const auto& d = s.tm_dest;
+          if (i == 0) text = "Destination: " + std::string(kTcdPresets[size_t(s.tm_preset)].name);
+          if (i == 1) text = std::string("Month: ") + kMonths[std::clamp(d.month, 1, 12) - 1];
+          if (i == 2) text = fmt::format("Day: {:02d}", d.day);
+          if (i == 3) text = fmt::format("Year: {:04d}", d.year);
+          if (i == 4) text = fmt::format("Hour: {:02d} {}", (d.hour + 11) % 12 + 1, d.hour < 12 ? "AM" : "PM");
+          if (i == 5) text = fmt::format("Minute: {:02d}", d.minute);
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }
@@ -5044,6 +5843,7 @@ void PollMenu(PPCContext& ctx, uint8_t* base) {
         case Action::kOpenWeapons: s.page = Page::kWeapons; s.selected = 0; break;
         case Action::kOpenChaos: s.page = Page::kChaos; s.selected = 0; break;
         case Action::kOpenStatus: s.page = Page::kStatus; s.selected = 0; break;
+        case Action::kOpenTimeMachine: s.page = Page::kTimeMachine; s.selected = 0; break;
         // Everything else runs where natives are safe.
         default: g_pending.push_back({item.action, item.index}); break;
       }
@@ -5119,6 +5919,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool jet_canopy_due = g_have_f16 && (CanopyBusy(g_jet_canopy) || now >= g_jet_canopy.next_probe);
   const bool lazar_ramps_due = g_have_lazar && (CanopyBusy(g_lazar_ramps) || now >= g_lazar_ramps.next_probe);
   const bool lazar_due = g_have_lazar && (g_lazar.in_car || LazarShellsLive() || now >= g_lazar.next_probe);
+  const bool tm_due = HaveTimeMachines() && (g_tm.in_car || g_tm.phase != 0 || g_tm.fires_out || g_tm.vents_out ||
+                                             g_tm.frost_until || now >= g_tm.next_probe || g_flash_until > now);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
                                                    now >= g_bat_engine.next_probe);
   const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
@@ -5131,14 +5933,19 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool dominator_engine_due = engine_due(g_have_dominator, g_dominator_engine);
   const bool lazar_engine_due = engine_due(g_have_lazar, g_lazar_engine);
   const bool gauntlet_engine_due = engine_due(g_have_gauntlet, g_gauntlet_engine);
+  const bool dmc_engine_due = engine_due(g_have_dmc12, g_dmc_engine);
+  const bool bttf1_engine_due = engine_due(g_have_bttf1, g_bttf1_engine);
+  const bool bttf2_engine_due = engine_due(g_have_bttf2, g_bttf2_engine);
+  const bool bttf3_engine_due = engine_due(g_have_bttf3, g_bttf3_engine);
   const bool any_engine_due = bat_engine_due || deimos_engine_due || nexus_engine_due || arbiter_engine_due ||
-                              dominator_engine_due || lazar_engine_due || gauntlet_engine_due;
+                              dominator_engine_due || lazar_engine_due || gauntlet_engine_due || dmc_engine_due ||
+                              bttf1_engine_due || bttf2_engine_due || bttf3_engine_due;
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
       !jet_canopy_due && !teleport_due && !any_engine_due && s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
-      g_addons_probed)
+      !tm_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -5179,10 +5986,15 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_dominator = installed("DOM645T");
     g_have_lazar = installed("LAZAR3");
     g_have_gauntlet = installed("GAUNTLETC");
+    g_have_dmc12 = installed("DELNOR");
+    g_have_bttf1 = installed("DELONE");
+    g_have_bttf2 = installed("DELTWO");
+    g_have_bttf3 = installed("DELTHR");
+    g_have_bttf2h = installed("DELHOV");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}, Nexus {}, "
-                "Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}",
+                "Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}, DMC-12 {}, time machines {}/{}/{} (flying form {})",
                 g_have_batmobile, g_have_f16, g_have_deimos, g_have_dominator, g_have_nexus, g_have_arbiter,
-                g_have_lazar, g_have_gauntlet);
+                g_have_lazar, g_have_gauntlet, g_have_dmc12, g_have_bttf1, g_have_bttf2, g_have_bttf3, g_have_bttf2h);
   }
 
   bool acted = false;
@@ -5241,6 +6053,15 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
                            g_lazar_ramps);
   if (lazar_due)
     vehicle_mask |= LazarTurret(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed));
+  if (tm_due) {
+    DrivePad pad;
+    {
+      std::lock_guard lock(g_drive_mutex);
+      pad = g_drive_pad;
+    }
+    vehicle_mask |= TimeMachine(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), pad);
+    PublishTcd(s);
+  }
   if (any_engine_due) {
     DrivePad pad;
     {
@@ -5261,6 +6082,14 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       CarEngine(ctx, base, game, pad, g_lazar_engine, 0.0f);
     if (gauntlet_engine_due)
       CarEngine(ctx, base, game, pad, g_gauntlet_engine, 0.0f);
+    if (dmc_engine_due)
+      CarEngine(ctx, base, game, pad, g_dmc_engine, 0.0f);
+    if (bttf1_engine_due)
+      CarEngine(ctx, base, game, pad, g_bttf1_engine, 0.0f);
+    if (bttf2_engine_due)
+      CarEngine(ctx, base, game, pad, g_bttf2_engine, 0.0f);
+    if (bttf3_engine_due)
+      CarEngine(ctx, base, game, pad, g_bttf3_engine, 0.0f);
   }
   if (jet_due) {
     DrivePad pad;
@@ -5295,13 +6124,155 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
 // The overlay (UI thread): draws the published model, never touches the game.
 // ---------------------------------------------------------------------------
 namespace {
+// The DeLorean's time circuits as the films' car shows them: three rows of
+// LED read-outs on a dark panel (destination time in red, present time in
+// green, last time departed in amber), each with its field names above and
+// its name plate below, the colons blinking; above them the digital
+// speedometer and the EMPTY lamp. Bottom right, with the circuits on.
+void SegDigit(ImDrawList* dl, ImVec2 p, float h, int digit, ImU32 on, ImU32 off, ImU32 glow) {
+  static constexpr uint8_t kSeg[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
+  const uint8_t bits = digit >= 0 && digit <= 9 ? kSeg[digit] : 0;
+  const float w = h * 0.55f, t = h * 0.13f, g = t * 0.6f;
+  const float x0 = p.x, x1 = p.x + w, y0 = p.y, ym = p.y + h * 0.5f, y1 = p.y + h;
+  const ImVec4 seg[7] = {
+      {x0 + t, y0, x1 - t, y0 + t},                      // a
+      {x1 - t, y0 + t, x1, ym - t * 0.5f},               // b
+      {x1 - t, ym + t * 0.5f, x1, y1 - t},               // c
+      {x0 + t, y1 - t, x1 - t, y1},                      // d
+      {x0, ym + t * 0.5f, x0 + t, y1 - t},               // e
+      {x0, y0 + t, x0 + t, ym - t * 0.5f},               // f
+      {x0 + t, ym - t * 0.5f, x1 - t, ym + t * 0.5f}};   // g
+  for (int k = 0; k < 7; ++k) {
+    const bool lit = (bits >> k) & 1;
+    if (lit)
+      dl->AddRectFilled(ImVec2(seg[k].x - g, seg[k].y - g), ImVec2(seg[k].z + g, seg[k].w + g), glow, t);
+    dl->AddRectFilled(ImVec2(seg[k].x, seg[k].y), ImVec2(seg[k].z, seg[k].w), lit ? on : off, t * 0.35f);
+  }
+}
+
+void SegNumber(ImDrawList* dl, ImVec2 p, float h, int value, int digits, ImU32 on, ImU32 off, ImU32 glow) {
+  for (int k = digits - 1; k >= 0; --k) {
+    SegDigit(dl, ImVec2(p.x + float(k) * h * 0.72f, p.y), h, value % 10, on, off, glow);
+    value /= 10;
+  }
+}
+
+void DrawTcd(ImGuiIO& io) {
+  TcdModel t;
+  {
+    std::lock_guard lock(g_tcd_mutex);
+    t = g_tcd;
+  }
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  if (t.flash > 0.0f)
+    dl->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(235, 245, 255, int(230 * std::min(1.0f, t.flash))));
+  if (!t.visible)
+    return;
+  ImFont* font = ImGui::GetFont();
+  const float scale = std::max(0.75f, io.DisplaySize.y / 1080.0f);
+  const float h = 26.0f * scale;             // a digit's height
+  const float dw = h * 0.72f;                // a digit's pitch
+  const float small = 11.0f * scale, gap = h * 0.45f;
+  const float month_w = h * 2.0f, day_w = 2 * dw, year_w = 4 * dw, ampm_w = h * 0.9f, hour_w = 2 * dw,
+              colon_w = h * 0.35f, min_w = 2 * dw;
+  const float row_w = month_w + day_w + year_w + ampm_w + hour_w + colon_w + min_w + 6 * gap;
+  const float row_h = small * 1.4f + h + small * 1.9f + h * 0.35f;
+  const float pad = h * 0.45f;
+  const float panel_w = row_w + 2 * pad, panel_h = 3 * row_h + 2 * pad;
+  const ImVec2 origin(io.DisplaySize.x - panel_w - 36.0f * scale, io.DisplaySize.y - panel_h - 40.0f * scale);
+  // the speedometer and the reactor's lamp above the panel
+  {
+    const float sh = h * 1.25f, sw = 2 * sh * 0.72f;
+    const ImVec2 box(origin.x + panel_w - sw - pad * 2 - h * 1.6f, origin.y - sh - pad * 2.2f);
+    dl->AddRectFilled(box, ImVec2(origin.x + panel_w, origin.y - pad * 0.4f), IM_COL32(16, 16, 18, 235), 4.0f * scale);
+    dl->AddRect(box, ImVec2(origin.x + panel_w, origin.y - pad * 0.4f), IM_COL32(90, 90, 96, 255), 4.0f * scale, 0,
+                1.5f * scale);
+    SegNumber(dl, ImVec2(box.x + pad, box.y + pad * 0.9f), sh, std::clamp(t.mph, 0, 99), 2,
+              IM_COL32(255, 40, 30, 255), IM_COL32(255, 40, 30, 28), IM_COL32(255, 40, 30, 60));
+    dl->AddText(font, small * 1.3f, ImVec2(box.x + pad + sw + 6.0f * scale, box.y + pad * 0.9f + sh - small * 1.4f),
+                IM_COL32(255, 60, 40, 255), "MPH");
+    // EMPTY (the reactor spent), a lamp left of the speedometer
+    const ImVec2 lamp(box.x - h * 2.9f, box.y + pad * 0.6f), lamp2(box.x - h * 0.3f, box.y + pad * 0.6f + h * 0.9f);
+    dl->AddRectFilled(lamp, lamp2, t.empty ? IM_COL32(255, 30, 20, 255) : IM_COL32(70, 18, 14, 240), 3.0f * scale);
+    dl->AddText(font, small * 1.25f, ImVec2(lamp.x + h * 0.38f, lamp.y + h * 0.22f),
+                t.empty ? IM_COL32(255, 235, 225, 255) : IM_COL32(140, 70, 60, 255), "EMPTY");
+    if (t.hover)
+      dl->AddText(font, small * 1.2f, ImVec2(lamp.x, lamp2.y + 4.0f * scale), IM_COL32(120, 255, 150, 255), "FLIGHT");
+  }
+  dl->AddRectFilled(origin, ImVec2(origin.x + panel_w, origin.y + panel_h), IM_COL32(28, 28, 31, 238), 6.0f * scale);
+  dl->AddRect(origin, ImVec2(origin.x + panel_w, origin.y + panel_h), IM_COL32(110, 110, 118, 255), 6.0f * scale, 0,
+              2.0f * scale);
+  const bool colon = (NowMs() / 500) % 2 == 0;
+  struct Row {
+    const TcdDate* d;
+    const char* name;
+    ImU32 on, plate;
+  };
+  const Row rows[3] = {{&t.dest, "DESTINATION TIME", IM_COL32(255, 45, 32, 255), IM_COL32(150, 25, 20, 255)},
+                       {&t.present, "PRESENT TIME", IM_COL32(60, 255, 95, 255), IM_COL32(25, 110, 40, 255)},
+                       {&t.last, "LAST TIME DEPARTED", IM_COL32(255, 190, 40, 255), IM_COL32(140, 95, 15, 255)}};
+  const ImU32 label = IM_COL32(170, 170, 176, 255);
+  for (int r = 0; r < 3; ++r) {
+    const auto& row = rows[r];
+    const TcdDate& d = *row.d;
+    const ImU32 off = (row.on & 0x00FFFFFF) | (26u << 24), glow = (row.on & 0x00FFFFFF) | (55u << 24);
+    float x = origin.x + pad;
+    const float y_label = origin.y + pad + float(r) * row_h, y = y_label + small * 1.4f;
+    auto field = [&](float w, const char* name) {
+      dl->AddRectFilled(ImVec2(x - 3 * scale, y - 3 * scale), ImVec2(x + w + 3 * scale, y + h + 3 * scale),
+                        IM_COL32(6, 6, 7, 255), 2.0f * scale);
+      const ImVec2 ts = font->CalcTextSizeA(small, FLT_MAX, 0.0f, name);
+      dl->AddText(font, small, ImVec2(x + (w - ts.x) * 0.5f, y_label), label, name);
+    };
+    field(month_w, "MONTH");
+    const char* mon = kMonths[std::clamp(d.month, 1, 12) - 1];
+    dl->AddText(font, h * 1.05f, ImVec2(x + h * 0.05f, y - h * 0.04f), glow, mon);
+    dl->AddText(font, h, ImVec2(x + h * 0.08f, y), row.on, mon);
+    x += month_w + gap;
+    field(day_w, "DAY");
+    SegNumber(dl, ImVec2(x + h * 0.08f, y), h, d.day, 2, row.on, off, glow);
+    x += day_w + gap;
+    field(year_w, "YEAR");
+    SegNumber(dl, ImVec2(x + h * 0.08f, y), h, d.year, 4, row.on, off, glow);
+    x += year_w + gap;
+    // AM / PM lamps
+    {
+      const bool pm = d.hour >= 12;
+      const ImVec2 ts = font->CalcTextSizeA(small, FLT_MAX, 0.0f, "AM");
+      dl->AddText(font, small, ImVec2(x + (ampm_w - ts.x) * 0.5f, y_label), label, "AM");
+      dl->AddCircleFilled(ImVec2(x + ampm_w * 0.5f, y + h * 0.22f), h * 0.13f, pm ? off : row.on);
+      dl->AddText(font, small, ImVec2(x + (ampm_w - ts.x) * 0.5f, y + h * 0.42f), label, "PM");
+      dl->AddCircleFilled(ImVec2(x + ampm_w * 0.5f, y + h * 0.88f), h * 0.13f, pm ? row.on : off);
+    }
+    x += ampm_w + gap;
+    field(hour_w, "HOUR");
+    SegNumber(dl, ImVec2(x + h * 0.08f, y), h, (d.hour + 11) % 12 + 1, 2, row.on, off, glow);
+    x += hour_w + gap * 0.5f;
+    const ImU32 dot = colon ? row.on : off;
+    dl->AddCircleFilled(ImVec2(x + colon_w * 0.5f, y + h * 0.3f), h * 0.08f, dot);
+    dl->AddCircleFilled(ImVec2(x + colon_w * 0.5f, y + h * 0.72f), h * 0.08f, dot);
+    x += colon_w + gap * 0.5f;
+    field(min_w, "MIN");
+    SegNumber(dl, ImVec2(x + h * 0.08f, y), h, d.minute, 2, row.on, off, glow);
+    // the row's name plate
+    const ImVec2 ts = font->CalcTextSizeA(small * 1.15f, FLT_MAX, 0.0f, row.name);
+    const float py = y + h + small * 0.45f, px = origin.x + (panel_w - ts.x) * 0.5f;
+    dl->AddRectFilled(ImVec2(px - 10 * scale, py - 2 * scale), ImVec2(px + ts.x + 10 * scale, py + ts.y + 2 * scale),
+                      row.plate, 3.0f * scale);
+    dl->AddText(font, small * 1.15f, ImVec2(px, py), IM_COL32(240, 240, 240, 255), row.name);
+  }
+}
+
 class TrainerOverlay final : public rex::ui::ImGuiDialog {
  public:
   explicit TrainerOverlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
 
  protected:
-  bool WantsContinuousRepaint() const override { return false; }
+  // (the time circuits' display blinks and the flash fades: drawn every frame then)
+  bool WantsContinuousRepaint() const override { return g_tcd_active.load(std::memory_order_relaxed); }
   void OnDraw(ImGuiIO& io) override {
+    if (g_tcd_active.load(std::memory_order_relaxed))
+      DrawTcd(io);
     DrawModel model;
     {
       std::lock_guard lock(g_draw_mutex);

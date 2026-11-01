@@ -14,6 +14,11 @@ trainer's **Car Spawning** list.
 | `arbiterx/` | Imponte Arbiter X (johndoe968, ported by Milcin) | Imponte Arbiter X: its own engine |
 | `lazar3/` | Lazar 3 armed (Grom, SkylineGTRFreak, ported by Milcin) | Lazar 3 (armed): turret on the camera, cannon on L1, hydraulic side ramps, its own engine |
 | `gauntletc/` | Bravado Gauntlet Classic (Vanillaworks, ported by Milcin) | Bravado Gauntlet Classic: its own engine |
+| `delnor/` | DeLorean DMC-12 (Sersorroza; Time Travel IV 2.0a) | DeLorean DMC-12: gullwing doors, its own engine |
+| `delone/` | DeLorean time machine, Part I (same) | Time Machine (Part I): time travel, plutonium |
+| `deltwo/` | DeLorean time machine, Part II (same) | Time Machine (Part II): time travel, Mr. Fusion, flies |
+| `delthr/` | DeLorean time machine, Part III (same) | Time Machine (Part III): time travel |
+| `delhov/` | Part II's flying form (same) | not in the list: swapped in when Part II takes off |
 
 Add-on cars are kept out of traffic: nobody else drives them, they only
 appear when you spawn them.

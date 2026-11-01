@@ -1,6 +1,6 @@
 """Structural validation of a converted 360 vehicle against its PC donor.
 
-usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd> [pivots]
+usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd>[,parent.wtd...] [pivots] [options]
 
 pivots: as given to run_vehicle.py (batconv.parse_pivots).
 """
@@ -18,6 +18,7 @@ import xenos  # noqa: E402
 
 out_dir, name, wft, wtd = sys.argv[1:5]
 PIVOTS = batconv.parse_pivots(sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != '-' else '')
+OPTIONS = batconv.parse_options(sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != '-' else '')
 # donor bone -> the pivots its geometry may ride on; a conditional source may
 # also leave a vertex on the chassis fallback when no condition claims it
 PIVOT_OF = {}
@@ -30,9 +31,11 @@ flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
 x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
 t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
 d = rsc5.Resource.pc(wft)
-raw = open(wtd, 'rb').read()
-_, rt, rf = struct.unpack_from('<III', raw, 0)
-dtd = rsc5.Resource(zlib.decompress(raw[12:]), rf, False, rt, 'wtd')
+def _wtd(path):
+    raw = open(path, 'rb').read()
+    _, rt, rf = struct.unpack_from('<III', raw, 0)
+    return rsc5.Resource(zlib.decompress(raw[12:]), rf, False, rt, 'wtd')
+DTDS = [_wtd(w) for w in wtd.split(',') if w]
 fails = 0
 
 
@@ -146,6 +149,10 @@ def counts(draw, n, res=None, bones=None):
             for lod in draw['lods'][:n]]
 
 
+def draw_is_main(xdraw):
+    return xdraw is xd
+
+
 def joined(xdraw, ddraw, n):
     """Per converted LOD slot (< n): its donor LOD (the last one repeats), the
     runs of converted geometries per donor geometry, and (geometry count,
@@ -153,10 +160,13 @@ def joined(xdraw, ddraw, n):
     dl = ddraw['lods']
     out = []
     for k, lod in enumerate(xdraw['lods'][:n]):
-        dgs = [g for m in dl[min(k, len(dl) - 1)] for g in m['geometries']] if dl else []
+        src_lod = min(k, len(dl) - 1)
+        if draw_is_main(xdraw) and OPTIONS.get('lods'):
+            src_lod = min(OPTIONS['lods'][min(k, len(OPTIONS['lods']) - 1)], len(dl) - 1)
+        dgs = [g for m in dl[src_lod] for g in m['geometries']] if dl else []
         rs = runs([g for m in lod for g in m['geometries']], dgs)
         c = None if rs is None else (len(rs), sum(vcount(r[0]) if len(r) == 1 else vcount(dg) for r, dg in zip(rs, dgs)))
-        out.append((min(k, len(dl) - 1), dgs, rs, c))
+        out.append((src_lod, dgs, rs, c))
     return out
 
 
@@ -165,10 +175,12 @@ dcounts = counts(dd, 3, d, dbones)
 JM, JW = joined(xd, dd, 3), joined(xwheel, dwheel, 2)
 _xc = [c for _, _, _, c in JM]
 _split = sum(len(r) for _, _, rs, _ in JM + JW for r in (rs or []) if len(r) > 1)
-check('main LOD geometry/vertex counts equal donor (%d donor LODs)' % nd,
-      _xc[:min(nd, 3)] == dcounts[:min(nd, 3)],
+_want = [dcounts[min(src, nd - 1)] for src, _, _, _ in JM]  # (each slot's donor LOD, the options' map applied)
+check('main LOD geometry/vertex counts equal donor (%d donor LODs%s)' % (nd, ', slots drawing %s' %
+      ':'.join(str(src) for src, _, _, _ in JM) if OPTIONS.get('lods') else ''),
+      _xc[:min(nd, 3)] == _want[:min(nd, 3)],
       str(_xc) + ('; %d parts of split geometries counted as their donor geometry' % _split if _split else ''))
-if nd < 3:
+if nd < 3 and not OPTIONS.get('lods'):
     check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', _xc[2] == dcounts[-1])
 dw = counts(dwheel, 2)
 _wc = [c for _, _, _, c in JW]
@@ -345,7 +357,9 @@ hashes = [t.u32(t.vptr(16) + 4 * i) for i in range(tn)]
 check('texture dictionary hash table sorted, unique', hashes == sorted(set(hashes)), '%d textures' % tn)
 dict_names = set()
 tex_bad = 0
-src = batconv.pc_textures(dtd, 0)
+src = {}
+for _t in reversed(DTDS):  # the car's own dictionary first, as the converter takes them
+    src.update(batconv.pc_textures(_t, 0))
 emb = dd['shader_group']['texdict']
 src_e = batconv.pc_textures(d, emb[1]) if emb else {}
 for i in range(tn):
@@ -358,7 +372,7 @@ for i in range(tn):
     s = src.get(nm) or src_e.get(nm)
     if s is None:
         continue  # a stock FBI texture, kept as-is
-    s = batconv.fit_texture(s)  # past MAX_TEXTURE_SIDE: the first mip level that fits
+    s = batconv.fit_texture(s, batconv.texture_side(nm, OPTIONS))  # the first mip level that fits
     d3d = t.vptr(info + 24)
     f = struct.unpack_from('>6I', t.virt, d3d + 28)
     base = ((f[1] >> 12) << 12) & 0x0FFFFFFF

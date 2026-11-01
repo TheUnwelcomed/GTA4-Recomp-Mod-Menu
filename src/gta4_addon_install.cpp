@@ -1406,6 +1406,22 @@ std::string TemplateLine(const fs::path& file, const std::string& model) {
   return {};
 }
 
+// The donor's handling id, from the vehicles.ide beside handling.dat (its
+// line's fourth field: the Cavalcade's is CAVCADE, not its model name), or
+// the model name itself when that cannot be read. (v1.7.20 looked for the
+// model name and placed no handling for the Lazar 3: it drove without any.)
+std::string DonorHandlingId(const fs::path& handling_file, const std::string& donor) {
+  TextLines ide;
+  if (!LoadText(handling_file.parent_path() / "vehicles.ide", ide))
+    return donor;
+  for (const auto& line : ide.lines) {
+    const auto t = Tokens(line);
+    if (t.size() > 3 && t[0] == donor)
+      return t[3];
+  }
+  return donor;
+}
+
 // Everything one data file takes for the add-ons, chosen by its name: each
 // vehicle line right after its donor's line in vehicles.ide's cars section
 // (in the console's format), its handling line, and colour and camera rows
@@ -1420,7 +1436,7 @@ bool EditDataFile(const fs::path& file, const std::vector<Addon>& addons) {
   for (const auto& a : addons) {
     const std::string label = a.model;
     if (name == "handling.dat")
-      fine &= InsertAfterDonor(file, a.donor, a.handling, (label + " handling").c_str());
+      fine &= InsertAfterDonor(file, DonorHandlingId(file, a.donor), a.handling, (label + " handling").c_str());
     if (name == "vehicles.ide")
       fine &= InsertAfterDonor(file, a.donor,
                                ConsoleIdeLine(a.ide, TemplateLine(file, a.template_model), a.traffic),
