@@ -186,6 +186,11 @@ network session.
 
 ## Changes
 
+- **v1.7.28**: **targeting** only takes what can be seen: each candidate's
+  line of sight tested with `GET_GROUND_Z_FOR_3D_COORD` from high over points
+  along it (a roof over the line hides what is behind it), 40 probes a scan,
+  each result kept half a second; a locked car out of sight a second and a
+  half is let go. Reach per weapon: the Lazar 200 m, the jets 500 m.
 - **v1.7.27**: the **Batwing** sunk or tipped is put down by the menu itself,
   level at its standing height over the ground below it (v1.7.26 asked
   `SET_CAR_ON_GROUND_PROPERLY`, which measures from the wheels: under the

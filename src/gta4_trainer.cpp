@@ -2530,7 +2530,11 @@ struct JetLock {
   uint32_t candidate = 0, target = 0, blip = 0;
   uint32_t pick = 0;  // the target d-pad up chose (0: the one nearest the nose)
   uint64_t candidate_since = 0, next_scan = 0;
+  uint64_t hidden_since = 0;  // the locked one out of sight since (v1.7.28)
   float pos[3]{};
+  // how far targets are taken and kept (m): the jets' sky, the Lazar's street
+  float range = 500.0f, keep_range = 600.0f;
+  int hidden_logs = 0;
 };
 struct JetState {
   bool flying = false;
@@ -2908,6 +2912,7 @@ void DropLock(PPCContext& ctx, uint8_t* base, JetLock& l) {
   l.blip = 0;
   l.target = 0;
   l.candidate = 0;
+  l.hidden_since = 0;
 }
 
 // The HUD's targeting marks (a dot on each car or helicopter the jet can
@@ -2994,15 +2999,70 @@ struct JetTarget {
   bool heli = false;
 };
 std::vector<JetTarget> g_jet_targets;  // the last scan, nearest the nose first (game thread)
-constexpr float kTargetRange = 600.0f, kTargetKeepRange = 750.0f;
 constexpr float kTargetCos = 0.766f, kTargetKeepCos = 0.643f;  // 40 and 50 degrees
+// Line of sight to the targets (v1.7.28: the marks and locks went to cars
+// behind buildings, half a kilometre off). GET_GROUND_Z_FOR_3D_COORD from
+// high over points along the line finds the top of whatever stands there:
+// a roof over the line hides what is behind it (a bridge over it, too).
+struct Sight {
+  uint32_t car = 0;
+  bool clear = false;
+  uint64_t at = 0;
+};
+std::array<Sight, 32> g_sight{};
+constexpr uint64_t kSightMs = 500;
+constexpr int kSightProbes = 40;  // a scan's probes at most
+
+bool LineClear(PPCContext& ctx, uint8_t* base, const float a[3], const float b[3], int& budget) {
+  const float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+  const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+  if (len < 10.0f)
+    return true;
+  const float step = std::clamp(len / 16.0f, 6.0f, 25.0f);
+  for (float at = 5.0f; at < len - 4.0f; at += step) {
+    --budget;
+    const float k = at / len;
+    const float p[3] = {a[0] + d[0] * k, a[1] + d[1] * k, a[2] + d[2] * k};
+    if (const auto top = GroundZ(ctx, base, p[0], p[1], p[2] + 250.0f); top && *top > p[2] + 1.0f)
+      return false;
+  }
+  return true;
+}
+
+// Whether a car can be seen from `from`: tested again after kSightMs while
+// the scan's probes last; not known yet (and none left): nothing.
+std::optional<bool> SightTo(PPCContext& ctx, uint8_t* base, const float from[3], uint32_t car, const float pos[3],
+                            uint64_t now, int& budget) {
+  Sight* slot = nullptr;
+  Sight* oldest = &g_sight[0];
+  for (auto& e : g_sight) {
+    if (e.car == car) {
+      slot = &e;
+      break;
+    }
+    if (e.at < oldest->at)
+      oldest = &e;
+  }
+  if (slot && now - slot->at < kSightMs)
+    return slot->clear;
+  if (budget <= 0)
+    return slot ? std::optional<bool>(slot->clear) : std::nullopt;
+  const float to[3] = {pos[0], pos[1], pos[2] + 1.0f};
+  const bool clear = LineClear(ctx, base, from, to, budget);
+  if (!slot)
+    slot = oldest;
+  *slot = Sight{car, clear, now};
+  return clear;
+}
+
 constexpr uint64_t kLockMs = 600;
 constexpr size_t kMaxTargets = 12;
 
 // The targets ahead (five or six times a second): the pool's vehicles in the
 // cone, nearest the nose first; working ones only, and only what can be
 // driven or flown (cars, bikes, boats, helicopters; not trains).
-void ScanTargets(PPCContext& ctx, uint8_t* base, const JetState& j, const float from[3], const float fwd[3]) {
+void ScanTargets(PPCContext& ctx, uint8_t* base, const JetState& j, const float from[3], const float fwd[3],
+                 uint64_t now) {
   g_jet_targets.clear();
   if (g_entity_pos_ok <= 0) {
     // (positions not readable directly: the nose's search, one at a time)
@@ -3031,7 +3091,7 @@ void ScanTargets(PPCContext& ctx, uint8_t* base, const JetState& j, const float 
       d += v[a] * v[a];
     }
     d = std::sqrt(d);
-    if (d < 8.0f || d > kTargetRange)
+    if (d < 8.0f || d > j.lock.range)
       return;
     t.cosang = (v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2]) / d;
     if (t.cosang < kTargetCos)
@@ -3041,6 +3101,7 @@ void ScanTargets(PPCContext& ctx, uint8_t* base, const JetState& j, const float 
     near.push_back(t);
   });
   std::sort(near.begin(), near.end(), [](const JetTarget& a, const JetTarget& b) { return a.cosang > b.cosang; });
+  int budget = kSightProbes;
   for (auto& t : near) {
     if (g_jet_targets.size() >= kMaxTargets)
       break;
@@ -3054,6 +3115,10 @@ void ScanTargets(PPCContext& ctx, uint8_t* base, const JetState& j, const float 
     if (kind == Kind::kOther)
       continue;
     t.heli = kind == Kind::kHeli;
+    // only what can be seen: not behind a building
+    const auto seen = SightTo(ctx, base, from, t.car, t.pos, now, budget);
+    if (!seen || !*seen)
+      continue;
     g_jet_targets.push_back(t);
   }
 }
@@ -3066,7 +3131,7 @@ void UpdateLock(PPCContext& ctx, uint8_t* base, JetState& j, State& s, const flo
   CheckEntityPositions(ctx, base, j.car);
   if (now >= l.next_scan) {
     l.next_scan = now + 170;
-    ScanTargets(ctx, base, j, from, fwd);
+    ScanTargets(ctx, base, j, from, fwd, now);
   }
   if (l.target) {
     bool keep = false;
@@ -3079,7 +3144,21 @@ void UpdateLock(PPCContext& ctx, uint8_t* base, JetState& j, State& s, const flo
       len = std::sqrt(len);
       const float c = len > 1.0f ? (v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2]) / len : 1.0f;
       const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {l.target});
-      keep = len < kTargetKeepRange && c > kTargetKeepCos && !(dead && dead->r0());
+      // out of sight (behind a building) a second and a half: let go
+      int budget = 12;
+      const auto seen = SightTo(ctx, base, from, l.target, tp->data(), now, budget);
+      if (seen && !*seen) {
+        if (!l.hidden_since)
+          l.hidden_since = now;
+      } else {
+        l.hidden_since = 0;
+      }
+      const bool hidden = l.hidden_since && now - l.hidden_since > 1500;
+      keep = len < l.keep_range && c > kTargetKeepCos && !(dead && dead->r0()) && !hidden;
+      if (hidden && l.hidden_logs < 6) {
+        ++l.hidden_logs;
+        REXLOG_INFO("gta4-trainer: lock on {:08X} let go: out of sight {:.0f} m off", l.target, len);
+      }
       for (int a = 0; a < 3; ++a)
         l.pos[a] = (*tp)[a];
     }
@@ -5405,6 +5484,7 @@ uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         for (auto& c : fwd)
           c /= len;
         g_lazar_aim.car = z.car;
+        g_lazar_aim.lock.range = 200.0f, g_lazar_aim.lock.keep_range = 240.0f;  // (the street's)
         const bool cycle = (buttons & X_INPUT_GAMEPAD_DPAD_UP) && !(g_lazar_aim.prev_buttons & X_INPUT_GAMEPAD_DPAD_UP) &&
                            !s.open;
         UpdateLock(ctx, base, g_lazar_aim, s, from->data(), fwd, now, cycle);
