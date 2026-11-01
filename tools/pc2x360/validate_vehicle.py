@@ -61,6 +61,28 @@ def vcount(g):
     return g['vertex_count'] or g.get('vb_count', 0)
 _, xbones = batconv.bones(x, xd['skeleton_off'])
 dbo, dbones = batconv.bones(d, dd['skeleton_off'])
+# Doors the car swings (batconv Converter._doors): the template's door bone
+# at the donor's hinge, with the donor's travel. The donor's door and what
+# hangs under it must ride on it.
+_, XSK = batconv.read_skeleton(x, xd['skeleton_off'])
+_, DSK = batconv.read_skeleton(d, dd['skeleton_off'])
+DOORS = {}
+for _n in batconv.DOOR_NAMES:
+    if _n in xbones and _n in dbones:
+        _xb, _db = XSK[xbones.index(_n)], DSK[dbones.index(_n)]
+        _xl, _dl = batconv.bone_limits(x, _xb['rec']), batconv.bone_limits(d, _db['rec'])
+        if batconv.close(_xb['pos'], _db['pos'], 1e-4) and all(batconv.close(a, b, 1e-6) for a, b in zip(_xl, _dl)):
+            DOORS[_n] = dbones.index(_n)
+
+
+def door_above(di):
+    """The swinging door a donor bone is (or hangs under), if any."""
+    while di >= 0:
+        nm = batconv.BONE_ALIAS.get(dbones[di], dbones[di])
+        if DOORS.get(nm) == di:
+            return nm
+        di = DSK[di]['parent']
+    return None
 
 # every geometry: pointers in range, descriptors consistent, decoded data == donor
 geo_out = [(g, 'main') for lod in xd['lods'] for m in lod for g in m['geometries']] + \
@@ -161,11 +183,13 @@ for xg, (dg, pose, dtable) in pairs:
     xbp, dbp = x.vptr(xg['off'] + 56), d.vptr(dg['off'] + 56)
     xtab = [x.u16(xbp + 2 * k) for k in range(x.u16(xg['off'] + 62))] if xbp is not None else []
     dtab = [d.u16(dbp + 2 * k) for k in range(d.u16(dg['off'] + 62))] if dbp is not None else []
-    for xi, di in zip(xtab, dtab):  # bone tables: the same-named safe bone, a pivot, or the chassis
+    for xi, di in zip(xtab, dtab):  # bone tables: the same-named safe bone, a pivot, a door, or the chassis
         want = batconv.BONE_ALIAS.get(dbones[di], dbones[di])
         got = xbones[xi]
         if dbones[di] in UNCONDITIONAL:
             ok = got in PIVOT_OF[dbones[di]]
+        elif door_above(di):
+            ok = got == door_above(di)
         elif got == want:
             ok = batconv.carries(got)
         else:
@@ -215,9 +239,12 @@ check('normals/tangents within packing precision (<= 2/511)',
 check('UVs within half precision (rel <= 2^-10)', max(worst.get(i, 0) for i in range(6, 14)) <= 2 ** -10,
       'max rel err %.6f' % max(worst.get(i, 0) for i in range(6, 14)))
 check('weights/indices/colors carried byte-exact', max(worst.get(1, 0), worst.get(2, 0), worst.get(4, 0)) == 0)
-check('bone tables: same-named safe bones, a pivot or the chassis', bone_bad == 0, 'bad=%d' % bone_bad)
-_ok, _msg = restpose.check_rest_pose(x, set(PIVOTS))
+check('bone tables: same-named safe bones, a pivot, a door or the chassis', bone_bad == 0,
+      'bad=%d; doors on the donor\'s hinges: %s' % (bone_bad, ', '.join(sorted(DOORS)) or 'none'))
+_ok, _msg = restpose.check_rest_pose(x, set(PIVOTS) | set(DOORS))
 check('rest pose: every vertex skinned where it is stored; safe bones only', _ok, _msg.split(': ', 1)[1])
+_ok, _msg = restpose.check_children(x)
+check('physics parts: child data follow their bones (rest inverse, link centre)', _ok, _msg)
 check('texcoord sets filled for the 360 shader repeat texcoord 0', uv_fill_bad == 0, 'bad=%d' % uv_fill_bad)
 
 # shaders: inputs satisfied; texture names resolvable

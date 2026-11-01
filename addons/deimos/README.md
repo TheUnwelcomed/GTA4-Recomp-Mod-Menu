@@ -36,7 +36,8 @@ Converted with:
 
 | | |
 |---|---|
-| Doors, bonnet, boot, glass | fixed to the body: they don't open or break (the Banshee's parts are elsewhere; posing the Deimos's on them drew them displaced) |
+| Doors | open and close: the Banshee's door joints moved to the Deimos's hinges (0.39 m forward), its door and window on them (since v1.7.8) |
+| Bonnet, boot, glass | fixed to the body: they don't open or break (the Deimos hinges its engine cover and front boot at the other end from the Banshee's lids) |
 | Moving steering wheel | a ZolikaPatch feature: the wheel is fixed |
 | Collision | the Banshee's (the template) |
 | Physics wheels | the mod's own size (0.33 m); on the Banshee's 0.38 m wheels it floated 5 cm |

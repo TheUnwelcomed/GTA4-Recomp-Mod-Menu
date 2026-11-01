@@ -136,22 +136,36 @@ def segment_chunks(flags, physical=True):
     return load_chunks(count, 256 << shift)
 
 
-def pack_physical(objects, fixed_end=0, fixed_pieces=(), max_count=0x3F):
+# Chunks as small as the biggest object allows. Stock cars load in 128 and
+# 256 KiB chunks; v1.7.7's add-ons were packed for the smallest file and came
+# out in chunks of up to 2 MiB, each one allocation the console's streaming
+# heap must find whole. Fresh after a launch it could; once the world had been
+# streaming a while, often not: a second spawn of an add-on "did not load
+# within 20 s" (log 053), the first Batmobile took 17 s. The resource map
+# (sub_8285C790's callers keep it on the stack) holds 128 chunks, virtual ones
+# included, and the page count has 11 bits (Rockstar's own files go past 63).
+MIN_PHYSICAL_PAGE = 16384      # 256 KiB chunks, the stock cars' size
+MAX_PHYSICAL_CHUNKS = 100
+
+
+def pack_physical(objects, fixed_end=0, fixed_pieces=(), max_chunks=MAX_PHYSICAL_CHUNKS):
     """Offsets for `objects` [(size, alignment)] so that each lies inside one
-    load chunk, in the smallest segment found (6-bit page counts, as the stock
-    tools emit). `fixed_end`: bytes [0, fixed_end) already taken (a template's
-    data kept in place), made of `fixed_pieces` [(start, end)] that must each
-    stay inside one chunk too. Returns (offsets, count, shift, total)."""
-    best = None
+    load chunk, in the smallest chunks that hold the biggest object (pages of
+    at least MIN_PHYSICAL_PAGE), then the fewest pages. `fixed_end`: bytes
+    [0, fixed_end) already taken (a template's data kept in place), made of
+    `fixed_pieces` [(start, end)] that must each stay inside one chunk too.
+    Returns (offsets, count, shift, total)."""
     order = sorted(range(len(objects)), key=lambda i: (-objects[i][0], i))
     need = fixed_end + sum(s for s, _ in objects)
     biggest = max([s for s, _ in objects] + [e - s for s, e in fixed_pieces] + [1])
     for shift in range(4, 16):
         page = 256 << shift
-        if 16 * page < biggest:
+        if 16 * page < biggest or page < MIN_PHYSICAL_PAGE:
             continue
-        for count in range(max(1, -(-need // page)), max_count + 1):
+        for count in range(max(1, -(-need // page)), 0x7FF + 1):
             chunks = load_chunks(count, page)
+            if len(chunks) > max_chunks:
+                break
             if any(not any(cs <= s and e <= ce for cs, ce in chunks) for s, e in fixed_pieces):
                 continue
             fill = [max(cs, min(ce, fixed_end)) for cs, ce in chunks]
@@ -167,11 +181,8 @@ def pack_physical(objects, fixed_end=0, fixed_pieces=(), max_count=0x3F):
                 else:
                     break
             else:
-                if best is None or count * page < best[3]:
-                    best = (offs, count, shift, count * page)
-                break
-    assert best, 'no physical layout keeps every buffer inside one load chunk'
-    return best
+                return offs, count, shift, count * page
+    raise AssertionError('no physical layout keeps every buffer inside one load chunk')
 
 
 def place_physical(objects, fixed=b'', fixed_pieces=()):
@@ -357,11 +368,22 @@ def bones(r, skel):
 #    smashed window or lamp) by overwriting its local matrix with a constant
 #    that sends it, and every bone under it, to the world's origin. A
 #    triangle with one corner there is a long black sliver across the map.
+#  - Doors, the bonnet and the boot hang on joints, built from the skeleton
+#    when they swing: the bone's position is the hinge, its rotation limits
+#    (+0xB0 min, +0xC0 max, radians per axis; a free bone has -pi..pi) the
+#    axis and travel. Each physics part's fragment child keeps the inverse of
+#    its bone's rest matrix (+0x10) and its link's centre of gravity (+0x50:
+#    the body's, or a door's own), and fragType +0xF8 holds each part's
+#    offset from that centre; every stock car keeps these consistent with the
+#    skeleton (checked on the template before anything moves).
 #
 # So the donor's geometry rides only on bones the game never hides or poses
 # from physics parts of a different car: the chassis, the body shell, the
-# wheel assembly (moved, consistently, to the donor's wheels) and a pivot
-# bone the trainer turns (pop-up lamps). Everything else is drawn rigid on
+# wheel assembly (moved, consistently, to the donor's wheels), a pivot bone
+# the trainer turns (pop-up lamps), and a door: the template's door joint
+# moved to the donor's hinge, so it swings the donor's door the way the mod
+# hangs it. A door is hidden only when it breaks off, and then the game draws
+# it (from the same drawable) on its own. Everything else is drawn rigid on
 # the chassis: it stays where the modder put it.
 
 # Template bones moved to the donor's position (where the game reads a point
@@ -376,6 +398,11 @@ CARRY_NAMES = {'chassis', 'bodyshell'}
 # A donor bone further than this outside its own model is a parking spot
 # (the Batmobile keeps its unused door bones 13 m below the car).
 POINT_MARGIN = 0.6
+# Doors the donor's own door (and what hangs under it: its windows) swings
+# on. The bonnet and boot stay rigid: mods hinge them at either end (the
+# Deimos's engine cover, the Dominator's bonnet at the windscreen), where the
+# template's lid, collision and all, would hang the wrong way round.
+DOOR_NAMES = ('door_dside_f', 'door_pside_f', 'door_dside_r', 'door_pside_r')
 
 
 def is_point(name):
@@ -409,6 +436,34 @@ def v_add(a, b):
 
 def close(a, b, tol=2e-3):
     return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def is_identity(m, tol=1e-3):
+    return all(abs(m[k][j] - (k == j)) <= tol for k in range(3) for j in range(3))
+
+
+def bone_limits(r, rec):
+    """A bone's rotation limits: (min xyz, max xyz) in radians."""
+    return (struct.unpack_from(r.e + '3f', r.virt, rec + 0xB0),
+            struct.unpack_from(r.e + '3f', r.virt, rec + 0xC0))
+
+
+def is_joint(limits):
+    """A bone whose rotation is limited on some axis hangs a part on a joint
+    (door, bonnet, boot); a free bone has -pi..pi on all three."""
+    mn, mx = limits
+    return any(mx[k] - mn[k] < 6.28 for k in range(3))
+
+
+def joint_axes(limits):
+    """The axes a joint turns about (a door: just z)."""
+    mn, mx = limits
+    return tuple(k for k in range(3) if 1e-4 < mx[k] - mn[k] < 6.28)
+
+
+def rows(r, off, k=4):
+    """A matrix as rows (rotation rows, then the translation)."""
+    return [struct.unpack_from(r.e + '3f', r.virt, off + 16 * i) for i in range(k)]
 
 
 def read_skeleton(r, sk):
@@ -666,6 +721,7 @@ class Converter:
                 else:
                     self.split_rules.append((dindex[s], cond, tname))
             target[ti] = spec['hinge'] or db[dindex[spec['sources'][0][0]]]['pos']
+        self.doors = self._doors(tb, db, tindex, dindex, phys, trot, sane, target)
         self.moved = set(target)
 
         # new local translations, parents first (rotations stay the template's)
@@ -694,11 +750,18 @@ class Converter:
             for loc, glo in instances:
                 put3(loc + 0x50 * i + 0x30, new_t[i])
                 put3(glo + 0x40 * i + 0x30, npos[i])
+        # a door takes the donor's travel too (same axis, checked in _doors)
+        for ti, di in self.doors.items():
+            for k in (0xB0, 0xC0):
+                self.v.buf[tb[ti]['rec'] + k:tb[ti]['rec'] + k + 12] = \
+                    swap_words(d.virt[db[di]['rec'] + k:db[di]['rec'] + k + 12])
         self.bone_pos = npos
         self._move_composite_parts(phys, tpos, npos)
+        self._move_children(phys, tpos, npos)
         self._resize_wheels(phys, dindex)
 
         # which template bone each donor bone's geometry is drawn with
+        door_of = {di: tnames[ti] for ti, di in self.doors.items()}
         self.bone_map, self.rigid = {}, []
         for di, b in enumerate(db):
             n = BONE_ALIAS.get(b['name'], b['name'])
@@ -708,11 +771,15 @@ class Converter:
                                                   close(b['pos'], npos[tindex[n]], 1e-5)):
                 tn = n
             else:
-                # inherits a pivot from a donor parent (parts hung under the pod)
-                p, tn = b['parent'], BONE_FALLBACK
+                # a door and what hangs under it (windows) swing with the door;
+                # parts hung under a pivot source (the pop-up pods) turn with it
+                p, tn = di, BONE_FALLBACK
                 while p >= 0:
                     if p in self.pivot_of:
                         tn = self.pivot_of[p]
+                        break
+                    if p in door_of:
+                        tn = door_of[p]
                         break
                     p = db[p]['parent']
                 if tn == BONE_FALLBACK and n != BONE_FALLBACK:
@@ -723,8 +790,70 @@ class Converter:
                     ('; parked donor bones ignored: ' + ', '.join(self.parked)) if self.parked else '',
                     BONE_FALLBACK, len(self.rigid)))
 
+    def _donor_geometry_bones(self):
+        """Donor bones some geometry of the main drawable is bound to."""
+        d, out = self.d, set()
+        for lod in self.df['drawable']['lods']:
+            for m in lod:
+                for g in m['geometries']:
+                    bp, bc = d.vptr(g['off'] + 56), d.u16(g['off'] + 62)
+                    if bp is not None:
+                        out.update(d.u16(bp + 2 * k) for k in range(bc))
+        return out
+
+    @staticmethod
+    def _under(bones, i, top):
+        """Is bone i `top` or hung somewhere under it?"""
+        while i >= 0:
+            if i == top:
+                return True
+            i = bones[i]['parent']
+        return False
+
+    def _doors(self, tb, db, tindex, dindex, phys, trot, sane, target):
+        """{template door bone: donor door bone} for the doors the car swings:
+        a template door joint (a physics part on a limited bone) whose donor
+        door is on the car (not parked), in the same frame as the template's
+        (neither rotated), turning about the same single axis, with geometry
+        on it or under it, and not taken by a pivot. The template's door goes
+        to the donor's hinge (`target`); the caller copies the donor's travel.
+        The F-16's are control surfaces in rotated frames, the Batmobile's are
+        parked under the car: both stay rigid."""
+        geo = self._donor_geometry_bones()
+        sources = {dindex[s] for spec in self.pivots.values() for s, _ in spec['sources'] if s in dindex}
+        out, notes = {}, []
+        for n in DOOR_NAMES:
+            if n not in tindex or n not in dindex:
+                continue
+            ti, di = tindex[n], dindex[n]
+            tl, dl = bone_limits(self.t, tb[ti]['rec']), bone_limits(self.d, db[di]['rec'])
+            if ti not in phys or not is_joint(tl) or n in self.pivots:
+                continue
+            if not sane(db[di]['pos']):
+                why = 'parked'
+            elif not (is_identity(db[di]['G']) and is_identity(trot[ti])):
+                why = 'rotated'
+            elif len(joint_axes(tl)) != 1 or joint_axes(dl) != joint_axes(tl):
+                why = 'turns about another axis'
+            elif any(self._under(db, s, di) for s in sources):
+                why = 'a pivot source'
+            elif not any(self._under(db, g, di) for g in geo):
+                why = 'no geometry'
+            else:
+                why = None
+            if why:
+                notes.append('%s %s' % (n, why))
+                continue
+            target[ti] = db[di]['pos']
+            out[ti] = di
+            notes.append('%s hinge %.2f m from the template\'s' % (
+                n, sum((a - b) ** 2 for a, b in zip(db[di]['pos'], tb[ti]['pos'])) ** 0.5))
+        if notes:
+            self.log('doors: ' + '; '.join(notes))
+        return out
+
     def _move_composite_parts(self, phys, old_pos, new_pos):
-        """Wheel collision parts follow their bones; the composite's box grows to hold them."""
+        """Collision parts (wheels, doors) follow their bones; the composite's box grows to hold them."""
         t, v = self.t, self.v
         bnd = t.vptr(0xEC)
         if bnd is None:
@@ -737,7 +866,7 @@ class Converter:
         mn = list(struct.unpack_from('>3f', t.virt, bnd + 0x20))
         grew = False
         for bone, child in phys.items():
-            if bone not in self.moved or child >= n:
+            if close(old_pos[bone], new_pos[bone], 0) or child >= n:
                 continue
             for m in mats:
                 cur = struct.unpack_from('>3f', t.virt, m + 0x40 * child + 0x30)
@@ -763,6 +892,50 @@ class Converter:
             struct.pack_into('>3f', v.buf, bnd + 0x20, *mn)
             struct.pack_into('>3f', v.buf, bnd + 0x30, *[(a + b) / 2 for a, b in zip(mx, mn)])
             struct.pack_into('>2f', v.buf, bnd + 0x08, max(r08, radius), max(r0c, radius + (r0c - r08)))
+
+    def _move_children(self, phys, old_pos, new_pos):
+        """A moved physics part's fragment child data follow its bone: the
+        inverse of the bone's rest matrix (child +0x10), its link's centre of
+        gravity (child +0x50: the body's for a part fixed to the body, a
+        door's own, which moves with its hinge) and its offset from that
+        centre (fragType +0xF8). Stale, they put a part back where the
+        template had it once a door swings and the car is articulated (v1.7.7
+        and before left the wheels' that way). Every relation is checked on
+        the template first."""
+        t, v = self.t, self.v
+        tb = self.tmpl_bones
+        lst, att = t.vptr(0xD4), t.vptr(0xF8)
+        bnd = t.vptr(0xEC)
+        cur = t.vptr(bnd + 0x84)
+        root_cg = rows(t, t.vptr(lst) + 0x50)[3]
+
+        def link_of(i):  # the joint bone whose link carries bone i (-1: the body)
+            while i >= 0 and not is_joint(bone_limits(t, tb[i]['rec'])):
+                i = tb[i]['parent']
+            return i if i > 0 else -1
+
+        moved = []
+        for bone, c in sorted(phys.items(), key=lambda kv: kv[1]):
+            co = t.vptr(lst + 4 * c)
+            link = link_of(bone)
+            d_link = v_sub(new_pos[link], old_pos[link]) if link >= 0 else (0.0, 0.0, 0.0)
+            if close(old_pos[bone], new_pos[bone], 0) and close(d_link, (0, 0, 0), 0):
+                continue
+            inv, cg, off = rows(t, co + 0x10), rows(t, co + 0x50), rows(t, att + 64 * c)
+            part = rows(t, cur + 64 * c)
+            name = tb[bone]['name']
+            # the template's own data keep the relations this rewrites
+            assert close(inv[3], tuple(-x for x in v_mat(old_pos[bone], inv[:3]))), \
+                '%s: child +0x10 is not the inverse of its rest matrix' % name
+            assert close(cg[3], root_cg) == (link < 0), '%s: link centre %s' % (name, cg[3])
+            assert close(off[3], v_mat(v_sub(part[3], cg[3]), m_t(cg[:3]))), \
+                '%s: part offset %s is not part - centre' % (name, off[3])
+            new_cg = v_add(cg[3], d_link)
+            struct.pack_into('>3f', v.buf, co + 0x10 + 0x30, *(-x for x in v_mat(new_pos[bone], inv[:3])))
+            struct.pack_into('>3f', v.buf, co + 0x50 + 0x30, *new_cg)
+            struct.pack_into('>3f', v.buf, att + 64 * c + 0x30, *v_mat(v_sub(new_pos[bone], new_cg), m_t(cg[:3])))
+            moved.append(name)
+        self.children_moved = moved
 
     @staticmethod
     def _wheel_bounds(res, frag, names):

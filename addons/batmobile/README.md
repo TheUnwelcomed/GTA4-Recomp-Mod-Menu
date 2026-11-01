@@ -25,11 +25,21 @@ stock FBI lines back by itself.
 | Handling | the mod's (heavy, 9,550 kg) |
 | Collision | the FBI Buffalo's: it collides like a Buffalo-sized car |
 | Parts it has no mesh for (rear doors, sirens) | not drawn |
-| Its doors, canopy, bonnet, boot | fixed to the body (the mod parks those bones 13 m under the car; v1.7.4 drew the parts there, the long black shapes) |
+| Canopy | pops open when you get in or out (see below); it rides the FBI's `interiorlight` bone, hinged at its rear edge |
+| Its doors, bonnet, boot | fixed to the body (the mod parks its door bones 13 m under the car; v1.7.4 drew the parts there, the long black shapes) |
 | Engine sound | the Sabre GT's (IV picks sounds by the name a car shows) |
-| Gadget script (ScriptHookDotNet `.net.dll`s) | cannot run on the port. The trainer re-creates its minigun, grenades and booster: see below |
+| Gadget script (ScriptHookDotNet `.net.dll`s) | cannot run on the port. The trainer re-creates its missiles, miniguns, bombs and booster: see below |
 | Physics wheels | the mod's own sizes (0.35 m front, 0.39 m rear); on the FBI's 0.40 m wheels it sat high |
 | Body shader | the template's `interior2`, as the mod's `interior` maps to: v1.7.5-v1.7.6 borrowed the police car's `interior` and the body came out chrome |
+
+## Canopy
+
+No toggle. Getting in (Triangle), the canopy pops open, you're put in the
+seat and it closes. Triangle inside opens it again and sets you down beside
+the driver's side. The trainer turns the canopy's bone in the car's live
+skeleton, as it turns the Deimos's lamp pods, and moves the player with
+`WARP_CHAR_INTO_CAR` / `WARP_CHAR_FROM_CAR_TO_COORD`. The cockpit under the
+canopy (seats, dash, wheel) is the mod's own.
 
 ## Gadgets
 
@@ -37,21 +47,37 @@ stock FBI lines back by itself.
 
 | | |
 |---|---|
-| **d-pad left** (hold) | minigun ahead, from both front barrels in turn |
-| **d-pad down** (hold) | minigun behind |
-| **horn (L3)** | drop three grenades behind; press again to set them off (they go off by themselves after 10 s) |
-| **d-pad right** (hold) | booster |
+| **L1** | a missile out of the nose (hold: one every 0.6 s) |
+| **d-pad left** (hold) | the front miniguns, both barrels together |
+| **d-pad down** (hold) | the rear miniguns, both barrels together |
+| **horn (L3)** | plant a bomb behind the car (a blinking red light marks it); again to set it off |
+| **d-pad right** (hold) | booster: the rear turbine flames (`weap_rocket`) and roars (the trainer's jet synth) |
 
-As in JulioNIB's script (its strings: *Minigun*, *Releasing grenades, press
-again to detonate!*, the `w_grenade` model), redone through natives: real
-bullets (`FIRE_SINGLE_BULLET`) with IV's machine-gun flash (`muz_machine`;
-the script's `muz_minigun` is an episodes effect), grenade explosions
-(`ADD_EXPLOSION`), the shots' sound from the trainer's own mixer. Those buttons
-don't change the radio or sound the horn while gadgets are on; d-pad up stays
-the phone.
+As in JulioNIB's script (its modes *Minigun*, *Rocket*, *Bomb*), redone
+through natives:
 
-The model is about 7× the polygons of a stock car. If the engine refuses to
-stream it, the trainer says "The model did not load." Nothing crashes.
+- **Missile:** the RPG's rocket (`cj_rpg_rocket`) with its smoke trail,
+  flown as a physics object the way Rockstar's own scripted rockets fly
+  (TBOGT's `tony8`). Its velocity is set every frame, and
+  `HAS_OBJECT_COLLIDED_WITH_ANYTHING` sets it off on walls and cars. The
+  ground and nearby cars are checked too, and it goes off at 320 m. If the
+  physics doesn't take it, it is flown by hand. The log says which.
+- **Miniguns:** real bullets (`FIRE_SINGLE_BULLET`) with IV's machine-gun
+  flash (`muz_machine`; the script's `muz_minigun` is an episodes effect) on
+  each barrel.
+- **Bomb:** the `w_grenade` model on the ground with a
+  `DRAW_LIGHT_WITH_RANGE` blink, set off as three rocket explosions
+  (`ADD_EXPLOSION` type 2). v1.7.7's grenades used type 0 and only made a
+  noise.
+
+Those buttons don't drive-by, change the radio or sound the horn while
+gadgets are on. D-pad up stays the phone. Missiles in flight and a planted
+bomb carry on after you leave the car.
+
+The model is about 7× the polygons of a stock car. Since v1.7.8 its GPU data
+loads in 256 KB blocks like a stock car's; v1.7.7's 2 MB blocks could take
+17 s to find room for. If the engine still refuses to stream it, the
+trainer says so after 60 s. Nothing crashes.
 
 ## Files here
 

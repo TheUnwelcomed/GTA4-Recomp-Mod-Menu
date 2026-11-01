@@ -30,7 +30,7 @@ compares with the real 360 file:
 | lod0 vertices (position, normal, tangent, UVs, colour, weighted bones*) | 13,913 / 13,913 identical |
 | GPU vertex/index descriptors | consistent |
 
-\* Parts the converter deliberately draws rigid on the chassis (doors, glass,
+\* Parts the converter deliberately draws rigid on the chassis (glass,
 lamps: see the skeleton section) are compared as bound to the chassis.
 
 Texture conversion (8-in-16 endian swap + Xenos 2D tiling) reproduces the 360
@@ -46,10 +46,10 @@ every donor texture untiles back to its source.
 
 | car | template | result |
 |---|---|---|
-| Batmobile | FBI | 21/21 checks: 262,043 vertices skinned at rest, 0.00000 m off |
-| F-16C (airtug slot on PC) | Cavalcade | 21/21 checks: paint2/paint3 from the airtug, landing gear on three pivots (12,872 vertex influences split by position), 74,436 vertices exact |
-| Grotti Deimos GTS | Banshee | 21/21 checks: lamp pods on a pivot, 119,139 vertices exact |
-| Vapid Dominator 645 | Banshee | 21/21 checks: 91 geometries, 293,238 vertices exact |
+| Batmobile | FBI | 22/22 checks: canopy on a pivot, 262,043 vertices skinned at rest, 0.00000 m off |
+| F-16C (airtug slot on PC) | Cavalcade | 22/22 checks: paint2/paint3 from the airtug, landing gear on three pivots (12,872 vertex influences split by position), 74,436 vertices exact |
+| Grotti Deimos GTS | Banshee | 22/22 checks: doors on the Deimos's hinges, lamp pods on a pivot, 119,139 vertices exact |
+| Vapid Dominator 645 | Banshee | 22/22 checks: doors on the Dominator's hinges, 91 geometries, 293,238 vertices exact |
 
 `build_bundled.sh` converts, packs and validates all four in one go.
 
@@ -118,13 +118,48 @@ picks the page size and count and places every buffer and texture inside one
 chunk, keeping a template dictionary's own chunks whole; `chunkcheck.py`
 checks a file against the rule, and `validate_vehicle.py` runs it.
 
+**Chunk size.** Each chunk is one allocation the streaming heap must find
+whole. Stock cars load in 128 and 256 KiB chunks. Up to v1.7.7 the converter
+packed for the smallest file, and the add-ons came out in chunks of up to
+2 MiB. Fresh after a launch the console found room for those; after a while
+of streaming the world it often didn't: a second spawn of an add-on did not
+load (log 053), and the first Batmobile took 17 s. Now the page size is the
+smallest whose 16-page chunk holds the biggest object, and at least 16 KiB:
+256 KiB chunks for most files. A 1024-pixel texture (the F-16's liveries) or
+a big vertex buffer (the Dominator's body) still needs 512 KiB-1 MiB. The
+page count may pass 63 (the field has 11 bits, and Rockstar's own Infernus
+textures use 70). The resource map's callers keep room for 128 chunks; the
+packer stays under 100.
+
 ### What the converter handles (beyond a like-for-like car)
 
 - **Donor bones the template lacks** (`misc_*`, `steeringwheel`, ...), and
-  parts the game would pose from the template's physics parts (doors, bonnet,
-  boot, bumpers, glass) or hide (lamps, extras), are drawn rigid on the
-  chassis. Vertices are stored in model space, so parts keep their place and
-  lose only their own motion.
+  parts the game would pose from the template's physics parts (bonnet, boot,
+  bumpers, glass) or hide (lamps, extras), are drawn rigid on the chassis.
+  Vertices are stored in model space, so parts keep their place and lose only
+  their own motion.
+- **Doors** swing. A door hangs on a joint the game builds from the skeleton
+  when it swings: the bone's position is the hinge, its rotation limits
+  (+0xB0 min, +0xC0 max) the axis and travel. Its physics part's fragment
+  child keeps the inverse of the bone's rest matrix (+0x10) and its link's
+  centre of gravity (+0x50), and fragType +0xF8 each part's offset from that
+  centre. Every stock car keeps these consistent with the skeleton. For each
+  template door the donor has too (on the car, not parked; neither bone
+  rotated; turning about the same single axis; with geometry), the template's
+  door bone goes to the donor's hinge. Its collision part, child data and
+  travel follow, and the donor's door and what hangs under it (windows) ride
+  on it. A door is hidden only when it breaks off, and the game then draws
+  it on its own from the same drawable. The Deimos's hinges are 0.39 m from
+  the Banshee's, the Dominator's 0.28 m. The F-16's "doors" are control
+  surfaces in rotated frames and the Batmobile's are parked, so both stay
+  rigid. Bonnets and boots stay rigid: mods hinge them at either end (the
+  Deimos's engine cover, the Dominator's bonnet at the windscreen), so the
+  template's lid would hang the wrong way round. `render_posed.py` draws a
+  converted car with its doors (or pivots) turned, to check the hinges.
+- **Moved physics parts' child data** follow their bones (`_move_children`),
+  for the wheels too: up to v1.7.7 their +0x10 and offsets still named the
+  template's wheel positions, which the game reads once the car is
+  articulated (a door open). `validate_vehicle.py` checks every part.
 - **A missing wheel** takes its opposite's place (a tricycle's nose wheel fills
   both front slots). **No wheel mesh at all** hides the template's wheels.
 - **Shaders the template lacks** map to its nearest one (`paint2`/`paint3` to
@@ -157,7 +192,10 @@ checks a file against the rule, and `validate_vehicle.py` runs it.
   pivots by position (`boot:y>1.5`): its vertices are re-bound one by one.
   The Deimos's pop-up lamp pods swing on the Banshee's `extra_1`; the F-16's
   nose gear (the front of the mod's `boot`) and two main gears fold on the
-  Cavalcade's `extra_1`, `extra_5` and `extra_6`. (v1.7.1-v1.7.4 emitted
+  Cavalcade's `extra_1`, `extra_5` and `extra_6`; the Batmobile's canopy
+  (the mod's parked `door_pside_f` and `windscreen`) on the FBI's
+  `interiorlight`, which has no extras, hinged at its rear edge (the trainer
+  finds that bone by name). (v1.7.1-v1.7.4 emitted
   posed copies on three extras instead; hiding an extra drew their shared
   triangles to the world's origin.) The template needs the skeleton's
   rotation arrays (+8, +12): of the stock cars only the Banshee, Cavalcade,
@@ -196,6 +234,7 @@ python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [p
 python3 validate_vehicle.py out mycar car.wft car.wtd [pivots]        # structural checks, rest pose included
 python3 restpose.py out/mycar.xft out/mycar.xft.bin [pivot bone,...]  # the rest-pose check alone
 python3 chunkcheck.py out/mycar.xft out/mycar.xft.bin out/mycar.xtd out/mycar.xtd.bin   # GPU buffers vs load chunks
+python3 render_posed.py out/mycar mycar doors.png door_dside_f:z:-60 door_pside_f:z:60   # draw it with bones turned
 ./xlzx rsc 112 <flags> out/mycar.xft.bin mycar.xft   # flags from out/flags.txt
 ./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd
 ```
@@ -216,8 +255,9 @@ Converted files are not committed here — they contain data from the game.
 
 - Collision stays the template car's (the Batmobile collides like a Buffalo);
   only the physics wheels take the donor's size.
-- Doors, bonnet, boot and glass are fixed to the body: they don't open,
-  break or fall off.
+- Bonnet, boot and glass are fixed to the body: they don't open or break.
+  Doors open on the donor's hinges, with the template door's collision
+  shape.
 - Template bones the donor lacks (rear doors, sirens, …) keep their position;
   nothing of the donor is drawn there.
 - Donor textures: DXT1/3/5 or A8R8G8B8. Mip chains beyond level 0 are not

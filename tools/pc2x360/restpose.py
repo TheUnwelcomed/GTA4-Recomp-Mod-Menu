@@ -1,9 +1,10 @@
 """Rest-pose check of a converted 360 car, read from the output file alone:
 every vertex skinned the way the game does it (runtime matrix x inverse rest
-pose) must land where it is stored, and the main drawable may only use bones
-the game never hides or poses from collision parts.
+pose) must land where it is stored, the main drawable may only use bones the
+game never hides or poses from collision parts (plus the pivots and doors
+named), and every physics part's child data must agree with its bone.
 
-usage: restpose.py <name.xft> <name.xft.bin> [pivot bone[,pivot bone...]]   (exit 1 on failure)"""
+usage: restpose.py <name.xft> <name.xft.bin> [pivot or door bone[,bone...]]   (exit 1 on failure)"""
 import struct
 import sys
 import rsc5
@@ -94,8 +95,41 @@ def check_rest_pose(r, pivot=None):
     return worst < 1e-3 and not bad_bones and not fails, msg
 
 
+def check_children(r):
+    """(ok, message): every physics part's fragment child data agree with its
+    bone and collision part, as on every stock car: child +0x10 the inverse
+    of the bone's rest matrix, child +0x50 its link's centre of gravity (the
+    body's unless a joint bone - a door, bonnet, boot - carries the part),
+    fragType +0xF8 the part's offset from that centre."""
+    f = rsc5.read_fragtype(r)
+    _, bones = batconv.read_skeleton(r, f['drawable']['skeleton_off'])
+    lst, att = r.vptr(0xD4), r.vptr(0xF8)
+    cur = r.vptr(r.vptr(0xEC) + 0x84)
+    root_cg = batconv.rows(r, r.vptr(lst) + 0x50)[3]
+    bad = []
+    for c in range(f['child_count']):
+        co = r.vptr(lst + 4 * c)
+        b = r.u16(co + 0x0E)
+        name, pos = bones[b]['name'], bones[b]['pos']
+        inv, cg = batconv.rows(r, co + 0x10), batconv.rows(r, co + 0x50)
+        off, part = batconv.rows(r, att + 64 * c), batconv.rows(r, cur + 64 * c)
+        link = b
+        while link >= 0 and not batconv.is_joint(batconv.bone_limits(r, bones[link]['rec'])):
+            link = bones[link]['parent']
+        if not (batconv.close(inv[3], tuple(-v for v in batconv.v_mat(pos, inv[:3]))) and
+                all(batconv.close(inv[k], batconv.m_t(bones[b]['G'])[k]) for k in range(3))):
+            bad.append('%s: +0x10 is not the inverse of its rest matrix' % name)
+        if batconv.close(cg[3], root_cg) != (link <= 0):
+            bad.append('%s: link centre %s' % (name, tuple(round(v, 3) for v in cg[3])))
+        if not batconv.close(off[3], batconv.v_mat(batconv.v_sub(part[3], cg[3]), batconv.m_t(cg[:3]))):
+            bad.append('%s: offset from its link centre is stale' % name)
+    return not bad, '%d physics parts%s' % (f['child_count'], (': ' + '; '.join(bad)) if bad else ', all consistent')
+
+
 if __name__ == '__main__':
     _r = rsc5.Resource.x360(sys.argv[1], sys.argv[2])
-    _ok, _msg = check_rest_pose(_r, sys.argv[3] if len(sys.argv) > 3 else None)
+    _ok, _msg = check_rest_pose(_r, set(sys.argv[3].split(',')) if len(sys.argv) > 3 else None)
+    _ok2, _msg2 = check_children(_r)
     print(_msg)
-    sys.exit(0 if _ok else 1)
+    print(_msg2)
+    sys.exit(0 if _ok and _ok2 else 1)

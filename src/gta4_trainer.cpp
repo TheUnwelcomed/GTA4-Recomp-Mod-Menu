@@ -50,8 +50,10 @@ using rex::input::X_INPUT_GAMEPAD_DPAD_DOWN;
 using rex::input::X_INPUT_GAMEPAD_DPAD_LEFT;
 using rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT;
 using rex::input::X_INPUT_GAMEPAD_DPAD_UP;
+using rex::input::X_INPUT_GAMEPAD_LEFT_SHOULDER;
 using rex::input::X_INPUT_GAMEPAD_LEFT_THUMB;
 using rex::input::X_INPUT_GAMEPAD_RIGHT_THUMB;
+using rex::input::X_INPUT_GAMEPAD_Y;
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -167,6 +169,13 @@ std::array g_natives = {
     NativeEntry{"TRIGGER_PTFX"}, NativeEntry{"TRIGGER_PTFX_ON_VEH"},
     NativeEntry{"START_PTFX_ON_OBJ"}, NativeEntry{"START_PTFX_ON_VEH"}, NativeEntry{"STOP_PTFX"},
     NativeEntry{"GET_CAR_COLOURS"},
+    // Batmobile missile (a physics rocket, as TBOGT's tony8 flies its own),
+    // bomb light, canopy entry.
+    NativeEntry{"SET_OBJECT_INITIAL_VELOCITY"}, NativeEntry{"SET_OBJECT_RECORDS_COLLISIONS"},
+    NativeEntry{"HAS_OBJECT_COLLIDED_WITH_ANYTHING"}, NativeEntry{"GET_OBJECT_COORDINATES"},
+    NativeEntry{"SET_OBJECT_INVINCIBLE"}, NativeEntry{"DRAW_LIGHT_WITH_RANGE"},
+    NativeEntry{"IS_CHAR_GETTING_IN_TO_A_CAR"}, NativeEntry{"CLEAR_CHAR_TASKS_IMMEDIATELY"},
+    NativeEntry{"WARP_CHAR_FROM_CAR_TO_COORD"}, NativeEntry{"IS_CAR_DEAD"},
     // Chaos: raining cars, gravity.
     NativeEntry{"SET_CAR_HEADING"}, NativeEntry{"SET_GRAVITY_OFF"},
     // Grotti Deimos pop-up headlights (the pods' extra, the lamps).
@@ -644,6 +653,9 @@ struct State {
   uint64_t pending_loaded_at = 0, pending_ready_since = 0;  // the guard's settle wait
   int pending_stable = 0;
   bool pending_logged = false;
+  uint64_t pending_renew_at = 0;  // the request renewed while it waits
+  int pending_renewals = 0;
+  uint64_t pending_toast_step = 0;
   // Saved position.
   bool have_saved = false;
   float saved[3]{};
@@ -715,7 +727,7 @@ uint64_t NowNs() {
 }
 // Which bundled add-ons this install has, looked up once (IS_MODEL_IN_CDIMAGE)
 // so their watchers cost nothing on installs without them.
-bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false;
+bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false, g_have_batmobile = false;
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
 std::atomic<uint32_t> g_pad_adjust{0};
@@ -736,6 +748,7 @@ void Toast(State& s, std::string text, uint64_t ms = 2500) {
 bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_deimos ||
+         g_have_batmobile ||
          s.car_lights;
 }
 
@@ -766,7 +779,7 @@ std::vector<Item> PageItems(const State& s) {
                {"Repair Current Vehicle", Action::kRepair},
                {s.warp_in ? "Warp Into Spawned Car: ON" : "Warp Into Spawned Car: OFF",
                 Action::kToggleWarpIn},
-               {s.gadgets ? "Batmobile Gadgets: ON (d-pad guns/boost, horn grenades)"
+               {s.gadgets ? "Batmobile Gadgets: ON (L1 missile, d-pad guns/boost, horn bomb)"
                           : "Batmobile Gadgets: OFF",
                 Action::kToggleGadgets},
                {s.jet ? "F-16 Flight and Weapons: ON" : "F-16 Flight and Weapons: OFF",
@@ -922,7 +935,10 @@ void StartSpawn(State& s, int model_index, PPCContext& ctx, uint8_t* base) {
   s.pending_loaded_at = s.pending_ready_since = 0;
   s.pending_stable = 0;
   s.pending_logged = false;
-  Toast(s, std::string("Loading ") + std::string(choice.label) + "...", 20000);
+  s.pending_renew_at = s.pending_since + 4000;
+  s.pending_renewals = 0;
+  s.pending_toast_step = 0;
+  Toast(s, std::string("Loading ") + std::string(choice.label) + "...", 6000);
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,8 +1253,9 @@ constexpr float kPopupUpDegrees = 30.0f;     // ZolikaPatch's angle for this mod
 constexpr float kPopupDegreesPerSecond = 85.0f;  // up in about a third of a second
 constexpr uint32_t kEntitySkeleton = 0x8217DB60;  // entity -> its live crSkeleton
 
-// Bones the trainer poses: the Deimos's pop-up pods (slot 0) and the F-16's
-// landing gear (slot 1, three bones). The pose last set for each is
+// Bones the trainer poses: the Deimos's pop-up pods (slot 0), the F-16's
+// landing gear (slot 1, three bones) and the Batmobile's canopy (slot 2). The
+// pose last set for each is
 // re-applied by the per-frame hook below (sub_82381FA0), right after the
 // game's own per-frame bone edits for that car.
 struct BonePose {
@@ -1249,10 +1266,10 @@ struct PosedVehicle {
   uint32_t vehicle = 0, info = 0;
   std::array<BonePose, 4> bones{};
 };
-enum PoseSlot : int { kPoseDeimos = 0, kPoseF16 = 1 };
+enum PoseSlot : int { kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2 };
 std::mutex g_pose_mutex;
-std::array<PosedVehicle, 2> g_posed;
-std::array<std::atomic<uint32_t>, 2> g_posed_vehicle{};  // the hook's quick check
+std::array<PosedVehicle, 3> g_posed;
+std::array<std::atomic<uint32_t>, 3> g_posed_vehicle{};  // the hook's quick check
 
 // Whether a CVehicle is (still) an instance of the model whose info is given.
 bool VehicleIsModel(uint8_t* base, uint32_t vehicle, uint32_t info) {
@@ -1280,6 +1297,9 @@ uint32_t PopupLocalSlot(PPCContext& ctx, uint8_t* base, uint32_t vehicle, int32_
 // the parts on it, collapsed onto the hinge), and remembers the pose for the
 // hook. False when the car, its skeleton or the bone cannot be read safely;
 // nothing is written then.
+bool PoseBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, int slot, int entry,
+              int32_t bone, int axis, float degrees, float scale);
+
 bool PoseExtraBone(PPCContext& ctx, uint8_t* base, uint32_t handle, uint32_t model_hash, int slot,
                    int entry, uint32_t extra, int axis, float degrees, float scale) {
   const uint32_t vehicle = VehicleAddress(base, handle);
@@ -1291,6 +1311,32 @@ bool PoseExtraBone(PPCContext& ctx, uint8_t* base, uint32_t handle, uint32_t mod
   if (!Span(base, structure + 4 * component, 4))
     return false;
   const int32_t bone = int32_t(Read(base, structure + 4 * component));
+  return PoseBone(ctx, base, vehicle, info, slot, entry, bone, axis, degrees, scale);
+}
+
+// A bone of a car's skeleton by name (the skeleton data's bone records:
+// 0xE0 bytes each, the name first), or -1. For pivots the converter hangs on
+// a bone that is not an extra (the Batmobile's canopy on interiorlight).
+int32_t FindBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, std::string_view name) {
+  const auto skeleton = CallGuest(ctx, base, kEntitySkeleton, vehicle);
+  if (!skeleton || !*skeleton || !Span(base, *skeleton, 8))
+    return -1;
+  const uint32_t data = Read(base, *skeleton + 4);
+  if (!Span(base, data, 24))
+    return -1;
+  const uint32_t bones = Read(base, data), count = Read16(base, data + 20);
+  if (count > 512 || !Span(base, bones, 0xE0 * count))
+    return -1;
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t at = Read(base, bones + 0xE0 * i);
+    if (at && String(base, at, 32) == name)
+      return int32_t(i);
+  }
+  return -1;
+}
+
+bool PoseBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, int slot, int entry,
+              int32_t bone, int axis, float degrees, float scale) {
   const uint32_t local = PopupLocalSlot(ctx, base, vehicle, bone);
   const auto skeleton = local ? CallGuest(ctx, base, kEntitySkeleton, vehicle) : std::nullopt;
   if (!local || !skeleton)
@@ -1526,16 +1572,34 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   }
   if (!loaded->r0()) {
     ++s.pending_ticks;
-    // Big models (the Batmobile is ~10 MB) can take a while to stream in.
-    if (now - s.pending_since > 20000) {
-      REXLOG_WARN("gta4-trainer: {} (hash {:08X}) did not load within 20 s", model, s.pending_hash);
+    // Big models (the Batmobile is ~10 MB) can take a while to stream in,
+    // longer once the world has been streaming a while (log 053: 17 s for
+    // the Batmobile, a second Dominator not in 20). The request is renewed
+    // every few seconds, in case the streamer let it go, and the wait shown.
+    const uint64_t waited = now - s.pending_since;
+    if (now >= s.pending_renew_at) {
+      s.pending_renew_at = now + 4000;
+      Invoke(ctx, base, "REQUEST_MODEL", {s.pending_hash});
+      ++s.pending_renewals;
+    }
+    if (waited / 5000 != s.pending_toast_step) {
+      s.pending_toast_step = waited / 5000;
+      Toast(s, "Loading " + std::string(choice.label) + "... " + std::to_string(waited / 1000) + " s", 6000);
+    }
+    if (waited > 60000) {
+      REXLOG_WARN("gta4-trainer: {} (hash {:08X}) did not load within 60 s ({} renewed requests)", model,
+                  s.pending_hash, s.pending_renewals);
       rex::FlushLogging();
-      give_up("The model did not load.");
+      give_up("The model did not load: the game's streaming memory may be full. Try again in a quieter spot.");
     }
     return;
   }
-  if (!s.pending_loaded_at)
+  if (!s.pending_loaded_at) {
     s.pending_loaded_at = now;
+    if (now - s.pending_since > 3000)
+      REXLOG_INFO("gta4-trainer: {} loaded after {:.1f} s ({} renewed requests)", model,
+                  (now - s.pending_since) / 1000.0, s.pending_renewals);
+  }
   // The guard. The game can finish setting a model up a moment after it
   // reports it loaded, so everything must be in place, and stay so, first.
   const ModelCheck check = CheckModel(base, s.pending_hash);
@@ -1698,9 +1762,8 @@ class JetSource final : public gta4ps5::sound::Source {
 };
 gta4ps5::sound::Voice* g_jet_voice = nullptr;
 #endif
-// Starts the voice when it is not running (gunfire outside the jet).
-void GunSound() {
-  g_jet_synth.Shot();
+// Starts the voice when it is not running (gunfire, a launch outside the jet).
+void EnsureVoice() {
 #if REX_PLATFORM_PS5
   if (!g_jet_voice) {
     gta4ps5::sound::StartOutput();
@@ -1713,6 +1776,14 @@ void GunSound() {
     g_jet_voice->Play(std::make_unique<JetSource>(), true);
   }
 #endif
+}
+void GunSound() {
+  g_jet_synth.Shot();
+  EnsureVoice();
+}
+void LaunchSound() {
+  g_jet_synth.Launch();
+  EnsureVoice();
 }
 // Once a pass: a voice left running with nothing to play is stopped.
 void SoundTick() {
@@ -2026,90 +2097,378 @@ void RainCars(PPCContext& ctx, uint8_t* base, const GameContext& game) {
 }
 
 // JulioNIB's Batmobile gadgets, redone through natives (the PC script's .NET
-// plugin cannot run here): its minigun forward and back (d-pad left, down),
-// grenades dropped behind on the horn (L3; again to set them off) and the
-// booster (d-pad right). Active only with the toggle on and the player
-// driving the Batmobile. Returns the buttons it uses then, hidden from the
-// game (the radio, the horn); d-pad up stays the phone.
+// plugin cannot run here). With the toggle on, driving the Batmobile:
+//  - L1: a missile out of the nose: the RPG's rocket with its smoke trail,
+//    flown by the physics engine (its velocity set every frame, so it meets
+//    walls, cars and the ground for real, as Rockstar's own scripted rockets
+//    do in TBOGT's tony8) and set off where it hits;
+//  - d-pad left / down (hold): the twin miniguns, ahead / behind, both
+//    barrels together;
+//  - horn (L3): plant a bomb behind the car, marked by a blinking red light;
+//    the horn again sets it off;
+//  - d-pad right (hold): the booster, the rear turbine flaming and roaring.
+// Those buttons are hidden from the game then (no drive-by on L1, no radio,
+// no horn); d-pad up stays the phone. Missiles in flight and a planted bomb
+// carry on after the player leaves the car. The canopy needs no toggle (see
+// BatCanopy).
+struct BatRocket {
+  bool live = false, physics = true, armed = false;
+  uint32_t object = 0, trail = 0;
+  float start[3]{}, dir[3]{}, pos[3]{};
+  float speed = 0, travelled = 0;
+  uint64_t launched = 0;
+  int frames = 0;
+};
 struct GadgetState {
-  uint64_t next_front = 0, next_rear = 0, grenades_at = 0;
-  uint32_t rounds = 0;
-  bool grenade_requested = false, l3_held = false, l3_chord = false;
-  std::array<uint32_t, 3> grenades{};
-  std::array<std::array<float, 3>, 3> grenade_pos{};
+  uint64_t next_front = 0, next_rear = 0, next_rocket = 0, last_ms = 0;
+  uint32_t car = 0;
+  bool models_requested = false, l3_held = false, l3_chord = false, boosting = false, in_car = false;
+  std::array<BatRocket, 4> rockets{};
+  bool bomb = false;
+  uint32_t bomb_object = 0;
+  float bomb_pos[3]{};
+  uint64_t bomb_at = 0;
+  uint32_t flame = 0;
+  int rocket_log = 0, bomb_log = 0;
+  bool guns_logged = false, boost_logged = false;
 };
 GadgetState g_gadget;
-// From the mod's own body: its nose at y 3.7, its tail at -2.5 (car space).
+// From the mod's own body (car space): its nose at y 3.7, its tail at -2.7,
+// the turbine's nozzle under the rear fairing.
 constexpr float kBatGunsFront[2][3] = {{-0.55f, 3.75f, -0.15f}, {0.55f, 3.75f, -0.15f}};
 constexpr float kBatGunsRear[2][3] = {{-0.55f, -2.85f, -0.10f}, {0.55f, -2.85f, -0.10f}};
-constexpr std::string_view kGrenadeModel = "w_grenade";
+constexpr float kBatLauncher[3] = {0.0f, 4.6f, 0.05f};
+constexpr float kBatNozzle[3] = {0.0f, -2.45f, -0.12f};
+constexpr float kBatBomb[3] = {0.0f, -3.4f, -0.2f};
+constexpr std::string_view kBombModel = "w_grenade";
 
-// One minigun round from a barrel at `muzzle` (car space) along the car's
-// length (+1 ahead, -1 behind).
-void BatRound(PPCContext& ctx, uint8_t* base, uint32_t car, const float muzzle[3], float along) {
-  const float far_point[3] = {muzzle[0], muzzle[1] + along * 300.0f, muzzle[2]};
-  const auto from = CarPoint(ctx, base, car, muzzle), to = CarPoint(ctx, base, car, far_point);
-  if (!from || !to)
-    return;
+// One volley from both barrels of a pair, along the car's length (+1 ahead,
+// -1 behind), each barrel with IV's machine-gun muzzle flash. (v1.7.7 fired
+// the barrels in turn and flashed only every other round: always the left.)
+void BatVolley(PPCContext& ctx, uint8_t* base, uint32_t car, const float (&muzzles)[2][3], float along) {
   static uint32_t seed = 0x5EED1234u;
-  float end[3];
-  for (int a = 0; a < 3; ++a) {
-    seed = seed * 1664525u + 1013904223u;
-    end[a] = (*to)[a] + (float((seed >> 8) & 0xFFFF) / 65535.0f - 0.5f) * 3.0f;
+  bool fired = false, flashed = false;
+  for (const auto& muzzle : muzzles) {
+    const float far_point[3] = {muzzle[0], muzzle[1] + along * 300.0f, muzzle[2]};
+    const auto from = CarPoint(ctx, base, car, muzzle), to = CarPoint(ctx, base, car, far_point);
+    if (!from || !to)
+      continue;
+    float end[3];
+    for (int a = 0; a < 3; ++a) {
+      seed = seed * 1664525u + 1013904223u;
+      end[a] = (*to)[a] + (float((seed >> 8) & 0xFFFF) / 65535.0f - 0.5f) * 3.0f;
+    }
+    Invoke(ctx, base, "FIRE_SINGLE_BULLET",
+           {Bits((*from)[0]), Bits((*from)[1]), Bits((*from)[2]), Bits(end[0]), Bits(end[1]), Bits(end[2]), 35});
+    flashed |= CarEffect(ctx, base, car, "muz_machine", muzzle, 1.2f);
+    fired = true;
   }
-  Invoke(ctx, base, "FIRE_SINGLE_BULLET",
-         {Bits((*from)[0]), Bits((*from)[1]), Bits((*from)[2]), Bits(end[0]), Bits(end[1]), Bits(end[2]), 35});
-  if ((g_gadget.rounds & 1) == 0)
-    CarEffect(ctx, base, car, "muz_machine", muzzle, 1.2f);
-  GunSound();
-  ++g_gadget.rounds;
+  if (fired)
+    GunSound();
+  if (fired && !g_gadget.guns_logged) {
+    g_gadget.guns_logged = true;
+    REXLOG_INFO("gta4-trainer: Batmobile miniguns firing, both barrels (muzzle flash {})",
+                flashed ? "started" : "not started");
+  }
 }
 
-void DetonateGrenades(PPCContext& ctx, uint8_t* base) {
-  for (size_t i = 0; i < g_gadget.grenades.size(); ++i) {
-    if (!g_gadget.grenades[i])
-      continue;
-    const auto& p = g_gadget.grenade_pos[i];
-    // type 0 (grenade), radius 4, audible, visible, normal camera shake
-    Invoke(ctx, base, "ADD_EXPLOSION", {Bits(p[0]), Bits(p[1]), Bits(p[2]), 0, Bits(4.0f), 1, 0, Bits(1.0f)});
-    DeleteObject(ctx, base, g_gadget.grenades[i]);
+void EndRocket(PPCContext& ctx, uint8_t* base, BatRocket& r) {
+  if (r.trail)
+    Invoke(ctx, base, "STOP_PTFX", {r.trail});
+  r.trail = 0;
+  DeleteObject(ctx, base, r.object);
+  r.live = false;
+}
+
+// The physics flies it: along its line at its speed, pulled back onto the
+// line (gravity's sag) a little every frame.
+void SteerRocket(PPCContext& ctx, uint8_t* base, const BatRocket& r) {
+  float along = 0;
+  for (int a = 0; a < 3; ++a)
+    along += (r.pos[a] - r.start[a]) * r.dir[a];
+  float v[3];
+  for (int a = 0; a < 3; ++a)
+    v[a] = r.dir[a] * r.speed + (r.start[a] + r.dir[a] * along - r.pos[a]) * 6.0f;
+  Invoke(ctx, base, "SET_OBJECT_INITIAL_VELOCITY", {r.object, Bits(v[0]), Bits(v[1]), Bits(v[2])});
+}
+
+bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
+  BatRocket* slot = nullptr;
+  for (auto& r : g_gadget.rockets)
+    if (!r.live) {
+      slot = &r;
+      break;
+    }
+  if (!slot) {
+    Toast(s, "Missiles reloading.", 800);
+    return false;
   }
-  g_gadget.grenades_at = 0;
+  const uint32_t hash = ModelHash(kRocketModel);
+  const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+  if (!loaded || !loaded->r0()) {
+    Toast(s, "Missiles loading...", 800);
+    return false;
+  }
+  const float ahead_local[3] = {kBatLauncher[0], kBatLauncher[1] + 100.0f, kBatLauncher[2]};
+  const auto start = CarPoint(ctx, base, car, kBatLauncher), ahead = CarPoint(ctx, base, car, ahead_local);
+  if (!start || !ahead)
+    return false;
+  BatRocket& r = *slot;
+  r = {};
+  float len = 0;
+  for (int a = 0; a < 3; ++a) {
+    r.dir[a] = (*ahead)[a] - (*start)[a];
+    len += r.dir[a] * r.dir[a];
+    r.start[a] = r.pos[a] = (*start)[a];
+  }
+  len = std::sqrt(len);
+  if (!(len > 1.0f))
+    return false;
+  for (auto& c : r.dir)
+    c /= len;
+  float car_speed = 0.0f;
+  if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {car, 0}, 1))
+    car_speed = std::max(v->f(0), 0.0f);
+  r.speed = car_speed + 30.0f;  // out of the launcher, then it speeds up
+  const auto obj = Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits(r.pos[0]), Bits(r.pos[1]), Bits(r.pos[2]), 0, 1}, 4);
+  if (!obj || !obj->words[0])
+    return false;
+  r.object = obj->words[0];
+  r.live = true;
+  r.launched = NowMs();
+  // Rockstar's way: the vehicle's own attitude (the rocket's nose is its +Y).
+  if (const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {car, 0, 0, 0, 0}, 1, 0, 4))
+    Invoke(ctx, base, "SET_OBJECT_QUATERNION", {r.object, q->words[0], q->words[1], q->words[2], q->words[3]});
+  Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {r.object, 1});
+  Invoke(ctx, base, "SET_OBJECT_COLLISION", {r.object, 1});
+  SteerRocket(ctx, base, r);
+  if (const auto trail = Invoke(ctx, base, "START_PTFX_ON_OBJ", {0, r.object, 0, 0, 0, 0, 0, 0, Bits(1.0f)}, -1, 0,
+                                1, 0, "weap_rocket"))
+    r.trail = trail->r0();
+  LaunchSound();
+  if (g_gadget.rocket_log < 12) {
+    ++g_gadget.rocket_log;
+    REXLOG_INFO("gta4-trainer: Batmobile missile away at {:.0f} m/s (object {:08X}, trail {:08X})", r.speed,
+                r.object, r.trail);
+  }
+  return true;
+}
+
+// Every frame while one flies (also after the player has left the car).
+void UpdateRockets(PPCContext& ctx, uint8_t* base, float dt) {
+  const uint64_t now = NowMs();
+  for (auto& r : g_gadget.rockets) {
+    if (!r.live)
+      continue;
+    ++r.frames;
+    r.speed = std::min(r.speed + 140.0f * dt, 95.0f);
+    if (r.physics) {
+      if (const auto at = Invoke(ctx, base, "GET_OBJECT_COORDINATES", {r.object, 0, 0, 0}, 1, 0, 3))
+        for (int a = 0; a < 3; ++a)
+          r.pos[a] = at->f(a);
+      float moved = 0;
+      for (int a = 0; a < 3; ++a)
+        moved += (r.pos[a] - r.start[a]) * (r.pos[a] - r.start[a]);
+      // The physics did not take it (frozen, asleep): flown by hand from here,
+      // still meeting the ground and cars, not walls.
+      if (r.frames == 6 && moved < 4.0f) {
+        r.physics = false;
+        Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {r.object, 1});
+        Invoke(ctx, base, "SET_OBJECT_COLLISION", {r.object, 0});
+        REXLOG_INFO("gta4-trainer: Batmobile missile did not move under physics; flown by hand");
+      }
+    }
+    if (r.physics) {
+      SteerRocket(ctx, base, r);
+    } else {
+      for (int a = 0; a < 3; ++a)
+        r.pos[a] += r.dir[a] * r.speed * dt;
+      Invoke(ctx, base, "SET_OBJECT_COORDINATES", {r.object, Bits(r.pos[0]), Bits(r.pos[1]), Bits(r.pos[2])});
+    }
+    float d2 = 0;
+    for (int a = 0; a < 3; ++a)
+      d2 += (r.pos[a] - r.start[a]) * (r.pos[a] - r.start[a]);
+    r.travelled = std::sqrt(d2);
+    const char* hit = nullptr;
+    if (r.physics && !r.armed && r.travelled > 3.0f) {
+      // Collisions are recorded once it is clear of the car.
+      Invoke(ctx, base, "SET_OBJECT_RECORDS_COLLISIONS", {r.object, 1});
+      r.armed = true;
+    } else if (r.physics && r.armed) {
+      const auto c = Invoke(ctx, base, "HAS_OBJECT_COLLIDED_WITH_ANYTHING", {r.object});
+      if (c && c->r0())
+        hit = "something";
+    }
+    if (!hit) {
+      const auto gz = GroundZ(ctx, base, r.pos[0], r.pos[1], r.pos[2] + 2.0f);
+      if (gz && r.pos[2] <= *gz + 0.15f)
+        hit = "the ground";
+    }
+    if (!hit && r.travelled > 6.0f) {
+      const auto near = Invoke(ctx, base, "GET_CLOSEST_CAR",
+                               {Bits(r.pos[0]), Bits(r.pos[1]), Bits(r.pos[2]), Bits(3.5f), 0, 70});
+      if (near && near->r0() && near->r0() != g_gadget.car)
+        hit = "a vehicle";
+    }
+    if (!hit && (r.travelled > 320.0f || now - r.launched > 7000 || !std::isfinite(r.pos[2])))
+      hit = "the end of its range";
+    if (!hit)
+      continue;
+    if (std::isfinite(r.pos[2]))
+      Explode(ctx, base, r.pos, 1.5f);
+    if (g_gadget.rocket_log < 12) {
+      ++g_gadget.rocket_log;
+      REXLOG_INFO("gta4-trainer: Batmobile missile hit {} after {:.0f} m ({})", hit, r.travelled,
+                  r.physics ? "physics" : "by hand");
+    }
+    EndRocket(ctx, base, r);
+  }
+}
+
+void PlantBomb(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
+  auto p = CarPoint(ctx, base, car, kBatBomb);
+  if (!p)
+    return;
+  const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 1.5f);
+  if (gz)
+    (*p)[2] = *gz + 0.06f;
+  for (int a = 0; a < 3; ++a)
+    g_gadget.bomb_pos[a] = (*p)[a];
+  g_gadget.bomb_object = 0;
+  const uint32_t hash = ModelHash(kBombModel);
+  const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+  if (loaded && loaded->r0()) {
+    const auto obj = Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits((*p)[0]), Bits((*p)[1]), Bits((*p)[2]), 0, 1}, 4);
+    if (obj && obj->words[0]) {
+      g_gadget.bomb_object = obj->words[0];
+      Invoke(ctx, base, "SET_OBJECT_COLLISION", {g_gadget.bomb_object, 0});
+      Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {g_gadget.bomb_object, 1});
+    }
+  }
+  g_gadget.bomb = true;
+  g_gadget.bomb_at = NowMs();
+  Toast(s, "Bomb planted: the horn (L3) again sets it off.", 2500);
+  if (g_gadget.bomb_log < 12) {
+    ++g_gadget.bomb_log;
+    REXLOG_INFO("gta4-trainer: Batmobile bomb planted at {:.1f}, {:.1f}, {:.1f} (ground {}, object {:08X})",
+                (*p)[0], (*p)[1], (*p)[2], gz ? "found" : "not found", g_gadget.bomb_object);
+  }
+}
+
+void SetOffBomb(PPCContext& ctx, uint8_t* base, bool quietly) {
+  if (!g_gadget.bomb)
+    return;
+  const auto& p = g_gadget.bomb_pos;
+  if (!quietly) {
+    // A cluster: the charge, and two beside it.
+    const float left[3] = {p[0] - 1.2f, p[1] + 0.5f, p[2]}, right[3] = {p[0] + 1.2f, p[1] - 0.5f, p[2]};
+    Explode(ctx, base, p, 1.5f);
+    Explode(ctx, base, left, 1.0f);
+    Explode(ctx, base, right, 1.0f);
+    if (g_gadget.bomb_log < 12) {
+      ++g_gadget.bomb_log;
+      REXLOG_INFO("gta4-trainer: Batmobile bomb set off at {:.1f}, {:.1f}, {:.1f}", p[0], p[1], p[2]);
+    }
+  }
+  DeleteObject(ctx, base, g_gadget.bomb_object);
+  g_gadget.bomb = false;
+}
+
+// A planted bomb's blinking light (drawn every frame, like Rockstar's scripts
+// draw theirs: red, a few metres' reach).
+void BombLight(PPCContext& ctx, uint8_t* base) {
+  if (!g_gadget.bomb || ((NowMs() - g_gadget.bomb_at) / 350) % 2)
+    return;
+  const auto& p = g_gadget.bomb_pos;
+  Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
+         {Bits(p[0]), Bits(p[1]), Bits(p[2] + 0.25f), 255, 0, 0, Bits(3.0f), Bits(8.0f)});
+}
+
+// The booster's flame: IV's rocket flame out of the turbine.
+void BatFlame(PPCContext& ctx, uint8_t* base, uint32_t car, bool on) {
+  if (!on) {
+    if (g_gadget.flame)
+      Invoke(ctx, base, "STOP_PTFX", {g_gadget.flame});
+    g_gadget.flame = 0;
+    return;
+  }
+  if (g_gadget.flame)
+    return;
+  const auto r = Invoke(ctx, base, "START_PTFX_ON_VEH",
+                        {0, car, Bits(kBatNozzle[0]), Bits(kBatNozzle[1]), Bits(kBatNozzle[2]), 0, 0, 0, Bits(1.6f)},
+                        -1, 0, 1, 0, "weap_rocket");
+  g_gadget.flame = r ? r->r0() : 0;
+  if (!g_gadget.boost_logged) {
+    g_gadget.boost_logged = true;
+    REXLOG_INFO("gta4-trainer: Batmobile booster flame {:08X}", g_gadget.flame);
+  }
+}
+
+// Whether the gadgets want every frame (a missile flying, a bomb's light).
+bool GadgetsBusy() {
+  return g_gadget.bomb || std::any_of(g_gadget.rockets.begin(), g_gadget.rockets.end(),
+                                      [](const BatRocket& r) { return r.live; });
 }
 
 uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons,
                  uint16_t previous) {
   const uint64_t now = NowMs();
-  // Grenades left lying go off on their own after ten seconds.
-  if (g_gadget.grenades_at && now >= g_gadget.grenades_at + 10000)
-    DetonateGrenades(ctx, base);
-  if (!s.gadgets)
-    return 0;
+  const float dt = g_gadget.last_ms ? std::clamp(float(now - g_gadget.last_ms) / 1000.0f, 0.0f, 0.05f) : 0.0f;
+  g_gadget.last_ms = now;
+  UpdateRockets(ctx, base, dt);
+  BombLight(ctx, base);
   static const uint32_t kBatmobile = ModelHash("BATMOBILE");
-  const auto& vehicle = PlayerVehicle(ctx, base, game);
-  if (!vehicle.car || vehicle.model != kBatmobile) {
-    if (g_gadget.grenade_requested) {
-      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kGrenadeModel)});
-      g_gadget.grenade_requested = false;
+  uint32_t car = 0;
+  if (s.gadgets) {
+    const auto& vehicle = PlayerVehicle(ctx, base, game);
+    if (vehicle.car && vehicle.model == kBatmobile)
+      car = *vehicle.car;
+  }
+  if (!car) {
+    if (g_gadget.in_car) {
+      BatFlame(ctx, base, g_gadget.car, false);
+      if (g_gadget.boosting)
+        JetEngineSound(0.0f, 0.0f, 0.9f);
+      g_gadget.boosting = false;
+    }
+    g_gadget.in_car = false;
+    if (!s.gadgets)
+      SetOffBomb(ctx, base, true);  // the toggle off: a planted bomb goes quietly
+    if (g_gadget.models_requested && !GadgetsBusy()) {
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kBombModel)});
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
+      g_gadget.models_requested = false;
     }
     return 0;
   }
-  const uint32_t car = *vehicle.car;
-  if (!g_gadget.grenade_requested) {
-    Invoke(ctx, base, "REQUEST_MODEL", {ModelHash(kGrenadeModel)});
-    g_gadget.grenade_requested = true;
+  if (!g_gadget.in_car || g_gadget.car != car) {
+    g_gadget.l3_held = false;  // no edge from a button held while getting in
+    previous = buttons;
   }
-  // Minigun: hold d-pad left (ahead) or down (behind), barrels taking turns.
+  g_gadget.in_car = true;
+  g_gadget.car = car;
+  if (!g_gadget.models_requested) {
+    Invoke(ctx, base, "REQUEST_MODEL", {ModelHash(kBombModel)});
+    Invoke(ctx, base, "REQUEST_MODEL", {ModelHash(kRocketModel)});
+    g_gadget.models_requested = true;
+  }
+  // Missile: L1 (held: another every 0.6 s).
+  if ((buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) &&
+      (!(previous & X_INPUT_GAMEPAD_LEFT_SHOULDER) || now >= g_gadget.next_rocket)) {
+    g_gadget.next_rocket = now + 600;
+    LaunchRocket(ctx, base, car, s);
+  }
+  // Miniguns: hold d-pad left (ahead) or down (behind).
   if ((buttons & X_INPUT_GAMEPAD_DPAD_LEFT) && now >= g_gadget.next_front) {
-    g_gadget.next_front = now + 55;
-    BatRound(ctx, base, car, kBatGunsFront[g_gadget.rounds & 1], 1.0f);
+    g_gadget.next_front = now + 70;
+    BatVolley(ctx, base, car, kBatGunsFront, 1.0f);
   }
   if ((buttons & X_INPUT_GAMEPAD_DPAD_DOWN) && now >= g_gadget.next_rear) {
-    g_gadget.next_rear = now + 55;
-    BatRound(ctx, base, car, kBatGunsRear[g_gadget.rounds & 1], -1.0f);
+    g_gadget.next_rear = now + 70;
+    BatVolley(ctx, base, car, kBatGunsRear, -1.0f);
   }
-  // Grenades on the horn (L3): three dropped behind, the next press sets them
-  // off. Acted on release, so L3 + R3 (the menu) never drops any.
+  // The bomb on the horn (L3): plant, then set off. Acted on release, so
+  // L3 + R3 (the menu) never plants one.
   const bool l3 = buttons & X_INPUT_GAMEPAD_LEFT_THUMB, r3 = buttons & X_INPUT_GAMEPAD_RIGHT_THUMB;
   if (l3 && !(previous & X_INPUT_GAMEPAD_LEFT_THUMB)) {
     g_gadget.l3_held = true;
@@ -2121,51 +2480,173 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   if (!l3)
     g_gadget.l3_held = false;
   if (horn_tap) {
-    if (g_gadget.grenades_at) {
-      DetonateGrenades(ctx, base);
-    } else {
-      const uint32_t hash = ModelHash(kGrenadeModel);
-      const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
-      int dropped = 0;
-      for (size_t i = 0; i < g_gadget.grenades.size(); ++i) {
-        const float at[3] = {(float(i) - 1.0f) * 0.7f, -3.0f - 0.6f * float(i % 2), -0.3f};
-        auto p = CarPoint(ctx, base, car, at);
-        if (!p)
-          continue;
-        if (const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 1.0f))
-          (*p)[2] = *gz + 0.08f;
-        g_gadget.grenade_pos[i] = *p;
-        g_gadget.grenades[i] = 0;
-        if (loaded && loaded->r0()) {
-          const auto obj = Invoke(ctx, base, "CREATE_OBJECT",
-                                  {hash, Bits((*p)[0]), Bits((*p)[1]), Bits((*p)[2]), 0, 1}, 4);
-          if (obj && obj->words[0]) {
-            g_gadget.grenades[i] = obj->words[0];
-            Invoke(ctx, base, "SET_OBJECT_COLLISION", {obj->words[0], 0});
-            Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {obj->words[0], 1});
-          }
-        }
-        // (no model yet: an invisible charge, still set off on the next tap)
-        if (!g_gadget.grenades[i])
-          g_gadget.grenades[i] = 0xFFFFFFFFu;
-        ++dropped;
-      }
-      if (dropped) {
-        g_gadget.grenades_at = now;
-        Toast(s, "Grenades dropped: press the horn (L3) again to set them off.", 2500);
-      }
-    }
+    if (g_gadget.bomb)
+      SetOffBomb(ctx, base, false);
+    else
+      PlantBomb(ctx, base, car, s);
   }
-  // Booster: hold d-pad right.
-  if (buttons & X_INPUT_GAMEPAD_DPAD_RIGHT) {
+  // Booster: hold d-pad right; the turbine flames and roars.
+  const bool boost = buttons & X_INPUT_GAMEPAD_DPAD_RIGHT;
+  if (boost) {
     float speed = 0.0f;
     if (const auto current = Invoke(ctx, base, "GET_CAR_SPEED", {car, 0}, 1))
       speed = current->f(0);
     const float target = std::min(speed + 3.0f, 55.0f);
     Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {car, Bits(target)});
+    JetEngineSound(0.92f, 1.0f, 0.9f);
+  } else if (g_gadget.boosting) {
+    JetEngineSound(0.0f, 0.0f, 0.9f);  // winds down
   }
-  return X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT | X_INPUT_GAMEPAD_DPAD_DOWN |
-         X_INPUT_GAMEPAD_LEFT_THUMB;
+  BatFlame(ctx, base, car, boost);
+  g_gadget.boosting = boost;
+  return X_INPUT_GAMEPAD_LEFT_SHOULDER | X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT |
+         X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_LEFT_THUMB;
+}
+
+// The Batmobile's canopy, its door: the converter hangs the canopy (frame
+// and glass) on the FBI template's interiorlight bone, hinged at its rear
+// edge. Getting in, the canopy pops open, the player is put in the seat and
+// it closes; getting out (Y, kept from the game in the Batmobile) the same the
+// other way, the player set down beside the driver's side. No toggle: it
+// stands in for the doors the Batmobile does not have. The cockpit under it
+// (seats, dash, wheel) is the mod's own.
+struct CanopyState {
+  enum Phase : int { kShut, kOpeningIn, kClosingIn, kOpeningOut, kClosingOut };
+  Phase phase = kShut;
+  uint32_t car = 0;   // the Batmobile being got into or out of
+  float open = 0.0f;  // 0 shut .. 1 open
+  float hold = 0.0f;  // a beat with it up
+  uint64_t next_probe = 0, last_ms = 0, started = 0;
+  bool in_car = false;
+  uint16_t prev_buttons = 0;
+  uint32_t info = 0;  // the model whose pivot bone is known
+  int32_t bone = -1;
+  int log = 0;
+};
+CanopyState g_canopy;
+constexpr std::string_view kCanopyBone = "interiorlight";
+constexpr float kCanopyDegrees = 60.0f;  // the front edge up, about the rear edge
+constexpr float kCanopyOpenSeconds = 0.45f, kCanopyCloseSeconds = 0.7f;
+constexpr float kCanopyExit[3] = {-2.1f, 0.2f, 0.0f};  // beside the driver's seat
+
+bool PoseCanopy(PPCContext& ctx, uint8_t* base, uint32_t car, float open) {
+  static const uint32_t kBat = ModelHash("BATMOBILE");
+  const uint32_t vehicle = VehicleAddress(base, car);
+  const uint32_t info = vehicle ? FindModelInfo(base, kBat) : 0;
+  if (!info || !VehicleIsModel(base, vehicle, info))
+    return false;
+  if (g_canopy.info != info) {
+    g_canopy.info = info;
+    g_canopy.bone = FindBone(ctx, base, vehicle, kCanopyBone);
+    REXLOG_INFO("gta4-trainer: Batmobile canopy on bone {} ({})", g_canopy.bone, std::string(kCanopyBone));
+  }
+  if (g_canopy.bone < 0)
+    return false;
+  const float t = std::clamp(open, 0.0f, 1.0f);
+  return PoseBone(ctx, base, vehicle, info, kPoseBatmobile, 0, g_canopy.bone, 0,
+                  kCanopyDegrees * t * t * (3.0f - 2.0f * t), 1.0f);
+}
+
+// Whether the canopy wants every frame (moving, or the player in a Batmobile).
+bool CanopyBusy() { return g_canopy.phase != CanopyState::kShut || g_canopy.in_car; }
+
+// Returns the buttons it keeps from the game: Y while the player is in a
+// Batmobile (its way out is the canopy's).
+uint32_t BatCanopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons) {
+  auto& c = g_canopy;
+  const uint64_t now = NowMs();
+  const float dt = c.last_ms ? std::clamp(float(now - c.last_ms) / 1000.0f, 0.0f, 0.05f) : 0.0f;
+  c.last_ms = now;
+  const uint16_t prev = c.prev_buttons;
+  c.prev_buttons = buttons;
+  static const uint32_t kBat = ModelHash("BATMOBILE");
+  const uint32_t keep = c.in_car ? uint32_t(X_INPUT_GAMEPAD_Y) : 0u;
+  switch (c.phase) {
+    case CanopyState::kOpeningIn:
+    case CanopyState::kOpeningOut: {
+      // (A car that is gone or wrecked meanwhile ends it.)
+      const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {c.car});
+      if (!dead || dead->r0() || now - c.started > 6000) {
+        c.phase = CanopyState::kShut;
+        c.open = 0.0f;
+        return 0;
+      }
+      c.open = std::min(1.0f, c.open + dt / kCanopyOpenSeconds);
+      PoseCanopy(ctx, base, c.car, c.open);
+      if (c.open < 1.0f || (c.hold += dt) < 0.15f)
+        return keep;
+      if (c.phase == CanopyState::kOpeningIn) {
+        Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, c.car});
+        c.in_car = true;
+      } else {
+        if (auto p = CarPoint(ctx, base, c.car, kCanopyExit)) {
+          if (const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 2.0f))
+            (*p)[2] = *gz + 1.0f;
+          Invoke(ctx, base, "WARP_CHAR_FROM_CAR_TO_COORD", {game.ped, Bits((*p)[0]), Bits((*p)[1]), Bits((*p)[2])});
+        }
+        c.in_car = false;
+      }
+      if (c.log < 8) {
+        ++c.log;
+        REXLOG_INFO("gta4-trainer: Batmobile canopy open, player {}", c.phase == CanopyState::kOpeningIn ? "in" : "out");
+      }
+      c.phase = c.phase == CanopyState::kOpeningIn ? CanopyState::kClosingIn : CanopyState::kClosingOut;
+      c.hold = 0.0f;
+      return c.in_car ? uint32_t(X_INPUT_GAMEPAD_Y) : 0u;
+    }
+    case CanopyState::kClosingIn:
+    case CanopyState::kClosingOut:
+      if ((c.hold += dt) >= 0.35f) {  // a beat with it up, then down
+        c.open = std::max(0.0f, c.open - dt / kCanopyCloseSeconds);
+        PoseCanopy(ctx, base, c.car, c.open);
+        if (c.open <= 0.0f)
+          c.phase = CanopyState::kShut;
+      }
+      return keep;
+    case CanopyState::kShut:
+      break;
+  }
+  if (!c.in_car && now < c.next_probe)
+    return 0;
+  c.next_probe = now + 250;
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  if (vehicle.car && vehicle.model == kBat) {
+    if (!c.in_car || c.car != *vehicle.car)
+      PoseCanopy(ctx, base, *vehicle.car, 0.0f);  // shut (and its pivot looked up)
+    c.in_car = true;
+    c.car = *vehicle.car;
+    if (g_canopy.bone < 0 || !NativeKnown("WARP_CHAR_FROM_CAR_TO_COORD"))
+      return 0;  // no canopy pivot (or no way to set the player down): the game's own way out
+    if ((buttons & X_INPUT_GAMEPAD_Y) && !(prev & X_INPUT_GAMEPAD_Y) && !s.open) {
+      c.phase = CanopyState::kOpeningOut;
+      c.open = c.hold = 0.0f;
+      c.started = now;
+    }
+    return X_INPUT_GAMEPAD_Y;
+  }
+  c.in_car = false;
+  if (vehicle.car)
+    return 0;
+  // On foot: is the game starting to put the player into a Batmobile?
+  const auto getting = Invoke(ctx, base, "IS_CHAR_GETTING_IN_TO_A_CAR", {game.ped});
+  if (!getting || !getting->r0())
+    return 0;
+  const auto target = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {game.ped, 0}, 1);
+  if (!target || !target->words[0])
+    return 0;
+  const auto model = Invoke(ctx, base, "GET_CAR_MODEL", {target->words[0], 0}, 1);
+  if (!model || model->words[0] != kBat || !NativeKnown("CLEAR_CHAR_TASKS_IMMEDIATELY") ||
+      !NativeKnown("WARP_CHAR_INTO_CAR"))
+    return 0;
+  const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {target->words[0]});
+  if (!dead || dead->r0() || !PoseCanopy(ctx, base, target->words[0], 0.0f) || g_canopy.bone < 0)
+    return 0;  // no pivot: the game's own way in
+  Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {game.ped});
+  c.car = target->words[0];
+  c.phase = CanopyState::kOpeningIn;
+  c.open = c.hold = 0.0f;
+  c.started = now;
+  return 0;
 }
 
 // Every frame in the F-16 (a look a few times a second otherwise, and while
@@ -2196,7 +2677,8 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         j.rocket_requested = false;
       }
     }
-    JetEngineSound(0.0f, 0.0f, 0.8f);  // out of the jet: the engine winds down
+    if (j.in_jet)
+      JetEngineSound(0.0f, 0.0f, 0.8f);  // just left the jet: the engine winds down
     j.in_jet = j.flying = false;
     j.announced = false;
     return 0;
@@ -2390,8 +2872,8 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       break;
     case Action::kToggleGadgets:
       s.gadgets = !s.gadgets;
-      Toast(s, s.gadgets ? "Batmobile gadgets armed: d-pad left minigun ahead, down behind, right boost; "
-                           "horn (L3) drops grenades, again to set them off."
+      Toast(s, s.gadgets ? "Batmobile gadgets armed: L1 missile; d-pad left guns ahead, down guns behind, "
+                           "right boost; horn (L3) plants a bomb, again to set it off."
                          : "Gadgets off.",
             s.gadgets ? 6000 : 2500);
       break;
@@ -2821,9 +3303,10 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool god_due = s.god && now >= s_next_god;
   const bool wanted_due = s.never_wanted && now >= s_next_wanted;
   const bool car_god_due = s.vehicle_god && now >= s_next_car;
-  const bool gadgets_due = s.gadgets && (s_in_batmobile || now >= s_next_gadget_look);
+  const bool gadgets_due = (s.gadgets && (s_in_batmobile || now >= s_next_gadget_look)) || GadgetsBusy();
+  const bool canopy_due = g_have_batmobile && (CanopyBusy() || now >= g_canopy.next_probe);
   const bool rain_due = s.raining && now >= g_next_rain;
-  if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due &&
+  if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
       s.pending_model < 0 && !jet_due && !rain_due && !popup_due && !lights_due && !drive_due &&
       g_addons_probed)
     return;
@@ -2860,8 +3343,9 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     };
     g_have_deimos = installed("DEIMOS");
     g_have_f16 = installed("F16");
+    g_have_batmobile = installed("BATMOBILE");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}",
-                installed("BATMOBILE"), g_have_f16, g_have_deimos, installed("DOM645T"));
+                g_have_batmobile, g_have_f16, g_have_deimos, installed("DOM645T"));
   }
 
   bool acted = false;
@@ -2907,6 +3391,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   } else if (!s.gadgets) {
     s_in_batmobile = false;
   }
+  if (canopy_due)
+    vehicle_mask |= BatCanopy(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed));
   if (jet_due) {
     DrivePad pad;
     {

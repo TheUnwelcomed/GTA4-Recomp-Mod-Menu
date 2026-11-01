@@ -38,15 +38,17 @@ keeps going while you browse.
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
   itself as their own vehicles (no stock car replaced; see `addons/`):
-  - **Batmobile** (JulioNIB), with its gadgets re-created: minigun ahead and
-    behind, grenades on the horn, booster
+  - **Batmobile** (JulioNIB), with its gadgets re-created: missiles on L1,
+    twin miniguns ahead and behind, a bomb on the horn, a booster that flames
+    and roars, and a canopy that pops open as you get in and out
   - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a cannon and
     missiles (the PC mod's Air Combat IV script, re-done in the trainer), a
     synthesized jet engine that spools with the throttle, landing gear on R3
     and an afterburner flame
   - **Grotti Deimos GTS** (harithd / Milcin), with pop-up headlights the
-    trainer swings on their hinge
-  - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin)
+    trainer swings on their hinge and opening doors
+  - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin), with
+    opening doors
   - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets
 - **Time & Weather** — set the clock, force or release any weather
