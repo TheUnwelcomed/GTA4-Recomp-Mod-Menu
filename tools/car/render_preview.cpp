@@ -18,9 +18,9 @@
 
 namespace {
 // The car's own sounds in idle 2: the canopy (hiss up at 25.5, down at
-// 27.0), pop-up lamps (up 25.5, down 26.7), the gullwing doors (up 25.5,
-// down 26.7: the canopy's hiss, the pop-ups' motor before them).
-enum class Extras { kCanopy, kPopups, kPopupsAndDoors };
+// 27.0); pop-up lamps (up 25.5, down 26.7); doors (opening at 26.0, shut at
+// 27.2), a gullwing's struts with them.
+enum class Extras { kCanopy, kPopupsAndDoors, kDoors, kGullwings };
 struct Car {
   const char* name;
   const gta4::car::Character* character;
@@ -29,10 +29,10 @@ struct Car {
 };
 constexpr Car kCars[] = {
     {"batmobile", &gta4::car::kBatmobile, true, Extras::kCanopy},
-    {"deimos", &gta4::car::kDeimos, false, Extras::kPopups},
-    {"nexus", &gta4::car::kNexus, false, Extras::kPopupsAndDoors},
-    {"arbiterx", &gta4::car::kArbiter, false, Extras::kPopups},
-    {"dom645t", &gta4::car::kDominator, false, Extras::kPopups},
+    {"deimos", &gta4::car::kDeimos, false, Extras::kPopupsAndDoors},
+    {"nexus", &gta4::car::kNexus, false, Extras::kGullwings},
+    {"arbiterx", &gta4::car::kArbiter, false, Extras::kDoors},
+    {"dom645t", &gta4::car::kDominator, false, Extras::kDoors},
 };
 }  // namespace
 
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
       {20.0f, 0.7f, 0.7f, 0.45f, 0, "cruise"},
       {23.0f, 0.75f, 0.95f, 1, boost, car->booster ? "boost" : "full throttle"},
       {25.0f, 0.95f, 0.4f, 0, 0, "lift-off"},
-      {27.5f, idle, idle, 0, 0, canopy ? "idle 2 (canopy at 25.5 / 27.0)" : "idle 2 (its own sounds at 25.5 / 26.7)"},
+      {27.5f, idle, idle, 0, 0, canopy ? "idle 2 (canopy at 25.5 / 27.0)" : "idle 2 (lamps 25.5 / 26.7, doors 26.0 / 27.2)"},
       {31.5f, 0, 0, 0, 0, "shut down"},
   };
   constexpr int kSteps = sizeof(script) / sizeof(script[0]);
@@ -92,21 +92,32 @@ int main(int argc, char** argv) {
     const float from = step ? script[step - 1].until : 0.0f;
     const float u = float((t - from) / (s.until - from));
     synth->SetTarget(s.rpm0 + (s.rpm1 - s.rpm0) * u, s.throttle, s.boost, 1.0f);
+    const bool popups = car->extras == Extras::kPopupsAndDoors || car->extras == Extras::kGullwings;
     if (!first && t >= 25.5) {
-      canopy ? synth->CanopyOpen() : synth->Motor(0.4f);
+      if (canopy)
+        synth->CanopyOpen();
+      else if (popups)
+        synth->Motor(0.4f);
       first = true;
     }
     if (!second && t >= (canopy ? 27.0 : 26.7)) {
-      canopy ? synth->CanopyShut() : synth->Motor(0.4f);
+      if (canopy)
+        synth->CanopyShut();
+      else if (popups)
+        synth->Motor(0.4f);
       second = true;
     }
-    if (car->extras == Extras::kPopupsAndDoors) {
+    if (!canopy) {
       if (!doors_up && t >= 26.0) {
-        synth->CanopyOpen();
+        synth->DoorOpen();
+        if (car->extras == Extras::kGullwings)
+          synth->CanopyOpen(false);  // the struts
         doors_up = true;
       }
       if (!doors_down && t >= 27.2) {
-        synth->CanopyShut();
+        if (car->extras == Extras::kGullwings)
+          synth->CanopyShut(false);
+        synth->DoorShut();
         doors_down = true;
       }
     }

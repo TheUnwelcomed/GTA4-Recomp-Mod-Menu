@@ -57,9 +57,14 @@ keeps going while you browse.
     get in and out and pop-up headlights like the Deimos's
   - **Imponte Arbiter X** (johndoe968 / Milcin), with opening doors
   - Each car has its own engine, synthesized in the trainer (no recordings):
-    the Batmobile's turbine over a V8, the Deimos's flat-plane V8, the
-    Nexus's V6 with its cam switch-over wail, the Arbiter's choppy big V8,
-    the Dominator's raspier small V8, the F-16's jet
+    the Batmobile's turbine over a V8, the F-16's jet, and for the Deimos,
+    the Nexus, the Arbiter X and the Dominator 645 a physically informed
+    model of the real engines their cars are drawn from (each cylinder
+    firing in its real order into its bank's exhaust, the pipes' and
+    mufflers' own resonances, the intake, the valve gear): a late-70s
+    Ferrari's flat-plane V8, the NSX's VTEC V6, the GTO's Ram Air 400, the
+    '65 Mustang's 289. Their doors latch and slam (their game names have no
+    IV sounds)
   - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets.
   The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
@@ -145,6 +150,20 @@ network session.
 
 ## Changes
 
+- **v1.7.18**: the Deimos's, the Nexus's, the Arbiter X's and the Dominator
+  645's engines move to a physically informed model (v1.7.17's sounded
+  synthetic): each cylinder fires at its own crank angle in the real firing
+  order into its bank's exhaust, with cycle-to-cycle variation (more on a
+  lumpy cam at idle), the blowdown following the crank, the turbulence on
+  it; headers, pipes and tailpipes as delay lines with their reflections
+  (the right bank's a little longer), a crossover, the mufflers; the
+  intake's suction ringing its runners, the air's hiss, a four-barrel's
+  secondaries, the valve gear's ticks, the starter. Door sounds (a latch
+  opening, a slam shutting) for those four, timed to the game's door ratio;
+  the Nexus's gullwing struts hiss without a second clunk. The Batmobile's
+  full throttle is meaner (more drive and a low-mid snarl under load, the
+  turbine's roar churning over a low roar, combustion crackle; idle
+  unchanged). The pop-up motor is about 9 dB quieter.
 - **v1.7.17**: the F-16 flies again: *F-16 Flight and Weapons* started off at
   every launch, and off the jet is a car that cannot take off (now it starts
   on); the takeoff rotates the nose up off the wheels at once and nothing ends
@@ -208,7 +227,7 @@ network session.
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
 | `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
-| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's, the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's) and their canopy, gullwing and pop-up lamp sounds (the same way; `tools/car/` renders them) |
+| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's and the Dominator 645's physically informed model) and their canopy, door, gullwing and pop-up lamp sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |

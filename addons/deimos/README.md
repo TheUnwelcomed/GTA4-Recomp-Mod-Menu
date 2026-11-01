@@ -8,15 +8,20 @@ showed the Turismo's name and had its engine, as the mod's line chooses.
 
 ## Engine sound
 
-An original synthesized voice (`src/gta4_car_engine.h`, character
-`kDeimos`): a small mid-engined Italian V8 with a flat-plane crank, as the
-1970s-80s cars the Deimos echoes had. An even beat alternating between the
-banks (no American burble), a busy idle at 950 rpm, revs to 7,700, a bright
-exhaust and the carburettors' howl at twice the firing rate opening with the
-revs, pops on lift-off. The revs come from the road speed through five
-simulated gears; getting in cranks it, getting out it winds down. The pods'
-electric motor whirs as they swing. `tools/car/render_preview.cpp deimos`
-renders a scripted drive to a WAV.
+Synthesized in the trainer (`src/gta4_car_engine.h`, `kDeimosEngine`), on
+the physically informed model the add-ons share since v1.7.18: the engine of
+the late-70s mid-engined Ferrari the Deimos echoes, a 3-litre flat-plane V8
+(firing order 1-5-3-7-4-8-2-6, the banks taking turns, each firing evenly
+every 180 degrees: a hard, even rasp, no American burble), each cylinder's
+exhaust pulse varying a little from one cycle to the next, long tubular
+headers merging in one muffler box, four twin-choke carburettors on short
+runners (their howl and honk at full throttle), idle at 950 rpm, revs to
+7,700, pops on lift-off. The revs come from the road speed through five
+simulated gears; getting in the starter cranks it, getting out it winds
+down. Its doors latch and slam (its game name has no IV sounds, its doors'
+included), and the pods' electric motor whirs as they swing.
+`tools/car/render_preview.cpp deimos` renders a scripted drive to a WAV.
+(v1.7.13-v1.7.17: an abstract voice that sounded synthetic.)
 
 ## Pop-up headlights
 
@@ -24,7 +29,7 @@ Getting in, the pods flip up and the lamps come on; getting out, they flip
 down and go off. In the car, **d-pad left** raises or lowers the lamp pods,
 and the headlights follow (pods up: lights on, pods down: lights off). The pods swing up on
 their hinge in about a third of a second. The d-pad doesn't change the radio
-in the Deimos. *Vehicle Options → Deimos Pop-ups* switches to **Automatic**:
+in the Deimos. *Vehicle Options → Deimos/Nexus Pop-ups* switches to **Automatic**:
 up whenever IV turns car lights on (night, rain, fog).
 
 On PC, ZolikaPatch (a patch the port cannot run) turns the pods 30°. Here:

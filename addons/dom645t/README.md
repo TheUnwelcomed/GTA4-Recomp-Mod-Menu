@@ -4,7 +4,8 @@ An add-on car on PC, and here too: its own vehicle (`dom645t`), with the
 mod's handling and colour combinations. Spawn **Car Spawning → Vapid
 Dominator 645**. Its game name is its own (`DOM645T`, which IV has no
 engine sound for), so the engine you hear is the trainer's synthesized one
-(`src/gta4_car_engine.h`: the 1960s pony car's small 289 V8, a milder lope,
+(`src/gta4_car_engine.h`, the physically informed model since v1.7.18; its doors
+latch and slam there too: the 1960s pony car's small 289 V8, a milder lope,
 lighter and raspier than the Arbiter X's, revving higher). Up to v1.7.16 it
 borrowed the Banshee's name and engine, as the mod's line chooses.
 

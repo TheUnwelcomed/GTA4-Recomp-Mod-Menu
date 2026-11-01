@@ -1658,121 +1658,164 @@ bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
   return in_car && !s.popup_auto;
 }
 
-// The Dinka Nexus's gullwing doors. The converter hangs each door panel (and
-// its window) on a pivot of its own (the template's overheat points, which
-// the game only reads to place engine smoke), hinged along the roof where
-// the mod hangs them, turning about the car's length: 71 degrees up, the
-// mod's own travel. The game still has the template's ordinary doors there,
-// unseen: Niko opens and shuts those as he gets in and out (the game's own
-// animations, as on any car), and each gullwing follows its door, raised as
-// far as the game has it open (GET_DOOR_ANGLE_RATIO). The struts hiss as one
-// lifts and it shuts with a clunk. Followed every frame while the player is in
-// a Nexus or getting into one, and after he gets out until its doors are down.
-struct GullwingState {
-  uint32_t car = 0;            // the Nexus followed
-  uint32_t info = 0;           // its model (the pivots looked up for it)
-  int32_t bone[2] = {-1, -1};  // the pivots: driver's (left), passenger's
+// The add-on cars' doors. Their game names have no sounds in IV (so that
+// only the trainer's engines play), doors included, so the trainer follows
+// the doors of the one the player is in, getting into or just got out of,
+// through the game's own door (GET_DOOR_ANGLE_RATIO: it opens as Niko pulls
+// the handle and shuts as he swings it closed, the game's animations as on
+// any car): a latch letting go as one opens, a slam as it shuts.
+// The Dinka Nexus's doors are gullwings. The converter hangs each door panel
+// (and its window) on a pivot of its own (the template's overheat points,
+// which the game only reads to place engine smoke), hinged along the roof
+// where the mod hangs them, turning about the car's length: 71 degrees up,
+// the mod's own travel. The game's ordinary doors are still there, unseen,
+// and each gullwing follows its door, raised as far as the game has it open;
+// its gas struts hiss going up and coming down.
+enum DoorCar : int { kDoorDeimos = 0, kDoorDominator, kDoorArbiter, kDoorNexus, kDoorCars };
+constexpr std::string_view kDoorModels[kDoorCars] = {"DEIMOS", "DOM645T", "ARBITERX", "NEXUS"};
+enum class DoorEvent { kOpening, kLowering, kShut };
+void DoorSound(int car, DoorEvent event);  // (with the cars' engines, below)
+struct DoorWatch {
+  uint32_t car = 0;            // the car followed
+  int kind = -1;               // which of kDoorModels
+  uint32_t info = 0;           // its model (the Nexus's pivots looked up for it)
+  int32_t bone[2] = {-1, -1};  // the Nexus's pivots: driver's (left), passenger's
   float ratio[2]{}, peak[2]{};
-  bool lifting[2]{};
+  bool open[2]{}, lowering[2]{};
   uint64_t next_probe = 0, last_active = 0, next_write = 0;
   int log = 0;
 };
-GullwingState g_gullwing;
+DoorWatch g_doors;
 constexpr std::string_view kGullwingPivots[2] = {"overheat", "overheat_2"};
 constexpr float kGullwingDegrees = 71.0f;
-void GullwingSound(bool lifting);  // (with the cars' engines, below)
 
-bool GullwingsBusy(const GullwingState& g, uint64_t now) {
-  return g.car && (now - g.last_active < 1500 || g.ratio[0] > 0.005f || g.ratio[1] > 0.005f);
+bool HaveDoorCars() { return g_have_deimos || g_have_dominator || g_have_arbiter || g_have_nexus; }
+
+bool DoorsBusy(const DoorWatch& d, uint64_t now) {
+  return d.car && (now - d.last_active < 1500 || d.ratio[0] > 0.005f || d.ratio[1] > 0.005f);
 }
 
-void Gullwings(PPCContext& ctx, uint8_t* base, const GameContext& game) {
-  auto& g = g_gullwing;
+int DoorCarKind(uint32_t model) {
+  static const std::array<uint32_t, kDoorCars> hashes = [] {
+    std::array<uint32_t, kDoorCars> h{};
+    for (int k = 0; k < kDoorCars; ++k)
+      h[size_t(k)] = ModelHash(kDoorModels[size_t(k)]);
+    return h;
+  }();
+  for (int k = 0; k < kDoorCars; ++k)
+    if (hashes[size_t(k)] == model)
+      return k;
+  return -1;
+}
+
+// Every frame while the player is in one of these cars, getting into one,
+// or one he left still has a door open; a look a few times a second
+// otherwise.
+void FollowDoors(PPCContext& ctx, uint8_t* base, const GameContext& game) {
+  auto& d = g_doors;
   const uint64_t now = NowMs();
-  const bool busy = GullwingsBusy(g, now);
-  if (!busy && now < g.next_probe)
+  const bool busy = DoorsBusy(d, now);
+  if (!busy && now < d.next_probe)
     return;
-  g.next_probe = now + 300;
-  static const uint32_t kNexus = ModelHash("NEXUS");
-  // In one, getting into one, or the one he left with a door still up.
+  d.next_probe = now + 300;
+  // In one, getting into one, or the one he left with a door still open.
   uint32_t car = 0;
-  bool active = false;
+  int kind = -1;
   const auto& vehicle = PlayerVehicle(ctx, base, game);
   if (vehicle.car) {
-    if (vehicle.model == kNexus) {
+    kind = DoorCarKind(vehicle.model);
+    if (kind >= 0)
       car = *vehicle.car;
-      active = true;
-    }
   } else if (const auto getting = Invoke(ctx, base, "IS_CHAR_GETTING_IN_TO_A_CAR", {game.ped});
              getting && getting->r0()) {
     if (const auto target = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {game.ped, 0}, 1);
         target && target->words[0])
-      if (const auto m = Invoke(ctx, base, "GET_CAR_MODEL", {target->words[0], 0}, 1); m && m->words[0] == kNexus) {
-        car = target->words[0];
-        active = true;
+      if (const auto m = Invoke(ctx, base, "GET_CAR_MODEL", {target->words[0], 0}, 1)) {
+        kind = DoorCarKind(m->words[0]);
+        if (kind >= 0)
+          car = target->words[0];
       }
   }
-  if (!car && busy)
-    car = g.car;
-  if (!car) {
-    g.car = 0;
+  const bool active = car != 0;
+  if (!car && busy) {
+    car = d.car;
+    kind = d.kind;
+  }
+  if (!car || kind < 0) {
+    d.car = 0;
     return;
   }
-  if (car != g.car) {
-    const int log = g.log;
-    g = GullwingState{};
-    g.log = log;
-    g.car = car;
-    g.next_probe = now + 300;
+  if (car != d.car) {
+    const int log = d.log;
+    d = DoorWatch{};
+    d.log = log;
+    d.car = car;
+    d.kind = kind;
+    d.next_probe = now + 300;
+    // (a door already open when first met: no latch sound for it)
+    for (int k = 0; k < 2; ++k)
+      if (const auto r = Invoke(ctx, base, "GET_DOOR_ANGLE_RATIO", {car, uint32_t(k), 0}, 2))
+        if (std::isfinite(r->f(0)) && std::fabs(r->f(0)) > 0.04f) {
+          d.open[k] = true;
+          d.peak[k] = std::fabs(r->f(0));
+        }
   }
   if (active)
-    g.last_active = now;
+    d.last_active = now;
+  const uint32_t model = ModelHash(kDoorModels[size_t(kind)]);
   const uint32_t vehicle_at = VehicleAddress(base, car);
-  const uint32_t info = vehicle_at ? FindModelInfo(base, kNexus) : 0;
+  const uint32_t info = vehicle_at ? FindModelInfo(base, model) : 0;
   if (!info || !VehicleIsModel(base, vehicle_at, info)) {
-    g.car = 0;  // gone (or the slot reused)
+    d.car = 0;  // gone (or the slot reused)
     return;
   }
-  if (g.info != info) {
-    g.info = info;
+  const bool gullwing = kind == kDoorNexus;
+  if (gullwing && d.info != info) {
+    d.info = info;
     for (int k = 0; k < 2; ++k)
-      g.bone[k] = FindBone(ctx, base, vehicle_at, kGullwingPivots[k]);
-    if (g.log < 3) {
-      ++g.log;
-      REXLOG_INFO("gta4-trainer: Nexus gullwings on bones {} and {}{}", g.bone[0], g.bone[1],
+      d.bone[k] = FindBone(ctx, base, vehicle_at, kGullwingPivots[k]);
+    if (d.log < 3) {
+      ++d.log;
+      REXLOG_INFO("gta4-trainer: Nexus gullwings on bones {} and {}{}", d.bone[0], d.bone[1],
                   NativeKnown("GET_DOOR_ANGLE_RATIO") ? "" : " (no GET_DOOR_ANGLE_RATIO: they stay shut)");
     }
   }
-  const bool rewrite = now >= g.next_write;
+  const bool rewrite = now >= d.next_write;
   if (rewrite)
-    g.next_write = now + 250;
+    d.next_write = now + 250;
   for (int k = 0; k < 2; ++k) {
-    if (g.bone[k] < 0)
-      continue;
     float ratio = 0.0f;
     if (const auto r = Invoke(ctx, base, "GET_DOOR_ANGLE_RATIO", {car, uint32_t(k), 0}, 2))
       ratio = std::isfinite(r->f(0)) ? std::clamp(std::fabs(r->f(0)), 0.0f, 1.0f) : 0.0f;
-    // The struts as it lifts from shut; the clunk once it is on its way down.
-    if (ratio > 0.04f && g.ratio[k] <= 0.04f) {
-      GullwingSound(true);
-      g.lifting[k] = true;
-      g.peak[k] = ratio;
-    } else if (g.lifting[k] && g.peak[k] > 0.3f && ratio < g.peak[k] - 0.06f) {
-      GullwingSound(false);
-      g.lifting[k] = false;
+    // The latch as it leaves the frame; a gullwing's struts on its way down;
+    // the slam as it reaches the frame again.
+    if (!d.open[k] && ratio > 0.04f) {
+      d.open[k] = true;
+      d.lowering[k] = false;
+      d.peak[k] = ratio;
+      DoorSound(kind, DoorEvent::kOpening);
+    } else if (d.open[k]) {
+      d.peak[k] = std::max(d.peak[k], ratio);
+      if (gullwing && !d.lowering[k] && d.peak[k] > 0.3f && ratio < d.peak[k] - 0.06f) {
+        d.lowering[k] = true;
+        DoorSound(kind, DoorEvent::kLowering);
+      }
+      if (ratio < 0.015f) {
+        d.open[k] = false;
+        if (d.peak[k] > 0.1f)
+          DoorSound(kind, DoorEvent::kShut);
+        d.peak[k] = 0.0f;
+      }
     }
-    g.peak[k] = std::max(g.peak[k], ratio);
-    if (ratio <= 0.04f)
-      g.lifting[k] = false;
-    if (ratio != g.ratio[k] || rewrite)
-      PoseBone(ctx, base, vehicle_at, info, kPoseNexus, 1 + k, g.bone[k], 1,
+    if (gullwing && d.bone[k] >= 0 && (ratio != d.ratio[k] || rewrite))
+      PoseBone(ctx, base, vehicle_at, info, kPoseNexus, 1 + k, d.bone[k], 1,
                (k == 0 ? 1.0f : -1.0f) * kGullwingDegrees * ratio, 1.0f);
-    if (g.log < 6 && ratio > 0.5f && g.ratio[k] <= 0.5f) {
-      ++g.log;
-      REXLOG_INFO("gta4-trainer: Nexus {} gullwing up (door ratio {:.2f})", k == 0 ? "driver's" : "passenger's",
-                  ratio);
+    if (d.log < 8 && ratio > 0.5f && d.ratio[k] <= 0.5f) {
+      ++d.log;
+      REXLOG_INFO("gta4-trainer: {} {} door open (ratio {:.2f})", std::string(kDoorModels[size_t(kind)]),
+                  k == 0 ? "driver's" : "passenger's", ratio);
     }
-    g.ratio[k] = ratio;
+    d.ratio[k] = ratio;
   }
 }
 
@@ -3444,21 +3487,22 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
 // The add-on cars' own engines: original synthesized voices
 // (gta4_car_engine.h) played through the port's mixer like the jet's. The
 // Batmobile's, in the spirit of the 1989/1992 film car: a turbine whine over
-// a deep, lumpy V8, a roar on the booster (gadgets on, d-pad right). The
-// Grotti Deimos's: a high-revving flat-plane Italian V8 with a carburettor
-// howl, and its pop-up lamps' motor. Revs come from the road speed through
-// five simulated gears (the throttle revs it standing still); getting in
-// cranks the starter, getting out it winds down. The Dinka Nexus's: a
-// smooth, even V6 to 8,000 rpm whose intake hardens into a wail past 5,800
-// (its second cam profile), with its pop-ups' motor and its gullwings'
-// struts. The Imponte Arbiter X's: a big, choppy-idling cross-plane V8, deep
-// and heavy, the hood scoops roaring under load. The Vapid Dominator 645's:
-// a small, raspier 1960s V8. The cars' game names (BATMOBILE, DEIMOS, NEXUS,
-// ARBITERX, DOM645T) have no engine sound in IV, so these are the only ones
-// (up to v1.7.10 the Batmobile drove with the Sabre GT's engine, up to
-// v1.7.12 the Deimos with the Turismo's, up to v1.7.16 the Nexus with the
-// Infernus's and the other two with the Banshee's). Canopy hiss and clunk
-// (the Batmobile's and the F-16's) come from the Batmobile's voice.
+// a deep, lumpy V8, a roar on the booster (gadgets on, d-pad right), meaner
+// flat out. The Deimos's, the Nexus's, the Arbiter X's and the Dominator
+// 645's on a physically informed model of the real engines their cars are
+// drawn from (each cylinder firing in its real order into its bank's
+// exhaust, the pipes' own resonances, the intake, the valve gear): a late-70s
+// Ferrari's flat-plane V8, the NSX's VTEC V6, the GTO's Ram Air 400 and the
+// '65 Mustang's 289. Revs come from the road speed through five simulated
+// gears (the throttle revs it standing still); getting in cranks the
+// starter, getting out it winds down. The cars' game names (BATMOBILE,
+// DEIMOS, NEXUS, ARBITERX, DOM645T) have no sounds in IV, so these are the
+// only ones, their doors' too (FollowDoors) (up to v1.7.10 the Batmobile
+// drove with the Sabre GT's engine, up to v1.7.12 the Deimos with the
+// Turismo's, up to v1.7.16 the Nexus with the Infernus's and the other two
+// with the Banshee's). Canopy hiss and clunk (the Batmobile's and the
+// F-16's) come from the Batmobile's voice; each car's pop-ups, doors and
+// struts from its own.
 gta4::car::EngineSynth g_bat_synth{gta4::car::kBatmobile}, g_deimos_synth{gta4::car::kDeimos};
 gta4::car::EngineSynth g_nexus_synth{gta4::car::kNexus}, g_arbiter_synth{gta4::car::kArbiter},
     g_dominator_synth{gta4::car::kDominator};
@@ -3492,14 +3536,14 @@ struct CarEngineState {
 // (Levels: v1.7.11-v1.7.13 played the Batmobile at full level, much louder
 // than the game's own cars.)
 CarEngineState g_bat_engine{&g_bat_synth, "Batmobile", "BATMOBILE", {12.0f, 21.0f, 31.0f, 42.0f, 56.0f}, 0.35f};
-CarEngineState g_deimos_engine{&g_deimos_synth, "Deimos", "DEIMOS", {14.0f, 24.0f, 35.0f, 47.0f, 62.0f}, 0.4f};
-// (The two V8 muscle cars idle louder than the high-revving Deimos and Nexus,
-// so their levels sit a little lower, the Arbiter's near the Batmobile's.)
+// (The physically informed four are levelled to the same full-throttle
+// loudness in gta4_car_engine.h, about the Batmobile's in the game.)
+CarEngineState g_deimos_engine{&g_deimos_synth, "Deimos", "DEIMOS", {14.0f, 24.0f, 35.0f, 47.0f, 62.0f}, 0.38f};
 CarEngineState g_nexus_engine{&g_nexus_synth, "Nexus", "NEXUS", {15.0f, 25.0f, 36.0f, 48.0f, 63.0f}, 0.38f};
 CarEngineState g_arbiter_engine{&g_arbiter_synth, "Arbiter X", "ARBITERX", {13.0f, 23.0f, 34.0f, 46.0f, 60.0f},
-                                0.33f};
+                                0.36f};
 CarEngineState g_dominator_engine{&g_dominator_synth, "Dominator 645", "DOM645T",
-                                  {13.0f, 22.0f, 33.0f, 45.0f, 58.0f}, 0.36f};
+                                  {13.0f, 22.0f, 33.0f, 45.0f, 58.0f}, 0.37f};
 
 // Starts a car's voice (want) or stops it once its synth has gone quiet.
 void CarVoice(CarEngineState& e, bool want) {
@@ -3541,15 +3585,30 @@ void PopupMotorSound(const PopupSpec& spec, float seconds) {
   e.running = true;
 }
 
-// The Nexus's gullwings: the struts' hiss lifting (a latch's click first),
-// the clunk coming down.
-void GullwingSound(bool lifting) {
-  if (lifting)
-    g_nexus_synth.CanopyOpen();
-  else
-    g_nexus_synth.CanopyShut();
-  CarVoice(g_nexus_engine, true);
-  g_nexus_engine.running = true;
+// The add-on cars' doors (FollowDoors): the latch letting go, a gullwing's
+// struts (going up with the latch, and on the way down), the slam.
+void DoorSound(int car, DoorEvent event) {
+  CarEngineState* const engines[kDoorCars] = {&g_deimos_engine, &g_dominator_engine, &g_arbiter_engine,
+                                              &g_nexus_engine};
+  if (car < 0 || car >= kDoorCars)
+    return;
+  auto& e = *engines[car];
+  const bool gullwing = car == kDoorNexus;
+  switch (event) {
+    case DoorEvent::kOpening:
+      e.synth->DoorOpen();
+      if (gullwing)
+        e.synth->CanopyOpen(false);  // the struts lifting it
+      break;
+    case DoorEvent::kLowering:
+      e.synth->CanopyShut(false);
+      break;
+    case DoorEvent::kShut:
+      e.synth->DoorShut();
+      break;
+  }
+  CarVoice(e, true);
+  e.running = true;  // (stopped by CarEngine once quiet)
 }
 
 // Every frame in the car, and while its voice still sounds after getting
@@ -4388,7 +4447,7 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool jet_due = g_have_f16 && (g_jet.in_jet || missiles_live || now >= g_jet.next_probe);
   const bool popup_due = g_have_deimos && PopupsDue(g_popup, now);
   const bool nexus_popup_due = g_have_nexus && PopupsDue(g_nexus_popup, now);
-  const bool gullwing_due = g_have_nexus && (GullwingsBusy(g_gullwing, now) || now >= g_gullwing.next_probe);
+  const bool doors_due = HaveDoorCars() && (DoorsBusy(g_doors, now) || now >= g_doors.next_probe);
   const bool lights_due = s.car_lights && (g_lights.in_car || now >= g_lights.next_look);
   // With the menu open: whether the player is driving (R2 then still reaches
   // the game), looked at four times a second.
@@ -4420,7 +4479,7 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool teleport_due = g_teleport.active;
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
       !jet_canopy_due && !teleport_due && !any_engine_due && s.pending_model < 0 && !jet_due && !rain_due &&
-      !popup_due && !nexus_popup_due && !gullwing_due && !lights_due && !drive_due && g_addons_probed)
+      !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -4546,8 +4605,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   if (nexus_popup_due && PopupLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed),
                                      g_nexus_popup, g_have_nexus))
     vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
-  if (gullwing_due)
-    Gullwings(ctx, base, game);
+  if (doors_due)
+    FollowDoors(ctx, base, game);
   if (lights_due && CarLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed)))
     vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
   g_vehicle_mask.store(vehicle_mask, std::memory_order_relaxed);

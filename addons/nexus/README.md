@@ -3,10 +3,12 @@
 An add-on car on PC, and here too: its own vehicle (`nexus`), with the mod's
 handling and colour combinations. Spawn **Car Spawning → Dinka Nexus**. Its
 game name is its own (`NEXUS`, which IV has no engine sound for), so the
-engine you hear is the trainer's synthesized one (`src/gta4_car_engine.h`:
-an even V6 to 8,000 rpm, the intake hardening into a wail past 5,800). Up
-to v1.7.16 it borrowed the Infernus's name and engine, as the mod's line
-chooses.
+engine you hear is the trainer's synthesized one (`src/gta4_car_engine.h`,
+the physically informed model since v1.7.18: the early-90s NSX's 3-litre V6
+the car is drawn from, firing evenly to 8,000 rpm, the intake hardening into
+a wail as its VTEC cam comes in at 5,800). Its doors latch and slam there
+too. Up to v1.7.16 it borrowed the Infernus's name and engine, as the mod's
+line chooses.
 
 Built from the mod's `nexus.wft` and its *No liveries* `nexus.wtd` (the
 liveries need ZolikaPatch), on the stock **Banshee**:
