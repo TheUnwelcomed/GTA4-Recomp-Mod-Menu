@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Convert, pack and validate the bundled add-on cars (one line per car).
-# usage: build_bundled.sh <export_dir> <work_dir> <sources_dir> <out_dir>
+# usage: build_bundled.sh <export_dir> <work_dir> <sources_dir> <out_dir> [model ...]
 #   export_dir   stock 360 cars exported by the app (logs/export)
 #   work_dir     their decoded bodies (xlzx unrsc <car>.xft <work>/<car>.xft.bin, same for .xtd)
 #   sources_dir  the mods' PC files: <sources>/<model>/<model>.wft and .wtd
 #   out_dir      gets <model>/<model>.xft/.xtd ready for addons/<model>/
+#   model ...    only these cars (default: all)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 export_dir=$1 work=$2 sources=$3 out=$4
+shift 4
+only=" $* "
 fails=0
 # model  template  pivots the trainer turns (canopies, pop-up lamps, landing gear)  shaders from other cars
 while read -r model template pivot shaders; do
   [ -z "$model" ] && continue
+  [ "$only" != "  " ] && [[ "$only" != *" $model "* ]] && continue
   [ "$pivot" = "-" ] && pivot=""
   o="$out/$model"
   mkdir -p "$o"
@@ -32,5 +36,7 @@ deimos     banshee  extra_1=misc_a,misc_y,misc_w,misc_p,misc_m,misc_headlight_l,
 dom645t    banshee  -  -
 nexus      banshee  extra_1=light_cover;overheat=door_dside_f;overheat_2=door_pside_f  -
 arbiterx   banshee  -  -
+lazar3     cavalcade  extra_1=turret_1base;extra_5=turret_1barrel;extra_6=door_dside_f;interiorlight=door_pside_f  -
+gauntletc  banshee  -  -
 CARS
 exit $fails

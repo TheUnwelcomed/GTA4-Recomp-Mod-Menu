@@ -3,11 +3,13 @@
 // four gears, a cruise, the booster (Batmobile) or full throttle, a lift-off,
 // idle, the car's own sounds (the Batmobile's canopy opening and shutting,
 // the Deimos's and the Nexus's pop-up lamps going up and down, the Nexus's
-// gullwing doors), shut down. With a third argument it also writes the
-// script's section boundaries (seconds) for a level check.
+// gullwing doors; the Lazar 3's turret slewing at idle, a burst from its
+// cannon cruising, its air brakes at the stop, its ramps down and up), shut
+// down. With a third argument it also writes the script's section
+// boundaries (seconds) for a level check.
 //   c++ -std=c++20 -O2 -Wall -Wextra -I../../src render_preview.cpp -o render_preview
 //   ./render_preview batmobile bat_preview.wav [sections.txt]
-//   ./render_preview deimos|nexus|arbiterx|dom645t <car>_preview.wav [sections.txt]
+//   ./render_preview deimos|nexus|arbiterx|dom645t|gauntletc|lazar3 <car>_preview.wav [sections.txt]
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -20,7 +22,9 @@ namespace {
 // The car's own sounds in idle 2: the canopy (hiss up at 25.5, down at
 // 27.0); pop-up lamps (up 25.5, down 26.7); doors (opening at 26.0, shut at
 // 27.2), a gullwing's struts with them.
-enum class Extras { kCanopy, kPopupsAndDoors, kDoors, kGullwings };
+// The Lazar's: turret slewing 4.0-5.0, cannon at 18.0-19.0 (four rounds),
+// air brakes at 25.0, ramps down at 25.6 and up at 27.6.
+enum class Extras { kCanopy, kPopupsAndDoors, kDoors, kGullwings, kArmour };
 struct Car {
   const char* name;
   const gta4::car::Character* character;
@@ -33,6 +37,8 @@ constexpr Car kCars[] = {
     {"nexus", &gta4::car::kNexus, false, Extras::kGullwings},
     {"arbiterx", &gta4::car::kArbiter, false, Extras::kDoors},
     {"dom645t", &gta4::car::kDominator, false, Extras::kDoors},
+    {"gauntletc", &gta4::car::kGauntlet, false, Extras::kDoors},
+    {"lazar3", &gta4::car::kLazar, false, Extras::kArmour},
 };
 }  // namespace
 
@@ -86,6 +92,9 @@ int main(int argc, char** argv) {
   double t = 0;
   int step = 0;
   bool first = false, second = false, doors_up = false, doors_down = false;
+  const bool armour = car->extras == Extras::kArmour;
+  int rounds = 0;
+  bool braked = false, ramps_down = false, ramps_up = false;
   while (t < 31.5) {
     while (step + 1 < kSteps && t >= script[step].until) ++step;
     const auto& s = script[step];
@@ -93,21 +102,39 @@ int main(int argc, char** argv) {
     const float u = float((t - from) / (s.until - from));
     synth->SetTarget(s.rpm0 + (s.rpm1 - s.rpm0) * u, s.throttle, s.boost, 1.0f);
     const bool popups = car->extras == Extras::kPopupsAndDoors || car->extras == Extras::kGullwings;
-    if (!first && t >= 25.5) {
+    if (!first && !armour && t >= 25.5) {
       if (canopy)
         synth->CanopyOpen();
       else if (popups)
         synth->Motor(0.4f);
       first = true;
     }
-    if (!second && t >= (canopy ? 27.0 : 26.7)) {
+    if (!second && !armour && t >= (canopy ? 27.0 : 26.7)) {
       if (canopy)
         synth->CanopyShut();
       else if (popups)
         synth->Motor(0.4f);
       second = true;
     }
-    if (!canopy) {
+    if (armour) {
+      synth->Servo(t >= 4.0 && t < 5.0 ? (t < 4.5 ? 1.0f : 0.5f) : 0.0f);
+      if (rounds < 4 && t >= 18.0 + 0.32 * rounds) {
+        synth->Cannon();
+        ++rounds;
+      }
+      if (!braked && t >= 25.0) {
+        synth->AirBrake();
+        braked = true;
+      }
+      if (!ramps_down && t >= 25.6) {
+        synth->Hydraulic(1.5f, true);
+        ramps_down = true;
+      }
+      if (!ramps_up && t >= 27.6) {
+        synth->Hydraulic(1.7f, false);
+        ramps_up = true;
+      }
+    } else if (!canopy) {
       if (!doors_up && t >= 26.0) {
         synth->DoorOpen();
         if (car->extras == Extras::kGullwings)

@@ -197,6 +197,8 @@ std::array g_natives = {
     // Nexus's gullwings follow the game's doors.
     NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"IS_VEHICLE_EXTRA_TURNED_ON"},
     NativeEntry{"GET_DOOR_ANGLE_RATIO"},
+    // The Lazar 3's turret follows the camera: where it looks, and the car's heading.
+    NativeEntry{"GET_GAME_CAM"}, NativeEntry{"GET_CAM_ROT"}, NativeEntry{"GET_CAR_HEADING"},
     NativeEntry{"GET_TIME_OF_DAY"},
     NativeEntry{"GET_CURRENT_WEATHER"}, NativeEntry{"FORCE_CAR_LIGHTS"},
     // Bring Your Own Ride: the checks it answers and the vehicle kinds.
@@ -598,6 +600,8 @@ constexpr std::array kVehicles = {
     VehicleChoice{"Vapid Dominator 645", "DOM645T"},
     VehicleChoice{"Dinka Nexus", "NEXUS"},
     VehicleChoice{"Imponte Arbiter X", "ARBITERX"},
+    VehicleChoice{"Lazar 3 (armed)", "LAZAR3", 7.5f},
+    VehicleChoice{"Bravado Gauntlet Classic", "GAUNTLETC"},
 };
 struct WeaponChoice {
   std::string_view label;
@@ -753,6 +757,7 @@ uint64_t NowNs() {
 // so their watchers cost nothing on installs without them.
 bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false, g_have_batmobile = false;
 bool g_have_nexus = false, g_have_arbiter = false, g_have_dominator = false;
+bool g_have_lazar = false, g_have_gauntlet = false;
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
 std::atomic<uint32_t> g_pad_adjust{0};
@@ -773,8 +778,8 @@ void Toast(State& s, std::string text, uint64_t ms = 2500) {
 bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_deimos ||
-         g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator ||
-         s.car_lights;
+         g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator || g_have_lazar ||
+         g_have_gauntlet || s.car_lights;
 }
 
 std::vector<Item> PageItems(const State& s) {
@@ -1340,7 +1345,10 @@ void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const Mode
 // (entry 0) and gullwing doors (entries 1 and 2). The pose last set for each
 // is re-applied by the per-frame hook below (sub_82381FA0), right after the
 // game's own per-frame bone edits for that car.
-enum PoseSlot : int { kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2, kPoseNexus = 3, kPoseSlots = 4 };
+// The Lazar 3's: its turret (entry 0), its gun (1), its ramps (2, 3).
+enum PoseSlot : int {
+  kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2, kPoseNexus = 3, kPoseLazar = 4, kPoseSlots = 5
+};
 
 // Pop-up headlights: the Grotti Deimos's and the Dinka Nexus's. The converter
 // hangs both lamp pods (housings, lamps and lenses) on the template's
@@ -1454,27 +1462,54 @@ int32_t FindBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, std::string_v
   return -1;
 }
 
-bool PoseBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, int slot, int entry,
-              int32_t bone, int axis, float degrees, float scale) {
-  const uint32_t local = PopupLocalSlot(ctx, base, vehicle, bone);
-  const auto skeleton = local ? CallGuest(ctx, base, kEntitySkeleton, vehicle) : std::nullopt;
-  if (!local || !skeleton)
-    return false;
+// The bone's rest local matrix in the skeleton data (+16: rotation rows,
+// then the translation row: its hinge, relative to its parent), or 0.
+uint32_t RestMatrix(PPCContext& ctx, uint8_t* base, uint32_t vehicle, int32_t bone) {
+  const auto skeleton = bone >= 0 ? CallGuest(ctx, base, kEntitySkeleton, vehicle) : std::nullopt;
+  if (!skeleton || !*skeleton || !Span(base, *skeleton, 8))
+    return 0;
   const uint32_t data = Read(base, *skeleton + 4);
   if (!Span(base, data, 24))
-    return false;
-  // The bone's rest local matrix (skeleton data +16: rotation rows, then the
-  // translation row: the hinge), turned about its own X axis.
+    return 0;
   const uint32_t rest = Read(base, data + 16) + 64 * uint32_t(bone);
-  if (!Span(base, rest, 64))
-    return false;
-  // Row vectors (v' = v M): about X, y turns towards z (a front edge
-  // rising, a wheel swinging aft and up for a negative angle); about Y, z
-  // turns towards x.
+  return Span(base, rest, 64) ? rest : 0;
+}
+
+// A rotation by `degrees` about the car's X, Y or Z axis, for row vectors
+// (v' = v M): about X, y turns towards z (a front edge rising, a wheel
+// swinging aft and up for a negative angle); about Y, z turns towards x;
+// about Z, y turns towards -x (to the left, as headings turn).
+void TurnMatrix(int axis, float degrees, float (&m)[3][3]) {
   const float rad = degrees * 3.14159265f / 180.0f, c = std::cos(rad), s = std::sin(rad);
-  const float turn_x[3][3] = {{1, 0, 0}, {0, c, s}, {0, -s, c}};
-  const float turn_y[3][3] = {{c, 0, -s}, {0, 1, 0}, {s, 0, c}};
-  const auto& turn = axis == 1 ? turn_y : turn_x;
+  const float x[3][3] = {{1, 0, 0}, {0, c, s}, {0, -s, c}};
+  const float y[3][3] = {{c, 0, -s}, {0, 1, 0}, {s, 0, c}};
+  const float z[3][3] = {{c, s, 0}, {-s, c, 0}, {0, 0, 1}};
+  const auto& t = axis == 2 ? z : axis == 1 ? y : x;
+  for (int r = 0; r < 3; ++r)
+    for (int k = 0; k < 3; ++k)
+      m[r][k] = t[r][k];
+}
+
+// The general form: the bone's rest rotation turned by `turn` (v' = v turn
+// rest), at its rest translation (its hinge) or, given `hinge`, there
+// instead (a part carried round by another's turn: the Lazar's gun on its
+// turret), scaled by `scale`.
+bool PoseBoneMatrix(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, int slot, int entry,
+                    int32_t bone, const float (&turn)[3][3], const float* hinge, float scale);
+
+bool PoseBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, int slot, int entry,
+              int32_t bone, int axis, float degrees, float scale) {
+  float turn[3][3];
+  TurnMatrix(axis, degrees, turn);
+  return PoseBoneMatrix(ctx, base, vehicle, info, slot, entry, bone, turn, nullptr, scale);
+}
+
+bool PoseBoneMatrix(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, int slot, int entry,
+                    int32_t bone, const float (&turn)[3][3], const float* hinge, float scale) {
+  const uint32_t local = PopupLocalSlot(ctx, base, vehicle, bone);
+  const uint32_t rest = local ? RestMatrix(ctx, base, vehicle, bone) : 0;
+  if (!local || !rest)
+    return false;
   std::array<uint32_t, 16> words{};
   for (uint32_t row = 0; row < 3; ++row) {
     for (uint32_t col = 0; col < 3; ++col) {
@@ -1485,8 +1520,8 @@ bool PoseBone(PPCContext& ctx, uint8_t* base, uint32_t vehicle, uint32_t info, i
     }
     words[4 * row + 3] = Read(base, rest + 16 * row + 12);
   }
-  for (uint32_t w = 0; w < 4; ++w)  // the hinge stays put
-    words[12 + w] = Read(base, rest + 48 + 4 * w);
+  for (uint32_t w = 0; w < 4; ++w)  // the hinge stays put (unless carried)
+    words[12 + w] = hinge && w < 3 ? Bits(hinge[w]) : Read(base, rest + 48 + 4 * w);
   for (uint32_t w = 0; w < 16; ++w)
     Write(base, local + 4 * w, words[w]);
   {
@@ -1678,8 +1713,8 @@ bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
 // the mod's own travel. The game's ordinary doors are still there, unseen,
 // and each gullwing follows its door, raised as far as the game has it open;
 // its gas struts hiss going up and coming down.
-enum DoorCar : int { kDoorDeimos = 0, kDoorDominator, kDoorArbiter, kDoorNexus, kDoorCars };
-constexpr std::string_view kDoorModels[kDoorCars] = {"DEIMOS", "DOM645T", "ARBITERX", "NEXUS"};
+enum DoorCar : int { kDoorDeimos = 0, kDoorDominator, kDoorArbiter, kDoorNexus, kDoorGauntlet, kDoorCars };
+constexpr std::string_view kDoorModels[kDoorCars] = {"DEIMOS", "DOM645T", "ARBITERX", "NEXUS", "GAUNTLETC"};
 enum class DoorEvent { kOpening, kLowering, kShut };
 void DoorSound(int car, DoorEvent event);  // (with the cars' engines, below)
 struct DoorWatch {
@@ -1696,7 +1731,9 @@ DoorWatch g_doors;
 constexpr std::string_view kGullwingPivots[2] = {"overheat", "overheat_2"};
 constexpr float kGullwingDegrees = 71.0f;
 
-bool HaveDoorCars() { return g_have_deimos || g_have_dominator || g_have_arbiter || g_have_nexus; }
+bool HaveDoorCars() {
+  return g_have_deimos || g_have_dominator || g_have_arbiter || g_have_nexus || g_have_gauntlet;
+}
 
 bool DoorsBusy(const DoorWatch& d, uint64_t now) {
   return d.car && (now - d.last_active < 1500 || d.ratio[0] > 0.005f || d.ratio[1] > 0.005f);
@@ -1877,6 +1914,8 @@ bool CarLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const St
 
 void PrepareJet(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in = false);
 
+void PrepareLazar(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in);  // (with its turret, below)
+
 void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s) {
   if (s.pending_model < 0)
     return;
@@ -1971,6 +2010,8 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
       PreparePopups(ctx, base, g_nexus_popup, handle);
     if (s.pending_hash == ModelHash("F16"))  // ...and the jet's landing gear
       PrepareJet(ctx, base, handle);
+    if (s.pending_hash == ModelHash("LAZAR3"))  // ...and the Lazar's turret, gun and ramp
+      PrepareLazar(ctx, base, handle, false);
     if (const auto colours = Invoke(ctx, base, "GET_CAR_COLOURS", {handle, 0, 0}, 1, 0, 2))
       REXLOG_INFO("gta4-trainer: {} colours {} and {}", model, colours->words[0], colours->words[1]);
     if (s.warp_in)
@@ -3208,7 +3249,7 @@ struct CanopyState {
   uint64_t leaving_since = 0;
   uint16_t prev_buttons = 0;
   uint32_t info = 0;  // the model whose pivot bone is known
-  int32_t bone = -1;
+  int32_t bone = -1, bone2 = -1;
   int log = 0;
   // Where the player was set down, watched for a few seconds: a fall
   // through the world puts them back there.
@@ -3230,12 +3271,27 @@ struct CanopySpec {
   int slot, entry;  // where the trainer keeps the pose (PoseBone)
   bool ground_only;  // opens only standing still on the ground
   bool riders;       // a passenger seat: others get in and out through it too
+  // The way in turns about the car's X axis (0) or its length (1: the
+  // Lazar's side ramps, folding down); a second one opening with it (the
+  // other ramp, at entry + 1); its sound (the Batmobile's hiss by default).
+  int axis = 0;
+  std::string_view bone2 = {};
+  float degrees2 = 0.0f;
+  void (*sound)(bool opening) = nullptr;
 };
 constexpr CanopySpec kBatCanopy{"BATMOBILE", "Batmobile", "interiorlight", 60.0f, 0.45f, 0.7f,
                                 {-2.1f, 0.2f, 0.0f}, kPoseBatmobile, 0, true, true};
 constexpr CanopySpec kJetCanopy{"F16", "F-16", "interiorlight", 38.0f, 0.9f, 1.2f,
                                 {-2.3f, 4.3f, 0.0f}, kPoseF16, 3, true, false};
 CanopyState g_canopy, g_jet_canopy;
+// The Lazar 3's side ramps (the PC model's doors, hinged at their bottom
+// edge, folding out and down: 105 degrees there): the player in and out on
+// the left, a passenger on the right, both ramps moving together on their
+// hydraulics, slower than a canopy.
+void LazarRampSound(bool opening);  // (with the Lazar's turret, below)
+constexpr CanopySpec kLazarRamps{"LAZAR3", "Lazar 3", "extra_6", -100.0f, 1.5f, 1.7f, {-3.0f, 0.75f, 0.0f},
+                                 kPoseLazar, 2, true, true, 1, "interiorlight", 100.0f, LazarRampSound};
+CanopyState g_lazar_ramps;
 
 void CanopySound(bool opening);  // (the Batmobile's sound section, below)
 
@@ -3248,14 +3304,19 @@ bool PoseCanopy(PPCContext& ctx, uint8_t* base, const CanopySpec& spec, CanopySt
   if (c.info != info) {
     c.info = info;
     c.bone = FindBone(ctx, base, vehicle, spec.bone);
-    REXLOG_INFO("gta4-trainer: {} canopy on bone {} ({})", std::string(spec.label), c.bone, std::string(spec.bone));
+    c.bone2 = spec.bone2.empty() ? -1 : FindBone(ctx, base, vehicle, spec.bone2);
+    REXLOG_INFO("gta4-trainer: {} canopy on bone {} ({}){}", std::string(spec.label), c.bone, std::string(spec.bone),
+                spec.bone2.empty() ? std::string() : fmt::format(", and bone {} ({})", c.bone2, std::string(spec.bone2)));
   }
   if (c.bone < 0)
     return false;
-  const float t = std::clamp(open, 0.0f, 1.0f);
-  return PoseBone(ctx, base, vehicle, info, spec.slot, spec.entry, c.bone, 0,
-                  spec.degrees * t * t * (3.0f - 2.0f * t), 1.0f);
+  const float t = std::clamp(open, 0.0f, 1.0f), eased = t * t * (3.0f - 2.0f * t);
+  if (c.bone2 >= 0)
+    PoseBone(ctx, base, vehicle, info, spec.slot, spec.entry + 1, c.bone2, spec.axis, spec.degrees2 * eased, 1.0f);
+  return PoseBone(ctx, base, vehicle, info, spec.slot, spec.entry, c.bone, spec.axis, spec.degrees * eased, 1.0f);
 }
+
+void PlayCanopySound(const CanopySpec& spec, bool opening) { (spec.sound ? spec.sound : CanopySound)(opening); }
 
 bool CanopyBusy(const CanopyState& c) {
   return c.phase != CanopyState::kShut || c.in_car || c.exit_at != 0 || c.leaver != 0;
@@ -3516,7 +3577,7 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       }
       if (!c.sounded) {
         c.sounded = true;
-        CanopySound(true);
+        PlayCanopySound(spec, true);
       }
       c.open = std::min(1.0f, c.open + dt / spec.open_seconds);
       PoseCanopy(ctx, base, spec, c, c.car, c.open);
@@ -3540,7 +3601,7 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       }
       if (!c.sounded) {
         c.sounded = true;
-        CanopySound(true);
+        PlayCanopySound(spec, true);
       }
       c.open = std::min(1.0f, c.open + dt / spec.open_seconds);
       PoseCanopy(ctx, base, spec, c, c.car, c.open);
@@ -3620,7 +3681,7 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       if ((c.hold += dt) >= 0.35f) {  // a beat with it up, then down
         if (!c.sounded) {
           c.sounded = true;
-          CanopySound(false);
+          PlayCanopySound(spec, false);
         }
         c.open = std::max(0.0f, c.open - dt / spec.close_seconds);
         PoseCanopy(ctx, base, spec, c, c.car, c.open);
@@ -3722,6 +3783,7 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
 gta4::car::EngineSynth g_bat_synth{gta4::car::kBatmobile}, g_deimos_synth{gta4::car::kDeimos};
 gta4::car::EngineSynth g_nexus_synth{gta4::car::kNexus}, g_arbiter_synth{gta4::car::kArbiter},
     g_dominator_synth{gta4::car::kDominator};
+gta4::car::EngineSynth g_lazar_synth{gta4::car::kLazar}, g_gauntlet_synth{gta4::car::kGauntlet};
 #if REX_PLATFORM_PS5
 class SynthSource final : public gta4ps5::sound::Source {
  public:
@@ -3741,7 +3803,9 @@ struct CarEngineState {
   std::string_view label, model;
   std::array<float, 5> gear_top;  // m/s at the rev limit in each gear
   float volume;                   // its level in the mix
+  bool air_brakes = false;        // a truck's: their hiss at a stop
   bool in_car = false, running = false;  // running: the voice plays (winding down too)
+  bool rolling = false;
   int gear = 0;
   uint64_t next_probe = 0;
   int log = 0;
@@ -3760,6 +3824,10 @@ CarEngineState g_arbiter_engine{&g_arbiter_synth, "Arbiter X", "ARBITERX", {13.0
                                 0.36f};
 CarEngineState g_dominator_engine{&g_dominator_synth, "Dominator 645", "DOM645T",
                                   {13.0f, 22.0f, 33.0f, 45.0f, 58.0f}, 0.37f};
+// The Lazar: governed at 2,300 through a truck's gears, about 100 km/h flat out.
+CarEngineState g_lazar_engine{&g_lazar_synth, "Lazar 3", "LAZAR3", {5.5f, 10.0f, 15.0f, 21.0f, 28.0f}, 0.42f, true};
+CarEngineState g_gauntlet_engine{&g_gauntlet_synth, "Gauntlet Classic", "GAUNTLETC",
+                                 {13.0f, 23.0f, 34.0f, 46.0f, 61.0f}, 0.38f};
 
 // Starts a car's voice (want) or stops it once its synth has gone quiet.
 void CarVoice(CarEngineState& e, bool want) {
@@ -3805,7 +3873,7 @@ void PopupMotorSound(const PopupSpec& spec, float seconds) {
 // struts (going up with the latch, and on the way down), the slam.
 void DoorSound(int car, DoorEvent event) {
   CarEngineState* const engines[kDoorCars] = {&g_deimos_engine, &g_dominator_engine, &g_arbiter_engine,
-                                              &g_nexus_engine};
+                                              &g_nexus_engine, &g_gauntlet_engine};
   if (car < 0 || car >= kDoorCars)
     return;
   auto& e = *engines[car];
@@ -3825,6 +3893,367 @@ void DoorSound(int car, DoorEvent event) {
   }
   CarVoice(e, true);
   e.running = true;  // (stopped by CarEngine once quiet)
+}
+
+// ---------------------------------------------------------------------------
+// The Lazar 3 (Grom and SkylineGTRFreak's model, Milcin's port, on whose PC
+// version the gun neither turns nor fires). The converter hangs the turret
+// on extra_1 (its ring, at the roof's centre) and the gun on extra_5 (its
+// trunnions). Here, with the player in it, the turret follows the camera
+// round (the right stick aims it) and the gun its pitch, each at its motors'
+// speed, their whine rising as they slew; L1 (hidden from the game then: no
+// drive-by) fires the cannon, three rounds a second: a round down the
+// barrel at once (hitscan, as the jet's cannon) and a shell flying out of
+// the muzzle that bursts where it meets anything (as the Batmobile's
+// missiles do), with IV's muzzle flash and the gun's report. The side ramps
+// are its doors (kLazarRamps).
+// ---------------------------------------------------------------------------
+struct Shell {
+  bool live = false, armed = false, physics = true;
+  uint32_t object = 0;
+  float origin[3]{}, start[3]{}, dir[3]{}, pos[3]{};
+  float speed = 0.0f;
+  uint64_t fired = 0;
+  int frames = 0;
+};
+struct LazarState {
+  uint32_t car = 0, info = 0;
+  bool in_car = false, model_requested = false;
+  int32_t turret_bone = -1, gun_bone = -1;
+  float turret_hinge[3]{}, gun_hinge[3]{};
+  float yaw = 0.0f, pitch = 0.0f;  // degrees: left of dead ahead; above level
+  float posed_yaw = 999.0f, posed_pitch = 999.0f;
+  uint64_t last_ms = 0, next_probe = 0, next_shot = 0, next_pose = 0;
+  int shots = 0, aim_log = 0, shot_log = 0, burst_log = 0;
+  std::array<Shell, 8> shells{};
+};
+LazarState g_lazar;
+constexpr float kLazarYawRate = 70.0f, kLazarPitchRate = 40.0f;  // degrees a second
+constexpr float kLazarPitchMin = -8.0f, kLazarPitchMax = 45.0f;
+constexpr float kLazarAimLift = 8.0f;  // the chase camera looks down on the car: the gun a little above its line
+constexpr float kLazarBarrel = 2.31f;  // the trunnions to the muzzle (the mod's weapon_1a), m
+constexpr uint64_t kLazarShotMs = 320;
+constexpr float kLazarShellSpeed = 150.0f;
+
+void LazarRampSound(bool opening) {
+  g_lazar_synth.Hydraulic(opening ? kLazarRamps.open_seconds : kLazarRamps.close_seconds, opening);
+  CarVoice(g_lazar_engine, true);
+  g_lazar_engine.running = true;  // (stopped by CarEngine once quiet)
+}
+void LazarCannonSound() {
+  g_lazar_synth.Cannon();
+  CarVoice(g_lazar_engine, true);
+  g_lazar_engine.running = true;
+}
+void LazarServoSound(float level) {
+  g_lazar_synth.Servo(level);
+  if (level > 0.0f) {
+    CarVoice(g_lazar_engine, true);
+    g_lazar_engine.running = true;
+  }
+}
+
+bool LazarShellsLive() {
+  return std::any_of(g_lazar.shells.begin(), g_lazar.shells.end(), [](const Shell& sh) { return sh.live; });
+}
+
+// A Lazar just made, or got into: its turret, gun and left ramp's extras
+// shown (the game picks extras at random; a hidden one's parts are sent to
+// the world's origin).
+void PrepareLazar(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in) {
+  for (const uint32_t extra : {1u, 5u, 6u})
+    ShowExtra(ctx, base, car, extra, getting_in);
+}
+
+// The turret turned by `yaw` about its ring, the gun pitched on its
+// trunnions and carried round with it.
+void PoseTurret(PPCContext& ctx, uint8_t* base, LazarState& z, uint32_t car) {
+  static const uint32_t kModel = ModelHash("LAZAR3");
+  const uint32_t vehicle = VehicleAddress(base, car);
+  const uint32_t info = vehicle ? FindModelInfo(base, kModel) : 0;
+  if (!info || !VehicleIsModel(base, vehicle, info))
+    return;
+  if (z.info != info) {
+    z.info = info;
+    z.turret_bone = FindBone(ctx, base, vehicle, "extra_1");
+    z.gun_bone = FindBone(ctx, base, vehicle, "extra_5");
+    for (const auto& [bone, hinge] : {std::pair{z.turret_bone, z.turret_hinge}, std::pair{z.gun_bone, z.gun_hinge}})
+      if (const uint32_t rest = RestMatrix(ctx, base, vehicle, bone))
+        for (int a = 0; a < 3; ++a)
+          hinge[a] = ReadFloat(base, rest + 48 + 4 * uint32_t(a));
+    REXLOG_INFO("gta4-trainer: Lazar 3 turret on bone {} at ({:.2f}, {:.2f}, {:.2f}), gun on bone {} at ({:.2f}, "
+                "{:.2f}, {:.2f})",
+                z.turret_bone, z.turret_hinge[0], z.turret_hinge[1], z.turret_hinge[2], z.gun_bone, z.gun_hinge[0],
+                z.gun_hinge[1], z.gun_hinge[2]);
+  }
+  if (z.turret_bone < 0 || z.gun_bone < 0)
+    return;
+  float yaw[3][3], pitch[3][3], both[3][3];
+  TurnMatrix(2, z.yaw, yaw);
+  TurnMatrix(0, z.pitch, pitch);
+  for (int r = 0; r < 3; ++r)
+    for (int k = 0; k < 3; ++k)
+      both[r][k] = pitch[r][0] * yaw[0][k] + pitch[r][1] * yaw[1][k] + pitch[r][2] * yaw[2][k];
+  float at[3];
+  for (int k = 0; k < 3; ++k) {
+    float v = 0;
+    for (int m = 0; m < 3; ++m)
+      v += (z.gun_hinge[m] - z.turret_hinge[m]) * yaw[m][k];
+    at[k] = z.turret_hinge[k] + v;
+  }
+  PoseBoneMatrix(ctx, base, vehicle, info, kPoseLazar, 0, z.turret_bone, yaw, nullptr, 1.0f);
+  PoseBoneMatrix(ctx, base, vehicle, info, kPoseLazar, 1, z.gun_bone, both, at, 1.0f);
+}
+
+// The muzzle and the gun's line in the car's own space.
+void LazarGunLine(const LazarState& z, float (&muzzle)[3], float (&dir)[3]) {
+  const float yr = z.yaw * 3.14159265f / 180.0f, pr = z.pitch * 3.14159265f / 180.0f;
+  const float cy = std::cos(yr), sy = std::sin(yr), cp = std::cos(pr), sp = std::sin(pr);
+  // (relative to the ring: the trunnions, then the barrel pitched; turned with the turret)
+  const float q[3] = {z.gun_hinge[0] - z.turret_hinge[0],
+                      z.gun_hinge[1] - z.turret_hinge[1] + kLazarBarrel * cp,
+                      z.gun_hinge[2] - z.turret_hinge[2] + kLazarBarrel * sp};
+  muzzle[0] = z.turret_hinge[0] + q[0] * cy - q[1] * sy;
+  muzzle[1] = z.turret_hinge[1] + q[0] * sy + q[1] * cy;
+  muzzle[2] = z.turret_hinge[2] + q[2];
+  dir[0] = -cp * sy;
+  dir[1] = cp * cy;
+  dir[2] = sp;
+}
+
+// Where the camera looks, relative to the car: degrees left of its nose,
+// and up from level.
+std::optional<std::pair<float, float>> CameraAim(PPCContext& ctx, uint8_t* base, uint32_t car) {
+  const auto cam = Invoke(ctx, base, "GET_GAME_CAM", {0}, 0);
+  if (!cam || !cam->words[0])
+    return std::nullopt;
+  const auto rot = Invoke(ctx, base, "GET_CAM_ROT", {cam->words[0], 0, 0, 0}, 1, 0, 3);
+  const auto heading = Invoke(ctx, base, "GET_CAR_HEADING", {car, 0}, 1);
+  if (!rot || !heading)
+    return std::nullopt;
+  const float pitch = rot->f(0), yaw = rot->f(2) - heading->f(0);
+  if (!std::isfinite(pitch) || !std::isfinite(yaw))
+    return std::nullopt;
+  return std::pair{std::remainder(yaw, 360.0f), pitch};
+}
+
+void ShellBurst(PPCContext& ctx, uint8_t* base, const float p[3]) {
+  // type 0 (grenade): a shell's burst, smaller than the missiles'
+  Invoke(ctx, base, "ADD_EXPLOSION", {Bits(p[0]), Bits(p[1]), Bits(p[2]), 0, Bits(0.9f), 1, 0, Bits(0.35f)});
+}
+
+void FireLazar(PPCContext& ctx, uint8_t* base, LazarState& z, State& s) {
+  float muzzle[3], line[3];
+  LazarGunLine(z, muzzle, line);
+  float ahead[3];
+  for (int a = 0; a < 3; ++a)
+    ahead[a] = muzzle[a] + line[a] * 100.0f;
+  const auto from = CarPoint(ctx, base, z.car, muzzle), far_point = CarPoint(ctx, base, z.car, ahead);
+  if (!from || !far_point)
+    return;
+  float dir[3], len = 0;
+  for (int a = 0; a < 3; ++a) {
+    dir[a] = (*far_point)[a] - (*from)[a];
+    len += dir[a] * dir[a];
+  }
+  len = std::sqrt(len);
+  if (!(len > 1.0f))
+    return;
+  for (auto& c : dir)
+    c /= len;
+  // the round down the barrel (people and cars hit at once)
+  const float out[3] = {(*from)[0] + dir[0] * 0.8f, (*from)[1] + dir[1] * 0.8f, (*from)[2] + dir[2] * 0.8f};
+  const float to[3] = {(*from)[0] + dir[0] * 400.0f, (*from)[1] + dir[1] * 400.0f, (*from)[2] + dir[2] * 400.0f};
+  Invoke(ctx, base, "FIRE_SINGLE_BULLET",
+         {Bits(out[0]), Bits(out[1]), Bits(out[2]), Bits(to[0]), Bits(to[1]), Bits(to[2]), 150});
+  // the flash, along the barrel
+  const float flash_at[3] = {muzzle[0] + line[0] * 0.3f, muzzle[1] + line[1] * 0.3f, muzzle[2] + line[2] * 0.3f};
+  const auto flashed = Invoke(ctx, base, "TRIGGER_PTFX_ON_VEH",
+                              {0, z.car, Bits(flash_at[0]), Bits(flash_at[1]), Bits(flash_at[2]), Bits(z.pitch), 0,
+                               Bits(z.yaw), Bits(2.6f)},
+                              -1, 0, 1, 0, "muz_machine");
+  LazarCannonSound();
+  // the shell: the physics flies it out of the muzzle
+  Shell* slot = nullptr;
+  for (auto& sh : z.shells)
+    if (!sh.live) {
+      slot = &sh;
+      break;
+    }
+  const uint32_t hash = ModelHash(kRocketModel);
+  const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+  uint32_t object = 0;
+  if (slot && loaded && loaded->r0()) {
+    Shell& sh = *slot;
+    sh = {};
+    for (int a = 0; a < 3; ++a) {
+      sh.dir[a] = dir[a];
+      sh.origin[a] = sh.start[a] = sh.pos[a] = (*from)[a] + dir[a] * 1.5f;
+    }
+    sh.speed = kLazarShellSpeed;
+    const auto obj =
+        Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits(sh.pos[0]), Bits(sh.pos[1]), Bits(sh.pos[2]), 0, 1}, 4);
+    if (obj && obj->words[0]) {
+      object = sh.object = obj->words[0];
+      sh.live = true;
+      sh.fired = NowMs();
+      PointObjectAlong(ctx, base, sh.object, sh.dir);
+      Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {sh.object, 1});
+      Invoke(ctx, base, "SET_OBJECT_COLLISION", {sh.object, 1});
+      Invoke(ctx, base, "SET_OBJECT_INITIAL_VELOCITY",
+             {sh.object, Bits(dir[0] * sh.speed), Bits(dir[1] * sh.speed), Bits(dir[2] * sh.speed)});
+    }
+  }
+  ++z.shots;
+  if (z.shot_log < 6) {
+    ++z.shot_log;
+    REXLOG_INFO("gta4-trainer: Lazar 3 cannon fired (turret {:.0f}, gun {:.0f} degrees; flash {}, shell {:08X})",
+                z.yaw, z.pitch, flashed && flashed->r0() ? "started" : "not started", object);
+  }
+  (void)s;
+}
+
+// Every frame while shells fly (also after the player has left the Lazar).
+void UpdateShells(PPCContext& ctx, uint8_t* base, LazarState& z, float dt) {
+  const uint64_t now = NowMs();
+  for (auto& sh : z.shells) {
+    if (!sh.live)
+      continue;
+    ++sh.frames;
+    if (sh.physics) {
+      if (const auto at = Invoke(ctx, base, "GET_OBJECT_COORDINATES", {sh.object, 0, 0, 0}, 1, 0, 3))
+        for (int a = 0; a < 3; ++a)
+          sh.pos[a] = at->f(a);
+      float moved = 0;
+      for (int a = 0; a < 3; ++a)
+        moved += (sh.pos[a] - sh.origin[a]) * (sh.pos[a] - sh.origin[a]);
+      if (sh.frames == 5 && moved < 4.0f) {  // the physics did not take it: flown by hand
+        sh.physics = false;
+        Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {sh.object, 1});
+        Invoke(ctx, base, "SET_OBJECT_COLLISION", {sh.object, 0});
+      }
+    }
+    if (sh.physics) {
+      float along = 0;
+      for (int a = 0; a < 3; ++a)
+        along += (sh.pos[a] - sh.start[a]) * sh.dir[a];
+      float v[3];
+      for (int a = 0; a < 3; ++a)
+        v[a] = sh.dir[a] * sh.speed + (sh.start[a] + sh.dir[a] * along - sh.pos[a]) * 6.0f;
+      Invoke(ctx, base, "SET_OBJECT_INITIAL_VELOCITY", {sh.object, Bits(v[0]), Bits(v[1]), Bits(v[2])});
+    } else {
+      for (int a = 0; a < 3; ++a)
+        sh.pos[a] += sh.dir[a] * sh.speed * dt;
+      Invoke(ctx, base, "SET_OBJECT_COORDINATES", {sh.object, Bits(sh.pos[0]), Bits(sh.pos[1]), Bits(sh.pos[2])});
+    }
+    float d2 = 0;
+    for (int a = 0; a < 3; ++a)
+      d2 += (sh.pos[a] - sh.origin[a]) * (sh.pos[a] - sh.origin[a]);
+    const float travelled = std::sqrt(d2);
+    const char* hit = nullptr;
+    if (sh.physics && !sh.armed && travelled > 4.0f) {
+      Invoke(ctx, base, "SET_OBJECT_RECORDS_COLLISIONS", {sh.object, 1});
+      sh.armed = true;
+    } else if (sh.physics && sh.armed) {
+      const auto c = Invoke(ctx, base, "HAS_OBJECT_COLLIDED_WITH_ANYTHING", {sh.object});
+      if (c && c->r0())
+        hit = "something";
+    }
+    if (!hit) {
+      const auto gz = GroundZ(ctx, base, sh.pos[0], sh.pos[1], sh.pos[2] + 2.0f);
+      if (gz && sh.pos[2] <= *gz + 0.15f)
+        hit = "the ground";
+    }
+    if (!hit && travelled > 5.0f) {
+      const auto near = Invoke(ctx, base, "GET_CLOSEST_CAR",
+                               {Bits(sh.pos[0]), Bits(sh.pos[1]), Bits(sh.pos[2]), Bits(2.6f), 0, 70});
+      if (near && near->r0() && near->r0() != z.car)
+        hit = "a vehicle";
+    }
+    const bool spent = travelled > 450.0f || now - sh.fired > 4000 || !std::isfinite(sh.pos[2]);
+    if (!hit && !spent)
+      continue;
+    if (hit && std::isfinite(sh.pos[2]))
+      ShellBurst(ctx, base, sh.pos);
+    if (z.burst_log < 6) {
+      ++z.burst_log;
+      REXLOG_INFO("gta4-trainer: Lazar 3 shell {} after {:.0f} m ({})", hit ? "hit" : "spent", travelled,
+                  hit ? hit : "out of range");
+    }
+    DeleteObject(ctx, base, sh.object);
+    sh.live = false;
+  }
+}
+
+// Every frame in a Lazar (a look a few times a second otherwise, and while
+// its shells fly). Returns the buttons it keeps from the game: L1.
+uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons) {
+  auto& z = g_lazar;
+  const uint64_t now = NowMs();
+  const float dt = z.last_ms ? std::clamp(float(now - z.last_ms) / 1000.0f, 0.0f, 0.05f) : 0.0f;
+  z.last_ms = now;
+  UpdateShells(ctx, base, z, dt);
+  if (!z.in_car && now < z.next_probe)
+    return 0;
+  z.next_probe = now + 300;
+  static const uint32_t kModel = ModelHash("LAZAR3");
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  if (!vehicle.car || vehicle.model != kModel) {
+    if (z.in_car)
+      LazarServoSound(0.0f);
+    if (z.model_requested && !LazarShellsLive()) {
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
+      z.model_requested = false;
+    }
+    z.in_car = false;
+    return 0;
+  }
+  if (!z.in_car || z.car != *vehicle.car) {
+    if (z.car != *vehicle.car) {
+      z.yaw = z.pitch = 0.0f;  // a Lazar not met before: its turret dead ahead
+      z.posed_yaw = z.posed_pitch = 999.0f;
+      z.car = *vehicle.car;
+    }
+    PrepareLazar(ctx, base, z.car, true);
+    if (!z.model_requested) {
+      Invoke(ctx, base, "REQUEST_MODEL", {ModelHash(kRocketModel)});
+      z.model_requested = true;
+    }
+    z.next_shot = now + 400;  // (no round from a press that got the player in)
+  }
+  z.in_car = true;
+  // The camera's line, the gun a little above it (the chase camera looks
+  // down on the car), within the gun's travel.
+  float want_yaw = z.yaw, want_pitch = z.pitch;
+  if (const auto aim = CameraAim(ctx, base, z.car)) {
+    want_yaw = aim->first;
+    want_pitch = std::clamp(aim->second + kLazarAimLift, kLazarPitchMin, kLazarPitchMax);
+    if (z.aim_log < 3 && now >= z.next_pose) {
+      ++z.aim_log;
+      REXLOG_INFO("gta4-trainer: Lazar 3 aim: camera {:.1f} degrees from the nose, {:.1f} up", aim->first,
+                  aim->second);
+    }
+  }
+  const float yaw_step = std::clamp(std::remainder(want_yaw - z.yaw, 360.0f), -kLazarYawRate * dt, kLazarYawRate * dt);
+  const float pitch_step = std::clamp(want_pitch - z.pitch, -kLazarPitchRate * dt, kLazarPitchRate * dt);
+  z.yaw = std::remainder(z.yaw + yaw_step, 360.0f);
+  z.pitch += pitch_step;
+  const float slew = dt > 0.0f ? std::max(std::fabs(yaw_step) / (kLazarYawRate * dt),
+                                          std::fabs(pitch_step) / (kLazarPitchRate * dt))
+                               : 0.0f;
+  LazarServoSound(slew > 0.05f ? std::min(1.0f, slew) : 0.0f);
+  if (std::fabs(std::remainder(z.yaw - z.posed_yaw, 360.0f)) > 0.05f || std::fabs(z.pitch - z.posed_pitch) > 0.05f ||
+      now >= z.next_pose) {
+    PoseTurret(ctx, base, z, z.car);
+    z.posed_yaw = z.yaw;
+    z.posed_pitch = z.pitch;
+    z.next_pose = now + 500;
+  }
+  if ((buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) && now >= z.next_shot && !s.open) {
+    z.next_shot = now + kLazarShotMs;
+    FireLazar(ctx, base, z, s);
+  }
+  return X_INPUT_GAMEPAD_LEFT_SHOULDER;
 }
 
 // Every frame in the car, and while its voice still sounds after getting
@@ -3865,6 +4294,15 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
   if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {*vehicle.car, 0}, 1))
     speed = std::fabs(v->f(0));
   const float throttle = pad.right_trigger / 255.0f;
+  // A truck's air brakes let their pressure go once it has stopped.
+  if (e.air_brakes) {
+    if (speed > 3.0f) {
+      e.rolling = true;
+    } else if (e.rolling && speed < 0.4f) {
+      e.rolling = false;
+      synth.AirBrake();
+    }
+  }
   // Five gears: up near the limit, down when the revs fall low.
   if (speed > e.gear_top[size_t(e.gear)] * 0.94f && e.gear < 4)
     ++e.gear;
@@ -4679,6 +5117,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool gadgets_due = (s.gadgets && (s_in_batmobile || now >= s_next_gadget_look)) || GadgetsBusy();
   const bool canopy_due = g_have_batmobile && (CanopyBusy(g_canopy) || now >= g_canopy.next_probe);
   const bool jet_canopy_due = g_have_f16 && (CanopyBusy(g_jet_canopy) || now >= g_jet_canopy.next_probe);
+  const bool lazar_ramps_due = g_have_lazar && (CanopyBusy(g_lazar_ramps) || now >= g_lazar_ramps.next_probe);
+  const bool lazar_due = g_have_lazar && (g_lazar.in_car || LazarShellsLive() || now >= g_lazar.next_probe);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
                                                    now >= g_bat_engine.next_probe);
   const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
@@ -4689,13 +5129,16 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool nexus_engine_due = engine_due(g_have_nexus, g_nexus_engine);
   const bool arbiter_engine_due = engine_due(g_have_arbiter, g_arbiter_engine);
   const bool dominator_engine_due = engine_due(g_have_dominator, g_dominator_engine);
+  const bool lazar_engine_due = engine_due(g_have_lazar, g_lazar_engine);
+  const bool gauntlet_engine_due = engine_due(g_have_gauntlet, g_gauntlet_engine);
   const bool any_engine_due = bat_engine_due || deimos_engine_due || nexus_engine_due || arbiter_engine_due ||
-                              dominator_engine_due;
+                              dominator_engine_due || lazar_engine_due || gauntlet_engine_due;
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
       !jet_canopy_due && !teleport_due && !any_engine_due && s.pending_model < 0 && !jet_due && !rain_due &&
-      !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && g_addons_probed)
+      !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
+      g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -4734,9 +5177,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_nexus = installed("NEXUS");
     g_have_arbiter = installed("ARBITERX");
     g_have_dominator = installed("DOM645T");
+    g_have_lazar = installed("LAZAR3");
+    g_have_gauntlet = installed("GAUNTLETC");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}, Nexus {}, "
-                "Arbiter X {}",
-                g_have_batmobile, g_have_f16, g_have_deimos, g_have_dominator, g_have_nexus, g_have_arbiter);
+                "Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}",
+                g_have_batmobile, g_have_f16, g_have_deimos, g_have_dominator, g_have_nexus, g_have_arbiter,
+                g_have_lazar, g_have_gauntlet);
   }
 
   bool acted = false;
@@ -4790,6 +5236,11 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   if (jet_canopy_due)
     vehicle_mask |= Canopy(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), kJetCanopy,
                            g_jet_canopy);
+  if (lazar_ramps_due)
+    vehicle_mask |= Canopy(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), kLazarRamps,
+                           g_lazar_ramps);
+  if (lazar_due)
+    vehicle_mask |= LazarTurret(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed));
   if (any_engine_due) {
     DrivePad pad;
     {
@@ -4806,6 +5257,10 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       CarEngine(ctx, base, game, pad, g_arbiter_engine, 0.0f);
     if (dominator_engine_due)
       CarEngine(ctx, base, game, pad, g_dominator_engine, 0.0f);
+    if (lazar_engine_due)
+      CarEngine(ctx, base, game, pad, g_lazar_engine, 0.0f);
+    if (gauntlet_engine_due)
+      CarEngine(ctx, base, game, pad, g_gauntlet_engine, 0.0f);
   }
   if (jet_due) {
     DrivePad pad;

@@ -1,0 +1,1 @@
+lazar3, lazar3, car, LAZAR3, LAZAR3, VEH@VAN, NULL, 0, 10, 0.3552, 0.3552, 0.3, 2, 1.5, 0, noboot+big+avoidturns+truckfirefx+truckenginefx

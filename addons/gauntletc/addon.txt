@@ -1,0 +1,4 @@
+# Bravado Gauntlet Classic (model by the Vanillaworks Team, ported to IV by Milcin), converted for the 360 build
+model=gauntletc
+donor=banshee
+template=banshee

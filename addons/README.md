@@ -12,6 +12,8 @@ trainer's **Car Spawning** list.
 | `dom645t/` | Vapid Dominator 645 (johndoe968, Rodger Dodger, ported by Milcin) | Vapid Dominator 645: its own engine |
 | `nexus/` | Dinka Nexus (IGNO, ported by Milcin) | Dinka Nexus: gullwing doors, pop-up lamps on d-pad left, its own engine |
 | `arbiterx/` | Imponte Arbiter X (johndoe968, ported by Milcin) | Imponte Arbiter X: its own engine |
+| `lazar3/` | Lazar 3 armed (Grom, SkylineGTRFreak, ported by Milcin) | Lazar 3 (armed): turret on the camera, cannon on L1, hydraulic side ramps, its own engine |
+| `gauntletc/` | Bravado Gauntlet Classic (Vanillaworks, ported by Milcin) | Bravado Gauntlet Classic: its own engine |
 
 Add-on cars are kept out of traffic: nobody else drives them, they only
 appear when you spawn them.

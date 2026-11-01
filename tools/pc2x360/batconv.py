@@ -155,6 +155,40 @@ def segment_chunks(flags, physical=True):
 # included, and the page count has 11 bits (Rockstar's own files go past 63).
 MIN_PHYSICAL_PAGE = 16384      # 256 KiB chunks, the stock cars' size
 MAX_PHYSICAL_CHUNKS = 100
+# Biggest vertex buffer one converted geometry keeps. A PC mod's single
+# geometry can hold far more (the Lazar 3's hull: 29,795 vertices, 1.9 MiB,
+# which alone forced 2 MiB chunks); a bigger one is drawn as several
+# geometries, so the segment still loads in the stock cars' chunk sizes.
+MAX_VERTEX_BYTES = 224 << 10
+
+
+def split_geometry(c, limit=MAX_VERTEX_BYTES):
+    """A converted geometry (Converter.convert_geometry) as parts whose vertex
+    data fit `limit` bytes: its triangles in order, each part holding the
+    vertices its triangles use (in first-use order) with the same layout,
+    declaration and bone table. One part when it already fits."""
+    if c['vbytes'] <= limit:
+        return [c]
+    stride, most = c['stride'], limit // c['stride']
+    idx = struct.unpack('>%dH' % c['icount'], c['idata'])
+    parts, cur, remap = [], [], {}
+
+    def close():
+        verts = sorted(remap, key=remap.get)
+        vdata = b''.join(c['vdata'][v * stride:(v + 1) * stride] for v in verts)
+        idata = struct.pack('>%dH' % len(cur), *cur)
+        parts.append(dict(c, vcount=len(verts), vdata=vdata, vbytes=len(vdata), icount=len(cur),
+                          idata=idata, ibytes=len(idata), bones=list(c['bones'])))
+
+    for t in range(0, len(idx), 3):
+        tri = idx[t:t + 3]
+        if len(remap) + len(set(v for v in tri if v not in remap)) > most:
+            close()
+            cur, remap = [], {}
+        for v in tri:
+            cur.append(remap.setdefault(v, len(remap)))
+    close()
+    return parts
 
 
 def pack_physical(objects, fixed_end=0, fixed_pieces=(), max_chunks=MAX_PHYSICAL_CHUNKS):
@@ -1313,8 +1347,14 @@ class Converter:
                 smap = [self.d.u16(smap_p + 2 * k) for k in range(len(gs))]
                 geoms, shaders = [], []
                 for g, si in zip(gs, smap):
-                    geoms.append(self.convert_geometry(rsc5.read_geometry(self.d, g), self.shader_usage[si]))
-                    shaders.append(si)
+                    whole = self.convert_geometry(rsc5.read_geometry(self.d, g), self.shader_usage[si])
+                    parts = split_geometry(whole)
+                    if len(parts) > 1:
+                        self.log('geometry of %d vertices (%d KiB) drawn as %d parts of up to %d vertices'
+                                 % (whole['vcount'], whole['vbytes'] >> 10, len(parts),
+                                    max(p['vcount'] for p in parts)))
+                    geoms += parts
+                    shaders += [si] * len(parts)
                 lod.append((geoms, shaders))
             out.append(lod)
         return out
@@ -1413,6 +1453,33 @@ def linear_texture(src):
     return fmt, bpp, dxt.encode_dxt5(raw, w, h), 'DXT5 (from %s)' % kind
 
 
+# Biggest texture side kept. A 2048x2048 DXT5 texture is 4 MiB, one load
+# chunk the streaming heap must find whole (see MIN_PHYSICAL_PAGE); a bigger
+# texture starts at its first mip level that fits instead (the same picture at
+# a quarter of the memory per level dropped). The PC data holds the levels
+# one after another, each tightly packed.
+MAX_TEXTURE_SIDE = 1024
+
+
+def fit_texture(src, side=MAX_TEXTURE_SIDE):
+    """`src` (a pc_textures entry), or its first level no wider or taller
+    than `side`, as an entry of its own (label 'from' says what it was)."""
+    w, h, levels, data = src['w'], src['h'], src['levels'], src['data']
+    if src['fmt'] in UNCOMPRESSED:
+        size = lambda w, h: w * h * UNCOMPRESSED[src['fmt']][1]  # noqa: E731
+    elif src['fmt'] in xenos.FORMATS:
+        size = lambda w, h: max(1, w // 4) * max(1, h // 4) * xenos.FORMATS[src['fmt']][1]  # noqa: E731
+    else:
+        return src
+    dropped = 0
+    while max(w, h) > side and levels > 1 and min(w, h) >= 8:
+        data += size(w, h)
+        w, h, levels, dropped = w // 2, h // 2, levels - 1, dropped + 1
+    if not dropped:
+        return src
+    return dict(src, w=w, h=h, levels=levels, data=data, dropped=dropped, source_size=(src['w'], src['h']))
+
+
 def pc_textures(r, dict_off):
     out = {}
     tl = r.vptr(dict_off + 24)
@@ -1458,6 +1525,7 @@ def build_xtd(tmpl, sources, wanted, log=print):
         src = next((s[name] for s in sources if name in s), None)
         if src is None:
             continue
+        src = fit_texture(src)
         w, h = src['w'], src['h']
         bw, bh = max(1, w // 4), max(1, h // 4)
         fmt, bpp, lin, label = linear_texture(src)
@@ -1482,7 +1550,8 @@ def build_xtd(tmpl, sources, wanted, log=print):
         patches.append((d3d, f, len(p_objs)))
         p_objs.append((tiled, 0x1000))
         entries.append((joaat(name), info))
-        added.append('%s %dx%d %s' % (name, w, h, src['fmt']))
+        added.append('%s %dx%d %s%s' % (name, w, h, src['fmt'],
+                                        ' (from %dx%d)' % src['source_size'] if src.get('dropped') else ''))
         have.add(name)
     # Textures the model borrows from another stock car's dictionary (not the
     # shared vehicle pack every car can see) get a plain black stand-in, so

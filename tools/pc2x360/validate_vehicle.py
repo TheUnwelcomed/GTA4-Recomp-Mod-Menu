@@ -120,22 +120,60 @@ def expanded(r, lod, bones):
     return out
 
 
+def runs(xgeoms, dgeoms):
+    """The converted geometries of a LOD grouped per donor geometry. One too
+    big for a load chunk is drawn as consecutive parts (batconv.split_geometry)
+    whose index counts add up to the donor's; the corner check below proves
+    they carry its triangles. None when they do not add up."""
+    out, k = [], 0
+    for dg in dgeoms:
+        run, n = [], 0
+        while n < dg['ib_count'] and k < len(xgeoms):
+            run.append(xgeoms[k])
+            n += xgeoms[k]['ib_count']
+            k += 1
+        if n != dg['ib_count'] or not run:
+            return None
+        out.append(run)
+    return out if k == len(xgeoms) else None
+
+
 def counts(draw, n, res=None, bones=None):
     if res is not None:
         return [(len(expanded(res, lod, bones)), sum(vcount(g) for g, _, _ in expanded(res, lod, bones)))
                 for lod in draw['lods'][:n]]
     return [(sum(len(m['geometries']) for m in lod), sum(vcount(g) for m in lod for g in m['geometries']))
             for lod in draw['lods'][:n]]
+
+
+def joined(xdraw, ddraw, n):
+    """Per converted LOD slot (< n): its donor LOD (the last one repeats), the
+    runs of converted geometries per donor geometry, and (geometry count,
+    vertex count) with split parts counted as their donor geometry."""
+    dl = ddraw['lods']
+    out = []
+    for k, lod in enumerate(xdraw['lods'][:n]):
+        dgs = [g for m in dl[min(k, len(dl) - 1)] for g in m['geometries']] if dl else []
+        rs = runs([g for m in lod for g in m['geometries']], dgs)
+        c = None if rs is None else (len(rs), sum(vcount(r[0]) if len(r) == 1 else vcount(dg) for r, dg in zip(rs, dgs)))
+        out.append((min(k, len(dl) - 1), dgs, rs, c))
+    return out
+
+
 nd = len(dd['lods'])
 dcounts = counts(dd, 3, d, dbones)
+JM, JW = joined(xd, dd, 3), joined(xwheel, dwheel, 2)
+_xc = [c for _, _, _, c in JM]
+_split = sum(len(r) for _, _, rs, _ in JM + JW for r in (rs or []) if len(r) > 1)
 check('main LOD geometry/vertex counts equal donor (%d donor LODs)' % nd,
-      counts(xd, min(nd, 3)) == dcounts[:min(nd, 3)], str(counts(xd, 3)))
+      _xc[:min(nd, 3)] == dcounts[:min(nd, 3)],
+      str(_xc) + ('; %d parts of split geometries counted as their donor geometry' % _split if _split else ''))
 if nd < 3:
-    check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', counts(xd, 3)[2] == dcounts[-1])
+    check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', _xc[2] == dcounts[-1])
 dw = counts(dwheel, 2)
+_wc = [c for _, _, _, c in JW]
 check('wheel LOD geometry/vertex counts equal donor (a missing LOD repeats the last)',
-      counts(xwheel, 2) == [dw[min(k, len(dw) - 1)] for k in range(len(counts(xwheel, 2)))] if dw else
-      counts(xwheel, 2) == [], str(counts(xwheel, 2)))
+      _wc == [dw[min(k, len(dw) - 1)] for k in range(len(_wc))] if dw else _wc == [], str(_wc))
 
 
 # decode every output vertex back and compare with the donor's floats
@@ -161,15 +199,46 @@ def dec_pc(i, b):
     return list(b)
 
 
+def vertex_pairs(run, dg):
+    """[(converted geometry, [(its vertex, the donor vertex it carries)])] for
+    a run of converted geometries standing for donor geometry `dg`. A whole
+    geometry keeps the donor's vertex order (a sample of up to 400 checked);
+    split parts are matched corner by corner with the donor's index list, so a
+    part vertex met at two corners holding different donor vertices, a part
+    vertex no triangle uses, or a corner out of order counts in split_bad."""
+    global split_bad
+    if len(run) == 1:
+        xg = run[0]
+        step = max(1, xg['vertex_count'] // 400)
+        return [(xg, [(v, v) for v in range(0, xg['vertex_count'], step)])]
+    didx = struct.unpack_from('<%dH' % dg['ib_count'], d.phys, dg['ib_data'][1])
+    out, c = [], 0
+    for xg in run:
+        xidx = struct.unpack_from('>%dH' % xg['ib_count'], x.phys, xg['ib_data'][1])
+        m = {}
+        for xv in xidx:
+            if m.setdefault(xv, didx[c]) != didx[c]:
+                split_bad += 1
+            c += 1
+        if sorted(m) != list(range(xg['vertex_count'])):
+            split_bad += 1
+        items = sorted(m.items())
+        out.append((xg, items[::max(1, len(items) // 400)]))
+    return out
+
+
 worst = {}
 bone_bad = 0
-pairs = list(zip([g for lod in xd['lods'][:3] for m in lod for g in m['geometries']],
-                 [e for lod in dd['lods'][:3] for e in expanded(d, lod, dbones)])) + \
-    list(zip([g for lod in xwheel['lods'][:2] for m in lod for g in m['geometries']],
-             [(g, None, []) for lod in dwheel['lods'][:2] for m in lod for g in m['geometries']]))
+split_bad = 0
+shader_split_bad = 0
+pairs = []
+for _J, _draw in ((JM, xd), (JW, xwheel)):
+    for _slot, (_, _dgs, _rs, _) in enumerate(_J):
+        for _r, _dg in zip(_rs or [], _dgs):
+            pairs += [(_xg, _dg, _vm) for _xg, _vm in vertex_pairs(_r, _dg)]
 pose_bad = 0
 uv_fill_bad = 0
-for xg, (dg, pose, dtable) in pairs:
+for xg, dg, vm in pairs:
     u = dg['decl']['usage']
     xu = xg['decl']['usage']
     assert xu & u == u and not (xu & ~u & ~batconv.UV_BITS & 0xFFFF), (hex(xu), hex(u))
@@ -199,23 +268,23 @@ for xg, (dg, pose, dtable) in pairs:
     for xi in xtab[len(dtab):]:  # slots appended for vertices a pivot claims by position
         if xbones[xi] not in PIVOTS:
             bone_bad += 1
-    step = max(1, xg['vertex_count'] // 400)
-    for v in range(0, xg['vertex_count'], step):
+    for xv, dv in vm:
+        xa, da = xb + xv * xs, db + dv * ds
         for i in filled:  # a filled texcoord set repeats texcoord 0
-            if xs and x.phys[xb + v * xs + xat[i]:xb + v * xs + xat[i] + 4] != x.phys[xb + v * xs + xat[6]:xb + v * xs + xat[6] + 4]:
+            if xs and x.phys[xa + xat[i]:xa + xat[i] + 4] != x.phys[xa + xat[6]:xa + xat[6] + 4]:
                 uv_fill_bad += 1
         for (i, xo), (_, do) in zip(xl, dl):
             if i == 0:
-                a = list(struct.unpack_from('>3f', x.phys, xb + v * xs + xo))
+                a = list(struct.unpack_from('>3f', x.phys, xa + xo))
             else:
-                a = dec(i, bytes(x.phys[xb + v * xs + xo:xb + v * xs + xo + 4]))
-            b = dec_pc(i, bytes(d.phys[db + v * ds + do:db + v * ds + do + batconv.SIZE_PC[i]]))
+                a = dec(i, bytes(x.phys[xa + xo:xa + xo + 4]))
+            b = dec_pc(i, bytes(d.phys[da + do:da + do + batconv.SIZE_PC[i]]))
             if i == 2 and SPLIT_RULES and dtab:
                 # each influence: the 360 bone must be the PC bone's own mapping,
                 # or the pivot a conditional source gives this vertex's position
                 dat = dict(dl)
-                pos = struct.unpack_from('<3f', d.phys, db + v * ds + dat[0])
-                wts = list(d.phys[db + v * ds + dat[1]:db + v * ds + dat[1] + 4]) if 1 in dat else [255, 0, 0, 0]
+                pos = struct.unpack_from('<3f', d.phys, da + dat[0])
+                wts = list(d.phys[da + dat[1]:da + dat[1] + 4]) if 1 in dat else [255, 0, 0, 0]
                 err = 0
                 for k in range(4):
                     if not wts[k]:
@@ -231,6 +300,18 @@ for xg, (dg, pose, dtable) in pairs:
             else:
                 err = max(abs(p - q) for p, q in zip(a, b))
             worst[i] = max(worst.get(i, 0), err)
+# split parts: the donor geometry's shader on every part
+for _J, _draw in ((JM, xd), (JW, xwheel)):
+    for (_, _dgs, _rs, _), _xlod in zip(_J, _draw['lods']):
+        _sm = [x.u16(x.vptr(m['off'] + 16) + 2 * k) for m in _xlod for k in range(len(m['geometries']))]
+        _k = 0
+        for _r in _rs or []:
+            if len(set(_sm[_k:_k + len(_r)])) != 1:
+                shader_split_bad += 1
+            _k += len(_r)
+if _split:
+    check('split geometries: parts carry the donor\'s triangles in order, one shader',
+          split_bad == 0 and shader_split_bad == 0, 'bad=%d/%d; %d parts' % (split_bad, shader_split_bad, _split))
 names = {0: 'position', 1: 'weights', 2: 'bone indices', 3: 'normal', 4: 'color', 14: 'tangent', 15: 'binormal', 6: 'uv0', 7: 'uv1'}
 check('vertex positions decode exactly to the donor\'s', worst.get(0, 1) == 0)
 check('normals/tangents within packing precision (<= 2/511)',
@@ -277,6 +358,7 @@ for i in range(tn):
     s = src.get(nm) or src_e.get(nm)
     if s is None:
         continue  # a stock FBI texture, kept as-is
+    s = batconv.fit_texture(s)  # past MAX_TEXTURE_SIDE: the first mip level that fits
     d3d = t.vptr(info + 24)
     f = struct.unpack_from('>6I', t.virt, d3d + 28)
     base = ((f[1] >> 12) << 12) & 0x0FFFFFFF

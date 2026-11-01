@@ -81,6 +81,11 @@ struct Physical {
   float valvetrain;                // the valve gear's ticking
   float cam_rpm, cam_gain;         // a second cam profile (VTEC): from cam_rpm, more pulse and intake
   float level;                     // the exhaust's level in the mix
+  // A diesel's: the combustion's knock ringing through the block with each
+  // firing (its strength, the block's ring), and a turbo whistling as the
+  // boost builds (its level, its pitch at full boost).
+  float knock = 0.0f, knock_hz = 0.0f;
+  float turbo = 0.0f, turbo_hz = 0.0f;
 };
 
 // What makes one engine sound like itself.
@@ -166,8 +171,34 @@ constexpr Physical kDeimosEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0, 1
                                  240.0f, 0.8f, 0.65f, 0.7f, 0.25f, -0.3f, 0.25f, -0.3f, 0.4f,
                                  1800.0f, 240.0f, 0.2f, 0.6f, 0.4f, 0.04f, 0.12f, 0.6f, 600.0f,
                                  0.1f, 3000.0f, 0.3f, 0.035f, 0.0f, 0.0f, 2.49f};
+// The Bravado Gauntlet Classic: the 1970 Challenger's 440 Six Pack, 7.2
+// litres of cross-plane V8 (Chrysler's firing order 1-8-4-3-6-5-7-2, odd
+// cylinders on the left bank: the GTO's uneven banks, bigger and slower), a
+// long cam (a heavy lope at idle), cast-iron manifolds into long true duals
+// and big, low mufflers (deeper than the Pontiac), and three two-barrel
+// carburettors whose outer pair open when it is floored: the Six Pack's roar.
+constexpr Physical kGauntletEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0, 1, 1, 0, 1, 0, 0, 1},
+                                   268.0f, 1.6f, 0.75f, 2.9f, 0.5f, -0.25f, 0.25f, -0.3f, 0.08f,
+                                   620.0f, 80.0f, 0.35f, 1.2f, 0.38f, 0.06f, 0.65f, 0.3f, 120.0f,
+                                   0.08f, 1600.0f, 0.75f, 0.035f, 0.0f, 0.0f, 1.40f};
+// The Lazar 3: a big turbo-diesel inline six (an armoured carrier's
+// 9-litre class), firing 1-5-3-6-2-4 every 120 degrees into one manifold,
+// the turbo's turbine taking the edge off the pulses, a short run to a big
+// muffler and the stacks at the back; idling at 650, governed at 2,300. Its
+// combustion knocks through the block with every firing (the diesel's
+// clatter, loudest at idle and pulling hard) and the turbo whistles up as
+// the boost builds.
+constexpr Physical kLazarEngine{6, {0, 120, 240, 360, 480, 600}, {0, 0, 0, 0, 0, 0},
+                                250.0f, 2.4f, 0.9f, 1.6f, 0.6f, -0.2f, 0.2f, -0.25f, 0.5f,
+                                430.0f, 70.0f, 0.45f, 1.7f, 0.3f, 0.035f, 0.0f, 0.35f, 85.0f,
+                                0.07f, 1300.0f, 0.0f, 0.03f, 0.0f, 0.0f, 1.15f,
+                                0.22f, 1300.0f, 0.22f, 3800.0f};
 constexpr Character kDeimos{.idle_rpm = 950.0f, .limit_rpm = 7700.0f, .pops = 8.0f, .flare = 2.0f,
                             .physical = &kDeimosEngine};
+constexpr Character kGauntlet{.idle_rpm = 800.0f, .limit_rpm = 5800.0f, .pops = 11.0f, .flare = 1.9f,
+                              .physical = &kGauntletEngine};
+constexpr Character kLazar{.idle_rpm = 650.0f, .limit_rpm = 2300.0f, .pops = 0.0f, .flare = 1.5f,
+                           .physical = &kLazarEngine};
 constexpr Character kArbiter{.idle_rpm = 850.0f, .limit_rpm = 5600.0f, .pops = 10.0f, .flare = 1.9f,
                              .physical = &kArbiterEngine};
 constexpr Character kDominator{.idle_rpm = 750.0f, .limit_rpm = 6500.0f, .pops = 9.0f, .flare = 2.0f,
@@ -223,6 +254,17 @@ class EngineSynth {
     motor_len_x1000_.store(uint32_t(std::clamp(seconds, 0.1f, 2.0f) * 1000.0f), std::memory_order_relaxed);
     motors_.fetch_add(1, std::memory_order_relaxed);
   }
+  // An armoured car's (the Lazar's): its cannon's report; its air brakes
+  // letting the pressure go at a stop; its ramps' hydraulics for `seconds`
+  // (opening: the locks clank first; either way the ramp lands at the end);
+  // its turret's traverse motors (0 still .. 1 slewing flat out, held).
+  void Cannon() { cannons_.fetch_add(1, std::memory_order_relaxed); }
+  void AirBrake() { air_brakes_.fetch_add(1, std::memory_order_relaxed); }
+  void Hydraulic(float seconds, bool opening) {
+    hyd_len_x1000_.store(uint32_t(std::clamp(seconds, 0.2f, 4.0f) * 1000.0f), std::memory_order_relaxed);
+    (opening ? hyd_opens_ : hyd_shuts_).fetch_add(1, std::memory_order_relaxed);
+  }
+  void Servo(float level) { servo_target_.store(std::clamp(level, 0.0f, 1.0f), std::memory_order_relaxed); }
 
   // Stopped, spun down and nothing left ringing: the voice can stop.
   bool Quiet() const { return quiet_.load(std::memory_order_relaxed); }
@@ -254,6 +296,17 @@ class EngineSynth {
       motor_t_ = 0.0f;
       motor_len_ = float(motor_len_x1000_.load(std::memory_order_relaxed)) / 1000.0f;
     }
+    for (uint32_t n = cannons_.exchange(0, std::memory_order_relaxed); n; --n)
+      cannon_t_ = 0.0f, boom_ph_ = 0.0f;
+    for (uint32_t n = air_brakes_.exchange(0, std::memory_order_relaxed); n; --n)
+      air_t_ = 0.0f;
+    for (int open = 0; open < 2; ++open)
+      for (uint32_t n = (open ? hyd_opens_ : hyd_shuts_).exchange(0, std::memory_order_relaxed); n; --n) {
+        hyd_t_ = 0.0f;
+        hyd_len_ = float(hyd_len_x1000_.load(std::memory_order_relaxed)) / 1000.0f;
+        hyd_opening_ = open != 0;
+      }
+    const float servo_target = servo_target_.load(std::memory_order_relaxed);
     // Starting and stopping.
     if (target > 0.0f && !running_) {
       running_ = true;
@@ -369,6 +422,76 @@ class EngineSynth {
         canopy += d;
         door_shut_t_ += dt;
       }
+      // ---- an armoured car's cannon: the muzzle's crack, the blast's boom
+      // falling in pitch with its body, the rumble rolling off, the breech
+      // clanking the next round in
+      if (cannon_t_ < 0.7f) {
+        const float t = cannon_t_;
+        boom_ph_ = Wrap(boom_ph_ + (36.0f + 74.0f * std::exp(-t / 0.035f)) * dt);
+        float d = Sin(boom_ph_) * 0.42f * std::exp(-t / 0.10f) * std::min(1.0f, t * 2000.0f);
+        d += crack_hi_.Bandpass(Noise(), 3.14159265f * 2600.0f / kRate, 0.7f) * 1.5f * std::exp(-t / 0.005f);
+        d += blast_lp_.Lowpass(Noise(), 3.14159265f * 380.0f / kRate, 0.9f) * 2.8f * std::exp(-t / 0.045f);
+        d += rumble_lp_tail_.Lowpass(Noise(), 3.14159265f * 140.0f / kRate, 0.9f) * 2.2f * std::exp(-t / 0.22f) *
+             std::min(1.0f, t * 40.0f);
+        if (t > 0.085f)
+          d += breech_bp_.Bandpass(Noise(), 3.14159265f * 1700.0f / kRate, 1.3f) * 0.45f *
+               std::exp(-(t - 0.085f) / 0.012f);
+        canopy += d;
+        cannon_t_ += dt;
+      }
+      // ---- air brakes at a stop: the valve's pop, then the pressure's hiss
+      if (air_t_ < 1.0f) {
+        const float t = air_t_;
+        const float env = std::min(1.0f, t * 300.0f) * std::exp(-t / 0.28f);
+        float d = (brake_bp_.Bandpass(Noise(), 3.14159265f * 4200.0f / kRate, 0.9f) * 0.55f +
+                   brake_lp_.Lowpass(Noise(), 3.14159265f * 9000.0f / kRate, 0.8f) * 0.12f) * env;
+        if (t < 0.012f)
+          d += pop_bp_.Bandpass(Noise(), 3.14159265f * 900.0f / kRate, 1.0f) * 0.6f * (1.0f - t / 0.012f);
+        canopy += d;
+        air_t_ += dt;
+      }
+      // ---- ramp hydraulics: the pump's strained whine rising with the
+      // pressure, the oil rushing through the valves; opening, the locks
+      // clank first; at the end the ramp lands (on its stop out, home in its
+      // frame shut)
+      if (hyd_t_ < hyd_len_) {
+        const float t = hyd_t_, u = t / hyd_len_;
+        const float env = std::min(1.0f, t * 12.0f) * std::min(1.0f, (hyd_len_ - t) * 10.0f);
+        pump_ph_ = Wrap(pump_ph_ + (310.0f + 60.0f * u) * dt);
+        const float whine =
+            Sin(pump_ph_) + 0.45f * Sin(2.0f * pump_ph_) + 0.25f * Sin(3.0f * pump_ph_) + 0.12f * Sin(5.0f * pump_ph_);
+        float d = whine * 0.03f * env;
+        d += fluid_bp_.Bandpass(Noise(), 3.14159265f * 1500.0f / kRate, 1.0f) * 0.1f * env;
+        if (hyd_opening_ && t < 0.25f) {
+          d += lock_bp_.Bandpass(Noise(), 3.14159265f * 1900.0f / kRate, 1.2f) * 0.5f * std::exp(-t / 0.012f);
+          if (t > 0.09f)
+            d += lock2_bp_.Bandpass(Noise(), 3.14159265f * 1300.0f / kRate, 1.2f) * 0.35f *
+                 std::exp(-(t - 0.09f) / 0.015f);
+        }
+        canopy += d;
+        hyd_t_ += dt;
+        if (hyd_t_ >= hyd_len_)
+          land_t_ = 0.0f, land_ph_ = 0.0f;
+      }
+      if (land_t_ < 0.3f) {
+        const float t = land_t_;
+        land_ph_ = Wrap(land_ph_ + (46.0f + 30.0f * std::exp(-t / 0.02f)) * dt);
+        canopy += (Sin(land_ph_) * 0.32f * std::exp(-t / 0.07f) * std::min(1.0f, t * 1500.0f) +
+                   land_lp_.Lowpass(Noise(), 3.14159265f * 260.0f / kRate, 1.0f) * 1.6f * std::exp(-t / 0.04f) +
+                   land_bp_.Bandpass(Noise(), 3.14159265f * 900.0f / kRate, 1.4f) * 0.45f * std::exp(-t / 0.02f)) *
+                  (hyd_opening_ ? 0.75f : 1.0f);
+        land_t_ += dt;
+      }
+      // ---- a turret's traverse: the motors' whine rising with the slew,
+      // the gear ring's whine over it
+      servo_ += (servo_target - servo_) * 15.0f * dt;
+      if (servo_ > 1e-3f) {
+        servo_ph_ = Wrap(servo_ph_ + (180.0f + 240.0f * servo_) * dt);
+        ring_ph_ = Wrap(ring_ph_ + (1400.0f + 900.0f * servo_) * dt);
+        const float buzz = Sin(servo_ph_) + 0.5f * Sin(2.0f * servo_ph_) + 0.3f * Sin(4.0f * servo_ph_);
+        canopy += (servo_bp_.Bandpass(buzz, 3.14159265f * 520.0f / kRate, 0.8f) * 0.07f + Sin(ring_ph_) * 0.007f) *
+                  std::min(1.0f, servo_ * 3.0f);
+      }
 
       float l = eng_l * vol_ + canopy;
       float rr = eng_r * vol_ + canopy;
@@ -381,7 +504,9 @@ class EngineSynth {
     rpm_out_.store(rpm_, std::memory_order_relaxed);
     quiet_.store(!running_ && rpm_ < 0.002f && turb_ < 0.01f && boost_ < 0.01f && crack_ < 1e-3f &&
                      hiss_t_ >= hiss_len_ && click_ < 1e-3f && clunk_ < 1e-3f && motor_t_ >= motor_len_ &&
-                     door_open_t_ >= 0.12f && door_shut_t_ >= 0.25f,
+                     door_open_t_ >= 0.12f && door_shut_t_ >= 0.25f && cannon_t_ >= 0.7f && air_t_ >= 1.0f &&
+                     hyd_t_ >= hyd_len_ && land_t_ >= 0.3f && servo_ < 1e-3f && servo_target < 1e-3f &&
+                     spool_ < 0.02f,
                  std::memory_order_relaxed);
   }
 
@@ -543,6 +668,10 @@ class EngineSynth {
     q.decay = std::exp(-kDt / (blow * (1.0f - 0.25f * cam)));
     q.wait = int(Uniform() * (0.025f + 0.05f * p.lope * idle) * period * kRate);
     Spawn(q);
+    // a diesel's combustion knocks: hardest at idle and pulling hard
+    if (p.knock > 0.0f && !cranking)
+      knock_ = std::max(knock_, p.knock * (0.45f + 0.55f * load) * (1.15f - 0.55f * r) *
+                                    (0.85f + 0.3f * Uniform()));
     Pulse in;
     in.amp = (cranking ? 0.1f : 0.25f + 0.75f * throttle_) * (1.0f + p.cam_gain * cam);
     in.inv_len = 6.0f * rpm / 230.0f;
@@ -669,6 +798,23 @@ class EngineSynth {
       mech = tick_bp_.Bandpass(Noise() * tick_, 3.14159265f * 3500.0f / kRate, 1.4f) * p.valvetrain * 0.1f;
       tick_ *= 0.985f;  // (~1.4 ms)
     }
+    // a diesel's knock: each combustion's hard edge ringing through the block
+    if (knock_ > 1e-4f) {
+      const float g = 3.14159265f * p.knock_hz / kRate;
+      mech += (knock_hi_.Bandpass(Noise(), g, 1.1f) * 0.9f + knock_lo_.Bandpass(Noise(), g * 0.42f, 0.9f) * 0.6f) *
+              knock_ * 0.35f;
+      knock_ *= 0.9875f;  // (~1.7 ms)
+    }
+    // its turbo: the boost building with the load and the revs (lagging,
+    // spinning down slower), a whistle and the compressor's rush
+    if (p.turbo > 0.0f) {
+      const float want = running_ && !cranking ? load * (0.25f + 0.75f * r) : 0.0f;
+      spool_ += (want - spool_) * (want > spool_ ? 0.9f : 0.6f) * dt;
+      const float f = p.turbo_hz * (0.3f + 0.7f * spool_);
+      turbo_ph_ = Wrap(turbo_ph_ + f * (1.0f + 0.003f * rpm_wander_) * dt);
+      const float amp = p.turbo * spool_ * spool_ * 0.012f;
+      mech += Sin(turbo_ph_) * amp + turbo_bp_.Bandpass(Noise(), 3.14159265f * f / kRate, 0.15f) * amp * 2.0f;
+    }
     // the starter: its motor's whir while it turns the engine over
     if (cranking) {
       starter_ph_ = Wrap(starter_ph_ + 190.0f * dt);
@@ -746,6 +892,17 @@ class EngineSynth {
   bool hiss_rising_ = true;
   float motor_t_ = 1.0f, motor_len_ = 0.0f, motor_ph_ = 0, gear_ph_ = 0;
   float door_open_t_ = 1.0f, door_shut_t_ = 1.0f, seal_ph_ = 0, slam_ph_ = 0;
+  // an armoured car's: the cannon, the air brakes, the ramps' hydraulics, the
+  // turret's motors; a diesel's knock and turbo
+  std::atomic<uint32_t> cannons_{0}, air_brakes_{0}, hyd_opens_{0}, hyd_shuts_{0}, hyd_len_x1000_{1500};
+  std::atomic<float> servo_target_{0};
+  float cannon_t_ = 1.0f, boom_ph_ = 0, air_t_ = 1.0f;
+  float hyd_t_ = 1.0f, hyd_len_ = 0.0f, pump_ph_ = 0, land_t_ = 1.0f, land_ph_ = 0;
+  bool hyd_opening_ = false;
+  float servo_ = 0, servo_ph_ = 0, ring_ph_ = 0;
+  float knock_ = 0, spool_ = 0, turbo_ph_ = 0;
+  Svf crack_hi_, blast_lp_, rumble_lp_tail_, breech_bp_, brake_bp_, brake_lp_, pop_bp_, fluid_bp_, lock_bp_,
+      lock2_bp_, land_lp_, land_bp_, servo_bp_, knock_hi_, knock_lo_, turbo_bp_;
   uint32_t seed_ = 0x7F4A7C15u;
   Svf thump_lp_, exhaust_bp_, rumble_lp_, howl_bp_, rasp_l_, rasp_r_, roar_l_, roar_r_, jet_l_, jet_r_, crack_bp_,
       hiss_bp_, click_bp_, clunk_lp_, motor_bp_, door_hi_bp_, door_mid_bp_, door_lo_lp_, slam_bp_, slam_lp_,

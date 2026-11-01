@@ -254,8 +254,26 @@ python3 render_posed.py out/mycar mycar doors.png door_dside_f:z:-60 door_pside_
 ./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd
 ```
 
-`build_bundled.sh <export_dir> <work_dir> <sources_dir> <out_dir>` does the
-whole set for the bundled cars (sources: `<sources>/<model>/<model>.wft/.wtd`).
+`build_bundled.sh <export_dir> <work_dir> <sources_dir> <out_dir> [model ...]`
+does the whole set for the bundled cars, or the ones named (sources:
+`<sources>/<model>/<model>.wft/.wtd`).
+
+A mod that ships its cars inside an IMG archive (most big packs do, with the
+archive's table encrypted like the game's own):
+
+```
+python3 img3.py pack.img aes_key.bin list                     # the archive's items
+python3 img3.py pack.img aes_key.bin extract out car.wft car.wtd
+```
+
+`aes_key.bin` is the game's 32-byte archive key (the one a LibertyRecomp
+install keeps beside the game).
+
+Big PC models: a geometry whose vertices would not fit the stock cars' 256
+KiB load chunks is drawn as several (`split_geometry`: its triangles in
+order, each part with the vertices it uses); `validate_vehicle.py` matches
+the parts back to the donor's geometry corner by corner. A texture larger
+than 1024 px starts from its first mip level that fits (`fit_texture`).
 
 Then add an `addons/mycar/` folder (see `addons/README.md`) and the app
 installs it as a new vehicle.

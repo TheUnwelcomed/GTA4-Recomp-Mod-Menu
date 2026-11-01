@@ -34,7 +34,7 @@ keeps going while you browse.
   long as it's the same kind (anything on wheels for a car or bike, a helicopter
   for a helicopter, a boat for a boat). A mission's own story vehicle is a
   different check and still counts
-- **Car Spawning**: 29 stock cars, bikes and helicopters plus six bundled
+- **Car Spawning**: 29 stock cars, bikes and helicopters plus eight bundled
   **add-on vehicles**, spawned in front of you. Episode-only vehicles are
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
@@ -56,6 +56,12 @@ keeps going while you browse.
   - **Dinka Nexus** (IGNO / Milcin), with gullwing doors that lift as you
     get in and out and pop-up headlights like the Deimos's
   - **Imponte Arbiter X** (johndoe968 / Milcin), with opening doors
+  - **Lazar 3 (armed)** (Grom, SkylineGTRFreak / Milcin), the Serbian
+    Army APC: the turret follows the camera round and the gun its pitch on
+    their motors, L1 fires the cannon (a round down the barrel and a shell
+    that bursts where it lands), and its side ramps fold down on their
+    hydraulics to let you (and a passenger) in and out
+  - **Bravado Gauntlet Classic** (Vanillaworks / Milcin), with opening doors
   - Each car has its own engine, synthesized in the trainer (no recordings):
     the Batmobile's turbine over a V8, the F-16's jet, and for the Deimos,
     the Nexus, the Arbiter X and the Dominator 645 a physically informed
@@ -63,8 +69,9 @@ keeps going while you browse.
     firing in its real order into its bank's exhaust, the pipes' and
     mufflers' own resonances, the intake, the valve gear): a late-70s
     Ferrari's flat-plane V8, the NSX's VTEC V6, the GTO's Ram Air 400, the
-    '65 Mustang's 289. Their doors latch and slam (their game names have no
-    IV sounds)
+    '65 Mustang's 289, the Challenger's 440 Six Pack, and the Lazar's
+    turbo-diesel six (its knock, its turbo, its air brakes). Their doors
+    latch and slam (their game names have no IV sounds)
   - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets.
   The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
@@ -150,6 +157,23 @@ network session.
 
 ## Changes
 
+- **v1.7.20**: the Lazar 3 (armed) and the Bravado Gauntlet Classic added.
+  The Lazar's turret follows the game camera (`GET_GAME_CAM`,
+  `GET_CAM_ROT` against `GET_CAR_HEADING`) at its motors' speeds, the gun
+  pitched on its trunnions and carried round with it (bone poses now turn
+  about Z too, and take a full rotation with a moved hinge); L1 fires its
+  cannon (`FIRE_SINGLE_BULLET` down the barrel, IV's muzzle flash turned
+  with the gun, and a physics shell that bursts where it collides, meets
+  the ground or a car); its side ramps are its doors (the canopy logic,
+  now turning about the car's length and moving two bones). Engines: a
+  turbo-diesel straight six (a diesel's knock through the block, a turbo
+  whistling up with the boost, air brakes hissing at a stop) and the 440
+  Six Pack; the Lazar's cannon, ramp hydraulics and turret motors are
+  synthesized too. Converter: a geometry too big for one load chunk is
+  split into parts (the Lazar's hull, 1.9 MB as one), a texture over
+  1024 px starts from its first mip that fits; `img3.py` lists and
+  extracts GTA IV IMG archives. The first launch exports Niko's model
+  files to `logs/export/playerped` (for an outfit to come).
 - **v1.7.19**: Batmobile passengers through the canopy: someone getting in
   (the player's group following him in, or anyone at the passenger side
   while he sits there, not while he is wanted) is stopped before the game's
@@ -236,7 +260,7 @@ network session.
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
 | `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
-| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's and the Dominator 645's physically informed model) and their canopy, door, gullwing and pop-up lamp sounds (the same way; `tools/car/` renders them) |
+| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's, the Gauntlet's and the Lazar's physically informed model) and their canopy, door, gullwing, pop-up lamp, cannon, ramp and turret sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
@@ -271,6 +295,10 @@ one in `/data/homebrew/` — your installed game, saves and settings stay.
 - **johndoe968** and **Rodger Dodger** (original model) and **Milcin** (IV
   port): the Vapid Dominator 645.
 - **IGNO** (original model) and **Milcin** (IV port): the Dinka Nexus.
+- **Grom** and **SkylineGTRFreak** (original model) and **Milcin** (IV
+  port): the Lazar 3.
+- The **Vanillaworks Team** (original model) and **Milcin** (IV port): the
+  Bravado Gauntlet Classic.
 - **johndoe968** (original model) and **Milcin** (IV port): the Imponte
   Arbiter X.
 

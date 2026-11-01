@@ -1180,6 +1180,59 @@ void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, cons
               out.string(), archives, copied);
 }
 
+// Niko's own model for the converter (logs/export/playerped on the console):
+// the player's ped archive (playerped.rpf, as the disc has it) and the files
+// the installer unpacked from it, to build outfits on (their skeleton and
+// the console's ped shaders). Once per version of this list; nothing over
+// 96 MB is copied.
+void ExportPlayerPed(const fs::path& game, const fs::path& out) {
+  std::error_code ec;
+  constexpr std::string_view kVersion = "playerped v1\n";
+  {
+    std::vector<uint8_t> marker;
+    if (ReadAll(out / "done.txt", marker) && std::string(marker.begin(), marker.end()) == kVersion)
+      return;
+  }
+  std::vector<fs::path> found;
+  for (auto it = fs::recursive_directory_iterator(game, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    if (it.depth() > 8) { it.disable_recursion_pending(); continue; }
+    std::string stem = it->path().stem().string();
+    for (char& c : stem) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (stem == "playerped")
+      found.push_back(it->path());
+  }
+  fs::create_directories(out, ec);
+  std::ofstream listing(out / "found.txt", std::ios::trunc);
+  int copied = 0;
+  uint64_t total = 0;
+  auto copy = [&](const fs::path& from, const std::string& name) {
+    const uint64_t size = SizeOf(from);
+    listing << RelativeTo(from, game.parent_path()) << " " << size << "\n";
+    if (total + size > (96ull << 20))
+      return;
+    if (CopyBytes(from, out / name)) {
+      ++copied;
+      total += size;
+    }
+  };
+  for (const auto& path : found) {
+    std::error_code fec;
+    if (fs::is_regular_file(path, fec)) {
+      copy(path, path.filename().string());
+    } else if (fs::is_directory(path, fec)) {
+      fs::create_directories(out / "files", fec);
+      for (auto it = fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, fec);
+           !fec && it != fs::recursive_directory_iterator(); it.increment(fec))
+        if (it->is_regular_file(fec))
+          copy(it->path(), "files/" + it->path().filename().string());
+    }
+  }
+  std::ofstream(out / "done.txt", std::ios::trunc) << kVersion;
+  REXLOG_INFO("gta4-addons: player model exported to {} ({} places named playerped, {} files, {} bytes)",
+              out.string(), found.size(), copied, total);
+}
+
 fs::path FindGameRoot(const fs::path& user_data_root) {
   std::error_code ec;
   for (const fs::path candidate : {user_data_root, user_data_root.parent_path()}) {
@@ -1739,6 +1792,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
     }
     ExportReference(images.front(), key, app_addons.parent_path() / "logs" / "export", refs);
     ExportGameIndex(game, key, app_addons.parent_path() / "logs" / "export" / "index");
+    ExportPlayerPed(game, app_addons.parent_path() / "logs" / "export" / "playerped");
   }
   std::vector<fs::path> files;
   for (const auto& a : addons) {

@@ -1,0 +1,4 @@
+# Lazar 3 armed (model by Grom and SkylineGTRFreak, ported to IV by Milcin), converted for the 360 build
+model=lazar3
+donor=cavalcade
+template=cavalcade
