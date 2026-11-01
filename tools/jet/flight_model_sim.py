@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The F-16 flight model (src/gta4_trainer.cpp, JetControls) in Python, run
-through a few manoeuvres: takeoff and climb, idle glide, hands-off bank,
+through a few manoeuvres: the launch off the wheels, takeoff and climb, idle glide, hands-off bank,
 pulled turn, stall, afterburner, rudder. Prints speed, climb, bank, heading
 and height every few seconds."""
 import math
@@ -58,6 +58,31 @@ def run(name, secs, ctl, v0=30.0, q0=(0,0,0,1), every=2.0):
             nxt += every
         st = step(st, dt, *ctl(t))
         t += dt
+def launch(name, secs, ctl, every=0.5):
+    """The takeoff (v1.7.17): from the wheels at 38 m/s at least, level, the
+    nose rotating up at kRotate rad/s at least for the first 0.7 s, however
+    gently the stick is pulled (the trainer needs it pulled past 0.4 to
+    launch). Prints the height gained: 4 m is where touchdowns are allowed."""
+    kRotate, kRotateFor = 0.35, 0.7
+    v0 = 38.0
+    auth = min(max((v0 - 12)/(kAuth - 12), 0.2), 1.0)
+    st = dict(q=(0, 0, 0, 1), v=v0, rate=[max(-ctl(0)[1]*0.95*auth, kRotate), 0, 0], pos=[0, 0, 0.0])
+    dt = 1/30; t = 0; nxt = 0; climbed = None
+    print('==', name)
+    while t <= secs:
+        if t >= nxt:
+            f = qrot(st['q'], (0,1,0))
+            print('  t %5.1f  v %5.1f  climb %6.1f deg  height %6.1f' % (t, st['v'], math.degrees(math.asin(max(-1,min(1,f[2])))), st['pos'][2]))
+            nxt += every
+        st = step(st, dt, *ctl(t))
+        if t < kRotateFor:
+            st['rate'][0] = max(st['rate'][0], kRotate)
+        t += dt
+        if climbed is None and st['pos'][2] > 4.0:
+            climbed = t
+    print('  4 m up after %s s' % (None if climbed is None else round(climbed, 2)))
+launch('launch: full pull 1 s then hands off, full power', 4, lambda t: (0, -1 if t < 1.0 else 0, 0, 1.0, 0))
+launch('launch: just past the threshold for 0.3 s then hands off', 4, lambda t: (0, -0.45 if t < 0.3 else 0, 0, 1.0, 0))
 run('takeoff, full dry, pull 1.5 s then hands off', 30, lambda t: (0, -1 if t < 1.5 else 0, 0, 0.85, 0))
 run('cruise 70 m/s, idle, hands off', 40, lambda t: (0, 0, 0, 0.0, 0), v0=70)
 run('roll to ~60 deg bank then hands off, dry 0.7', 16, lambda t: (1 if t < 0.45 else 0, 0, 0, 0.7, 0), v0=60, every=1.0)

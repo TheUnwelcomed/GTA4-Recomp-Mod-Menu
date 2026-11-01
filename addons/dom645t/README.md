@@ -2,8 +2,11 @@
 
 An add-on car on PC, and here too: its own vehicle (`dom645t`), with the
 mod's handling and colour combinations. Spawn **Car Spawning → Vapid
-Dominator 645**. It shows the Banshee's name and has its engine sound, as the
-mod's line chooses.
+Dominator 645**. Its game name is its own (`DOM645T`, which IV has no
+engine sound for), so the engine you hear is the trainer's synthesized one
+(`src/gta4_car_engine.h`: the 1960s pony car's small 289 V8, a milder lope,
+lighter and raspier than the Arbiter X's, revving higher). Up to v1.7.16 it
+borrowed the Banshee's name and engine, as the mod's line chooses.
 
 Built from the mod's *No liveries* version (the livery switching needs
 ZolikaPatch), on the stock **Banshee**, a low two-door like it:

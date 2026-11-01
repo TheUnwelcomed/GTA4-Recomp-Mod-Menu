@@ -187,8 +187,10 @@ std::array g_natives = {
     NativeEntry{"ADD_BLIP_FOR_CAR"}, NativeEntry{"CHANGE_BLIP_COLOUR"}, NativeEntry{"REMOVE_BLIP"},
     // Chaos: raining cars, gravity.
     NativeEntry{"SET_CAR_HEADING"}, NativeEntry{"SET_GRAVITY_OFF"},
-    // Grotti Deimos pop-up headlights (the pods' extra, the lamps).
+    // Deimos and Nexus pop-up headlights (the pods' extra, the lamps); the
+    // Nexus's gullwings follow the game's doors.
     NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"IS_VEHICLE_EXTRA_TURNED_ON"},
+    NativeEntry{"GET_DOOR_ANGLE_RATIO"},
     NativeEntry{"GET_TIME_OF_DAY"},
     NativeEntry{"GET_CURRENT_WEATHER"}, NativeEntry{"FORCE_CAR_LIGHTS"},
     // Bring Your Own Ride: the checks it answers and the vehicle kinds.
@@ -648,10 +650,12 @@ struct State {
   int spawn_top = 0;
   // Toggles.
   // Every option starts off (the menu changes nothing until asked to), but
-  // one: the headlight switch on d-pad left.
+  // the headlight switch on d-pad left and the F-16's flight, which does
+  // nothing outside the jet. (Off, as it was until v1.7.16, every launch
+  // left the jet a car that could not take off until the menu was visited.)
   bool god = false, never_wanted = false, vehicle_god = false, warp_in = false;
   bool gadgets = false;
-  bool jet = false;  // F-16 flight and weapons, active only in the jet
+  bool jet = true;  // F-16 flight and weapons, active only in the jet
   bool raining = false, gravity_off = false;
   bool any_ride = false;     // Bring Your Own Ride: missions take the player's vehicle
   bool popup_auto = false;   // Deimos pop-ups: d-pad left (false) or up with the lights (true)
@@ -741,6 +745,7 @@ uint64_t NowNs() {
 // Which bundled add-ons this install has, looked up once (IS_MODEL_IN_CDIMAGE)
 // so their watchers cost nothing on installs without them.
 bool g_addons_probed = false, g_have_deimos = false, g_have_f16 = false, g_have_batmobile = false;
+bool g_have_nexus = false, g_have_arbiter = false, g_have_dominator = false;
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
 std::atomic<uint32_t> g_pad_adjust{0};
@@ -761,7 +766,7 @@ void Toast(State& s, std::string text, uint64_t ms = 2500) {
 bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_deimos ||
-         g_have_batmobile ||
+         g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator ||
          s.car_lights;
 }
 
@@ -797,8 +802,8 @@ std::vector<Item> PageItems(const State& s) {
                 Action::kToggleGadgets},
                {s.jet ? "F-16 Flight and Weapons: ON" : "F-16 Flight and Weapons: OFF",
                 Action::kToggleJet},
-               {s.popup_auto ? "Deimos Pop-ups: Automatic (with the lights)"
-                             : "Deimos Pop-ups: D-pad Left",
+               {s.popup_auto ? "Deimos/Nexus Pop-ups: Automatic (with the lights)"
+                             : "Deimos/Nexus Pop-ups: D-pad Left",
                 Action::kTogglePopupAuto},
                {s.car_lights ? "Headlights on D-pad Left: ON" : "Headlights on D-pad Left: OFF",
                 Action::kToggleCarLights},
@@ -1323,15 +1328,36 @@ void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const Mode
   rex::FlushLogging();
 }
 
-// The Grotti Deimos's pop-up headlights. The converter hangs both lamp pods
-// (housings, lamps and lenses) on the template's extra_1, placed on their
-// hinge at the back of the pods, flush with the bonnet at rest. The trainer
-// swings that bone the way the game itself poses a bone: the bone's local
-// matrix in the car's live skeleton (what sub_822832E8 hands the game when
-// it hides an extra), a rotation about the car's width, front edge rising.
-// D-pad left in the car raises or lowers them, the headlights following; or
-// they rise whenever IV turns car lights on (night, rain, fog).
+// Bones the trainer poses, a slot per car: the Deimos's pop-up pods, the
+// F-16's landing gear (three bones), the Batmobile's canopy, the Nexus's pods
+// (entry 0) and gullwing doors (entries 1 and 2). The pose last set for each
+// is re-applied by the per-frame hook below (sub_82381FA0), right after the
+// game's own per-frame bone edits for that car.
+enum PoseSlot : int { kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2, kPoseNexus = 3, kPoseSlots = 4 };
+
+// Pop-up headlights: the Grotti Deimos's and the Dinka Nexus's. The converter
+// hangs both lamp pods (housings, lamps and lenses) on the template's
+// extra_1, placed on their hinge at the back of the pods, flush with the
+// bonnet at rest. The trainer swings that bone the way the game itself poses
+// a bone: the bone's local matrix in the car's live skeleton (what
+// sub_822832E8 hands the game when it hides an extra), a rotation about the
+// car's width, front edge rising. Getting in they rise and light, getting out
+// they fold and go out; d-pad left in the car raises or lowers them, the
+// headlights following; or they rise whenever IV turns car lights on (night,
+// rain, fog).
+struct PopupSpec {
+  std::string_view model, label;
+  int slot;          // its pose slot (the pods: entry 0)
+  uint32_t extra;    // the extra whose bone holds the pods
+  float up_degrees;  // how far they swing up
+};
+// The Deimos: ZolikaPatch's angle for the mod on PC. The Nexus: its lamps sit
+// in the pods tipped 30 degrees down, so 30 up faces them forward with the
+// pods' tops level (the mod sets no pop-ups: on PC they stay down).
+constexpr PopupSpec kDeimosPopups{"DEIMOS", "Deimos", kPoseDeimos, 1, 30.0f};
+constexpr PopupSpec kNexusPopups{"NEXUS", "Nexus", kPoseNexus, 1, 30.0f};
 struct PopupState {
+  const PopupSpec* spec;
   uint32_t car = 0;
   bool in_car = false;
   bool swinging = false;  // the pods are on the move (the motor has sounded)
@@ -1340,18 +1366,11 @@ struct PopupState {
   uint16_t prev_buttons = 0;
   uint64_t next_probe = 0, next_check = 0, last_ms = 0, next_write = 0;
 };
-PopupState g_popup;
-void PopupMotorSound(float seconds);  // (with the cars' engines, below)
-constexpr uint32_t kPopupExtra = 1;          // extra_1 holds the pods
-constexpr float kPopupUpDegrees = 30.0f;     // ZolikaPatch's angle for this mod on PC
+PopupState g_popup{&kDeimosPopups}, g_nexus_popup{&kNexusPopups};
+void PopupMotorSound(const PopupSpec& spec, float seconds);  // (with the cars' engines, below)
 constexpr float kPopupDegreesPerSecond = 85.0f;  // up in about a third of a second
 constexpr uint32_t kEntitySkeleton = 0x8217DB60;  // entity -> its live crSkeleton
 
-// Bones the trainer poses: the Deimos's pop-up pods (slot 0), the F-16's
-// landing gear (slot 1, three bones) and the Batmobile's canopy (slot 2). The
-// pose last set for each is
-// re-applied by the per-frame hook below (sub_82381FA0), right after the
-// game's own per-frame bone edits for that car.
 struct BonePose {
   int32_t bone = -1;
   std::array<uint32_t, 16> words{};
@@ -1360,10 +1379,9 @@ struct PosedVehicle {
   uint32_t vehicle = 0, info = 0;
   std::array<BonePose, 4> bones{};
 };
-enum PoseSlot : int { kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2 };
 std::mutex g_pose_mutex;
-std::array<PosedVehicle, 3> g_posed;
-std::array<std::atomic<uint32_t>, 3> g_posed_vehicle{};  // the hook's quick check
+std::array<PosedVehicle, kPoseSlots> g_posed;
+std::array<std::atomic<uint32_t>, kPoseSlots> g_posed_vehicle{};  // the hook's quick check
 
 // Whether a CVehicle is (still) an instance of the model whose info is given.
 bool VehicleIsModel(uint8_t* base, uint32_t vehicle, uint32_t info) {
@@ -1505,9 +1523,8 @@ void ReapplyPoses(PPCContext& ctx, uint8_t* base, uint32_t vehicle) {
   }
 }
 
-bool PosePopupBone(PPCContext& ctx, uint8_t* base, uint32_t handle, float degrees) {
-  static const uint32_t kDeimos = ModelHash("DEIMOS");
-  return PoseExtraBone(ctx, base, handle, kDeimos, kPoseDeimos, 0, kPopupExtra, 0, degrees, 1.0f);
+bool PosePopupBone(PPCContext& ctx, uint8_t* base, const PopupSpec& spec, uint32_t handle, float degrees) {
+  return PoseExtraBone(ctx, base, handle, ModelHash(spec.model), spec.slot, 0, spec.extra, 0, degrees, 1.0f);
 }
 
 void SetPopupLights(PPCContext& ctx, uint8_t* base, uint32_t car, bool up, bool automatic) {
@@ -1541,98 +1558,222 @@ void ShowExtra(PPCContext& ctx, uint8_t* base, uint32_t car, uint32_t extra, boo
   Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, extra, 0u});
 }
 
-// A Deimos just made (or first met): its pods' extra shown, pods down.
-void PreparePopups(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in = false) {
-  ShowExtra(ctx, base, car, kPopupExtra, getting_in);
-  g_popup.car = car;
-  g_popup.up = false;
-  g_popup.angle = 0.0f;
-  g_popup.next_write = 0;
-  PosePopupBone(ctx, base, car, 0.0f);
+// A Deimos or Nexus just made (or first met): its pods' extra shown, pods down.
+void PreparePopups(PPCContext& ctx, uint8_t* base, PopupState& p, uint32_t car, bool getting_in = false) {
+  ShowExtra(ctx, base, car, p.spec->extra, getting_in);
+  p.car = car;
+  p.up = false;
+  p.angle = 0.0f;
+  p.next_write = 0;
+  PosePopupBone(ctx, base, *p.spec, car, 0.0f);
 }
 
-// Every frame in the Deimos (a look a few times a second otherwise). Returns
+// Whether the pods are due a look this frame (in the car, or still folding).
+bool PopupsDue(const PopupState& p, uint64_t now) {
+  return p.in_car || (p.car && p.angle > 0.0f) || now >= p.next_probe;
+}
+
+// Every frame in the car (a look a few times a second otherwise). Returns
 // whether the player is in it with the d-pad switch on (d-pad left is then
 // the pods', not the radio's).
 // Getting in (the car switched on) the pods flip up and the lamps come on;
 // getting out (switched off) they flip down and go out. With the automatic
 // mode they follow the game's headlights instead.
-bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const State& s,
-                 uint16_t buttons) {
-  if (!g_have_deimos)
+bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const State& s, uint16_t buttons,
+                 PopupState& p, bool have) {
+  if (!have)
     return false;
   const uint64_t now = NowMs();
-  const bool folding = !g_popup.in_car && g_popup.car && g_popup.angle > 0.0f;  // still going down
-  if (!g_popup.in_car && !folding && now < g_popup.next_probe)
+  const auto& spec = *p.spec;
+  const bool folding = !p.in_car && p.car && p.angle > 0.0f;  // still going down
+  if (!p.in_car && !folding && now < p.next_probe)
     return false;
-  bool in_car = g_popup.in_car;
-  if (!g_popup.in_car || now >= g_popup.next_check) {
-    g_popup.next_probe = now + 400;
-    g_popup.next_check = now + 250;
-    static const uint32_t kDeimos = ModelHash("DEIMOS");
+  bool in_car = p.in_car;
+  if (!p.in_car || now >= p.next_check) {
+    p.next_probe = now + 400;
+    p.next_check = now + 250;
+    const uint32_t model = ModelHash(spec.model);
     const auto& vehicle = PlayerVehicle(ctx, base, game);
-    in_car = vehicle.car && vehicle.model == kDeimos;
+    in_car = vehicle.car && vehicle.model == model;
     if (!in_car) {
-      if (g_popup.in_car && g_popup.car) {
+      if (p.in_car && p.car) {
         // Switched off: down and out.
-        g_popup.up = false;
-        if (VehicleAddress(base, g_popup.car))
-          Invoke(ctx, base, "FORCE_CAR_LIGHTS", {g_popup.car, 1u});
-        g_popup.last_ms = now;
+        p.up = false;
+        if (VehicleAddress(base, p.car))
+          Invoke(ctx, base, "FORCE_CAR_LIGHTS", {p.car, 1u});
+        p.last_ms = now;
       }
-      g_popup.in_car = false;
-      if (!folding && !(g_popup.car && g_popup.angle > 0.0f))
+      p.in_car = false;
+      if (!folding && !(p.car && p.angle > 0.0f))
         return false;
     } else {
       const uint32_t car = *vehicle.car;
-      if (!g_popup.in_car || g_popup.car != car) {
-        if (g_popup.car != car)
-          PreparePopups(ctx, base, car, true);
+      if (!p.in_car || p.car != car) {
+        if (p.car != car)
+          PreparePopups(ctx, base, p, car, true);
         else  // back in the same car: make sure the pods' extra is still shown
-          ShowExtra(ctx, base, car, kPopupExtra, true);
-        g_popup.prev_buttons = buttons;  // no edge from a button held while getting in
-        g_popup.last_ms = now;
+          ShowExtra(ctx, base, car, spec.extra, true);
+        p.prev_buttons = buttons;  // no edge from a button held while getting in
+        p.last_ms = now;
         // Switched on: up and lit (or the game's choice, automatic).
-        g_popup.up = s.popup_auto ? HeadlightsWanted(ctx, base) : true;
-        SetPopupLights(ctx, base, car, g_popup.up, s.popup_auto);
+        p.up = s.popup_auto ? HeadlightsWanted(ctx, base) : true;
+        SetPopupLights(ctx, base, car, p.up, s.popup_auto);
       }
     }
     if (in_car) {
       if (s.popup_auto) {
         const bool want = HeadlightsWanted(ctx, base);
-        if (want != g_popup.up)
-          g_popup.up = want;
+        if (want != p.up)
+          p.up = want;
       }
-      g_popup.in_car = true;
+      p.in_car = true;
     }
   }
   // The switch.
   const bool pressed = in_car && (buttons & X_INPUT_GAMEPAD_DPAD_LEFT) &&
-                       !(g_popup.prev_buttons & X_INPUT_GAMEPAD_DPAD_LEFT);
-  g_popup.prev_buttons = buttons;
+                       !(p.prev_buttons & X_INPUT_GAMEPAD_DPAD_LEFT);
+  p.prev_buttons = buttons;
   if (pressed && !s.popup_auto) {
-    g_popup.up = !g_popup.up;
-    SetPopupLights(ctx, base, g_popup.car, g_popup.up, false);
+    p.up = !p.up;
+    SetPopupLights(ctx, base, p.car, p.up, false);
   }
   // The swing, eased at both ends; the pose is re-applied now and then while
   // settled, in case the game reset the skeleton (a car streamed back in).
-  const float dt = std::min<float>(float(now - g_popup.last_ms), 100.0f) / 1000.0f;
-  g_popup.last_ms = now;
-  const float target = g_popup.up ? kPopupUpDegrees : 0.0f;
-  const float before = g_popup.angle;
+  const float dt = std::min<float>(float(now - p.last_ms), 100.0f) / 1000.0f;
+  p.last_ms = now;
+  const float target = p.up ? spec.up_degrees : 0.0f;
+  const float before = p.angle;
   // The motor whirs as the pods start to swing.
-  if (target != before && !g_popup.swinging)
-    PopupMotorSound(std::fabs(target - before) / kPopupDegreesPerSecond);
-  g_popup.swinging = target != before;
+  if (target != before && !p.swinging)
+    PopupMotorSound(spec, std::fabs(target - before) / kPopupDegreesPerSecond);
+  p.swinging = target != before;
   const float step = kPopupDegreesPerSecond * dt;
-  g_popup.angle = std::fabs(target - before) <= step ? target : before + (target > before ? step : -step);
-  if (g_popup.angle != before || now >= g_popup.next_write) {
-    const float t = g_popup.angle / kPopupUpDegrees;
-    const float eased = kPopupUpDegrees * t * t * (3.0f - 2.0f * t);
-    PosePopupBone(ctx, base, g_popup.car, eased);
-    g_popup.next_write = now + 250;
+  p.angle = std::fabs(target - before) <= step ? target : before + (target > before ? step : -step);
+  if (p.angle != before || now >= p.next_write) {
+    const float t = p.angle / spec.up_degrees;
+    const float eased = spec.up_degrees * t * t * (3.0f - 2.0f * t);
+    PosePopupBone(ctx, base, spec, p.car, eased);
+    p.next_write = now + 250;
   }
   return in_car && !s.popup_auto;
+}
+
+// The Dinka Nexus's gullwing doors. The converter hangs each door panel (and
+// its window) on a pivot of its own (the template's overheat points, which
+// the game only reads to place engine smoke), hinged along the roof where
+// the mod hangs them, turning about the car's length: 71 degrees up, the
+// mod's own travel. The game still has the template's ordinary doors there,
+// unseen: Niko opens and shuts those as he gets in and out (the game's own
+// animations, as on any car), and each gullwing follows its door, raised as
+// far as the game has it open (GET_DOOR_ANGLE_RATIO). The struts hiss as one
+// lifts and it shuts with a clunk. Followed every frame while the player is in
+// a Nexus or getting into one, and after he gets out until its doors are down.
+struct GullwingState {
+  uint32_t car = 0;            // the Nexus followed
+  uint32_t info = 0;           // its model (the pivots looked up for it)
+  int32_t bone[2] = {-1, -1};  // the pivots: driver's (left), passenger's
+  float ratio[2]{}, peak[2]{};
+  bool lifting[2]{};
+  uint64_t next_probe = 0, last_active = 0, next_write = 0;
+  int log = 0;
+};
+GullwingState g_gullwing;
+constexpr std::string_view kGullwingPivots[2] = {"overheat", "overheat_2"};
+constexpr float kGullwingDegrees = 71.0f;
+void GullwingSound(bool lifting);  // (with the cars' engines, below)
+
+bool GullwingsBusy(const GullwingState& g, uint64_t now) {
+  return g.car && (now - g.last_active < 1500 || g.ratio[0] > 0.005f || g.ratio[1] > 0.005f);
+}
+
+void Gullwings(PPCContext& ctx, uint8_t* base, const GameContext& game) {
+  auto& g = g_gullwing;
+  const uint64_t now = NowMs();
+  const bool busy = GullwingsBusy(g, now);
+  if (!busy && now < g.next_probe)
+    return;
+  g.next_probe = now + 300;
+  static const uint32_t kNexus = ModelHash("NEXUS");
+  // In one, getting into one, or the one he left with a door still up.
+  uint32_t car = 0;
+  bool active = false;
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  if (vehicle.car) {
+    if (vehicle.model == kNexus) {
+      car = *vehicle.car;
+      active = true;
+    }
+  } else if (const auto getting = Invoke(ctx, base, "IS_CHAR_GETTING_IN_TO_A_CAR", {game.ped});
+             getting && getting->r0()) {
+    if (const auto target = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {game.ped, 0}, 1);
+        target && target->words[0])
+      if (const auto m = Invoke(ctx, base, "GET_CAR_MODEL", {target->words[0], 0}, 1); m && m->words[0] == kNexus) {
+        car = target->words[0];
+        active = true;
+      }
+  }
+  if (!car && busy)
+    car = g.car;
+  if (!car) {
+    g.car = 0;
+    return;
+  }
+  if (car != g.car) {
+    const int log = g.log;
+    g = GullwingState{};
+    g.log = log;
+    g.car = car;
+    g.next_probe = now + 300;
+  }
+  if (active)
+    g.last_active = now;
+  const uint32_t vehicle_at = VehicleAddress(base, car);
+  const uint32_t info = vehicle_at ? FindModelInfo(base, kNexus) : 0;
+  if (!info || !VehicleIsModel(base, vehicle_at, info)) {
+    g.car = 0;  // gone (or the slot reused)
+    return;
+  }
+  if (g.info != info) {
+    g.info = info;
+    for (int k = 0; k < 2; ++k)
+      g.bone[k] = FindBone(ctx, base, vehicle_at, kGullwingPivots[k]);
+    if (g.log < 3) {
+      ++g.log;
+      REXLOG_INFO("gta4-trainer: Nexus gullwings on bones {} and {}{}", g.bone[0], g.bone[1],
+                  NativeKnown("GET_DOOR_ANGLE_RATIO") ? "" : " (no GET_DOOR_ANGLE_RATIO: they stay shut)");
+    }
+  }
+  const bool rewrite = now >= g.next_write;
+  if (rewrite)
+    g.next_write = now + 250;
+  for (int k = 0; k < 2; ++k) {
+    if (g.bone[k] < 0)
+      continue;
+    float ratio = 0.0f;
+    if (const auto r = Invoke(ctx, base, "GET_DOOR_ANGLE_RATIO", {car, uint32_t(k), 0}, 2))
+      ratio = std::isfinite(r->f(0)) ? std::clamp(std::fabs(r->f(0)), 0.0f, 1.0f) : 0.0f;
+    // The struts as it lifts from shut; the clunk once it is on its way down.
+    if (ratio > 0.04f && g.ratio[k] <= 0.04f) {
+      GullwingSound(true);
+      g.lifting[k] = true;
+      g.peak[k] = ratio;
+    } else if (g.lifting[k] && g.peak[k] > 0.3f && ratio < g.peak[k] - 0.06f) {
+      GullwingSound(false);
+      g.lifting[k] = false;
+    }
+    g.peak[k] = std::max(g.peak[k], ratio);
+    if (ratio <= 0.04f)
+      g.lifting[k] = false;
+    if (ratio != g.ratio[k] || rewrite)
+      PoseBone(ctx, base, vehicle_at, info, kPoseNexus, 1 + k, g.bone[k], 1,
+               (k == 0 ? 1.0f : -1.0f) * kGullwingDegrees * ratio, 1.0f);
+    if (g.log < 6 && ratio > 0.5f && g.ratio[k] <= 0.5f) {
+      ++g.log;
+      REXLOG_INFO("gta4-trainer: Nexus {} gullwing up (door ratio {:.2f})", k == 0 ? "driver's" : "passenger's",
+                  ratio);
+    }
+    g.ratio[k] = ratio;
+  }
 }
 
 // Headlights on d-pad left, in any car (an option, on by default; getting
@@ -1654,10 +1795,10 @@ bool CarLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const St
   if (!g_lights.in_car || now >= g_lights.next_look) {
     g_lights.next_look = now + (g_lights.in_car ? 250 : 400);
     static const uint32_t kDeimos = ModelHash("DEIMOS"), kF16 = ModelHash("F16"),
-                          kBatmobile = ModelHash("BATMOBILE");
+                          kBatmobile = ModelHash("BATMOBILE"), kNexus = ModelHash("NEXUS");
     const auto& vehicle = PlayerVehicle(ctx, base, game);
-    const bool taken = vehicle.model == kDeimos || (vehicle.model == kF16 && s.jet) ||
-                       (vehicle.model == kBatmobile && s.gadgets);
+    const bool taken = vehicle.model == kDeimos || vehicle.model == kNexus ||
+                       (vehicle.model == kF16 && s.jet) || (vehicle.model == kBatmobile && s.gadgets);
     if (!vehicle.car || taken) {
       // Out of the car (switched off): its lamps go out.
       if (g_lights.in_car && g_lights.car && VehicleAddress(base, g_lights.car))
@@ -1775,7 +1916,9 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
     const uint32_t handle = car->words[0];
     Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {handle});
     if (s.pending_hash == ModelHash("DEIMOS"))  // extras come up random: show the pods
-      PreparePopups(ctx, base, handle);
+      PreparePopups(ctx, base, g_popup, handle);
+    if (s.pending_hash == ModelHash("NEXUS"))
+      PreparePopups(ctx, base, g_nexus_popup, handle);
     if (s.pending_hash == ModelHash("F16"))  // ...and the jet's landing gear
       PrepareJet(ctx, base, handle);
     if (const auto colours = Invoke(ctx, base, "GET_CAR_COLOURS", {handle, 0, 0}, 1, 0, 2))
@@ -1875,6 +2018,10 @@ struct JetState {
   float rest_clearance = 1.2f;
   bool climbed = false, ready_told = false;
   uint64_t airborne_at = 0, blocked_since = 0;
+  // what the log is told about this time in the jet (the takeoff's inputs)
+  uint64_t entered_at = 0, next_pull_log = 0, next_flight_log = 0;
+  bool spool_logged = false;
+  int pull_logs = 0, flight_logs = 0;
   JetLock lock;
 };
 JetState g_jet;
@@ -1888,9 +2035,17 @@ JetState g_jet;
 // speed comes back. v1.7.10 kept whatever speed it had at idle, up to 105.
 // Taking off: pull back once the engines are at full power (the spool you
 // hear, the throttle held), or rolling at 12 m/s; the jet leaves at flying
-// speed, nose a little up. (v1.7.14 and before needed 26 m/s on the ground.)
+// speed and rotates nose up from its wheels (at least kRotateRate for the
+// first moments, however gently the stick is pulled). For the first
+// kLaunchGrace nothing ends the flight: the wheels are still on the ground
+// and the physics has not caught up with the speed yet. (v1.7.14 and before
+// needed 26 m/s on the ground; v1.7.15-16 tipped the nose up 7 degrees in
+// one frame, into the runway.)
 constexpr float kTakeoffSpeed = 12.0f;  // m/s (~43 km/h)
 constexpr float kLaunchSpeed = 38.0f;   // m/s: what it leaves the ground at, at least
+constexpr float kRotateRate = 0.35f;    // rad/s nose up, at least, while it rotates
+constexpr uint64_t kRotateMs = 700, kLaunchGrace = 1500;  // ms
+constexpr float kFullPower = 0.85f;     // the spool (0 off .. 1 full) that counts as full power
 constexpr float kStallSpeed = 16.0f;    // on the ground below this the gear comes down
 constexpr float kMaxJetSpeed = 95.0f;   // m/s (~340 km/h)
 constexpr float kIdleThrust = 1.3f, kDryThrust = 10.3f, kBurnerThrust = 6.7f;  // m/s^2
@@ -3293,12 +3448,20 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
 // Grotti Deimos's: a high-revving flat-plane Italian V8 with a carburettor
 // howl, and its pop-up lamps' motor. Revs come from the road speed through
 // five simulated gears (the throttle revs it standing still); getting in
-// cranks the starter, getting out it winds down. The cars' game names
-// (BATMOBILE, DEIMOS) have no engine sound in IV, so these are the only ones
+// cranks the starter, getting out it winds down. The Dinka Nexus's: a
+// smooth, even V6 to 8,000 rpm whose intake hardens into a wail past 5,800
+// (its second cam profile), with its pop-ups' motor and its gullwings'
+// struts. The Imponte Arbiter X's: a big, choppy-idling cross-plane V8, deep
+// and heavy, the hood scoops roaring under load. The Vapid Dominator 645's:
+// a small, raspier 1960s V8. The cars' game names (BATMOBILE, DEIMOS, NEXUS,
+// ARBITERX, DOM645T) have no engine sound in IV, so these are the only ones
 // (up to v1.7.10 the Batmobile drove with the Sabre GT's engine, up to
-// v1.7.12 the Deimos with the Turismo's). Canopy hiss and clunk (the
-// Batmobile's and the F-16's) come from the Batmobile's voice.
+// v1.7.12 the Deimos with the Turismo's, up to v1.7.16 the Nexus with the
+// Infernus's and the other two with the Banshee's). Canopy hiss and clunk
+// (the Batmobile's and the F-16's) come from the Batmobile's voice.
 gta4::car::EngineSynth g_bat_synth{gta4::car::kBatmobile}, g_deimos_synth{gta4::car::kDeimos};
+gta4::car::EngineSynth g_nexus_synth{gta4::car::kNexus}, g_arbiter_synth{gta4::car::kArbiter},
+    g_dominator_synth{gta4::car::kDominator};
 #if REX_PLATFORM_PS5
 class SynthSource final : public gta4ps5::sound::Source {
  public:
@@ -3330,6 +3493,13 @@ struct CarEngineState {
 // than the game's own cars.)
 CarEngineState g_bat_engine{&g_bat_synth, "Batmobile", "BATMOBILE", {12.0f, 21.0f, 31.0f, 42.0f, 56.0f}, 0.35f};
 CarEngineState g_deimos_engine{&g_deimos_synth, "Deimos", "DEIMOS", {14.0f, 24.0f, 35.0f, 47.0f, 62.0f}, 0.4f};
+// (The two V8 muscle cars idle louder than the high-revving Deimos and Nexus,
+// so their levels sit a little lower, the Arbiter's near the Batmobile's.)
+CarEngineState g_nexus_engine{&g_nexus_synth, "Nexus", "NEXUS", {15.0f, 25.0f, 36.0f, 48.0f, 63.0f}, 0.38f};
+CarEngineState g_arbiter_engine{&g_arbiter_synth, "Arbiter X", "ARBITERX", {13.0f, 23.0f, 34.0f, 46.0f, 60.0f},
+                                0.33f};
+CarEngineState g_dominator_engine{&g_dominator_synth, "Dominator 645", "DOM645T",
+                                  {13.0f, 22.0f, 33.0f, 45.0f, 58.0f}, 0.36f};
 
 // Starts a car's voice (want) or stops it once its synth has gone quiet.
 void CarVoice(CarEngineState& e, bool want) {
@@ -3362,11 +3532,24 @@ void CanopySound(bool opening) {
   g_bat_engine.running = true;  // (stopped by CarEngine once quiet)
 }
 
-// The Deimos's pop-up lamps' motor, for as long as they swing.
-void PopupMotorSound(float seconds) {
-  g_deimos_synth.Motor(seconds);
-  CarVoice(g_deimos_engine, true);
-  g_deimos_engine.running = true;
+// The pop-up lamps' motor (the Deimos's or the Nexus's), for as long as they
+// swing.
+void PopupMotorSound(const PopupSpec& spec, float seconds) {
+  auto& e = spec.slot == kPoseNexus ? g_nexus_engine : g_deimos_engine;
+  e.synth->Motor(seconds);
+  CarVoice(e, true);
+  e.running = true;
+}
+
+// The Nexus's gullwings: the struts' hiss lifting (a latch's click first),
+// the clunk coming down.
+void GullwingSound(bool lifting) {
+  if (lifting)
+    g_nexus_synth.CanopyOpen();
+  else
+    g_nexus_synth.CanopyShut();
+  CarVoice(g_nexus_engine, true);
+  g_nexus_engine.running = true;
 }
 
 // Every frame in the car, and while its voice still sounds after getting
@@ -3464,6 +3647,11 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     j.car = *car;
     j.prev_buttons = pad.buttons;  // no edge from a button held while getting in
     j.r3_held = false;
+    j.entered_at = now;
+    j.spool_logged = j.ready_told = false;
+    j.pull_logs = j.flight_logs = 0;
+    j.next_pull_log = j.next_flight_log = 0;
+    REXLOG_INFO("gta4-trainer: F-16: player in the jet; flight and weapons {}", s.jet ? "on" : "off (the menu)");
   }
   j.in_jet = true;
   if (s.jet && !j.rocket_requested) {
@@ -3495,28 +3683,58 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   if (!s.jet) {
     j.flying = false;
   } else {
-    const bool spooled = throttle > 0.85f && g_jet_synth.Rpm() > 0.9f;  // full power, heard
+    const float rpm = g_jet_synth.Rpm();
+    const bool spooled = throttle > 0.85f && rpm > kFullPower;  // full power, heard
+    if (spooled && !j.spool_logged) {
+      j.spool_logged = true;
+      REXLOG_INFO("gta4-trainer: F-16 engines at full power {} ms after getting in (spool {:.2f}, rolling at "
+                  "{:.1f} m/s)",
+                  now - j.entered_at, rpm, ground_speed);
+    }
     if (!j.flying && spooled && !j.ready_told && ground_speed < kTakeoffSpeed) {
       j.ready_told = true;
       Toast(s, "F-16: full power. Pull back to take off.", 1500);
     }
     if (throttle < 0.5f)
       j.ready_told = false;
-    if (!j.flying && ly < -0.4f && (ground_speed > kTakeoffSpeed || spooled)) {
+    const bool pulled = ly < -0.4f;
+    if (!j.flying && pulled && !(ground_speed > kTakeoffSpeed || spooled) && j.pull_logs < 8 &&
+        now >= j.next_pull_log) {
+      // Pulled back too early: what the takeoff saw (the log's answer to
+      // "it won't take off").
+      ++j.pull_logs;
+      j.next_pull_log = now + 2000;
+      REXLOG_INFO("gta4-trainer: F-16 stick back, not yet: rolling at {:.1f} m/s (takeoff {:.0f}), throttle "
+                  "{:.2f}, spool {:.2f} (full power {:.2f})",
+                  ground_speed, kTakeoffSpeed, throttle, rpm, kFullPower);
+    }
+    if (!j.flying && pulled && (ground_speed > kTakeoffSpeed || spooled)) {
       const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {*car, 0, 0, 0, 0}, 1, 0, 4);
-      if (q && NativeKnown("SET_VEHICLE_QUATERNION")) {
-        // Launched: at flying speed at least, the nose 7 degrees up.
-        j.q = QNormalize(QMul(QNormalize({q->f(0), q->f(1), q->f(2), q->f(3)}), QAxis(1, 0, 0, 0.12f)));
+      if (!q || !NativeKnown("SET_VEHICLE_QUATERNION")) {
+        if (j.pull_logs < 8 && now >= j.next_pull_log) {
+          ++j.pull_logs;
+          j.next_pull_log = now + 2000;
+          REXLOG_WARN("gta4-trainer: F-16 can't take off: the jet's attitude can't be {}",
+                      q ? "set (SET_VEHICLE_QUATERNION unknown)" : "read (GET_VEHICLE_QUATERNION failed)");
+        }
+      } else {
+        // Launched: at flying speed at least, on its wheels as it stands;
+        // the nose comes up from there (kRotateRate at least, at once).
+        j.q = QNormalize({q->f(0), q->f(1), q->f(2), q->f(3)});
         j.speed = std::max(ground_speed, kLaunchSpeed);
         j.flying = true;
-        j.rate[0] = j.rate[1] = j.rate[2] = 0.0f;
+        const float authority = std::clamp((j.speed - 12.0f) / (kAuthoritySpeed - 12.0f), 0.2f, 1.0f);
+        j.rate[0] = std::max(-ly * 0.95f * authority, kRotateRate);
+        j.rate[1] = j.rate[2] = 0.0f;
         j.rest_clearance = std::clamp(clearance, 0.3f, 3.0f);
         j.climbed = false;
         j.airborne_at = now;
         j.blocked_since = 0;
+        j.flight_logs = 0;
+        j.next_flight_log = now + 1000;
         REXLOG_INFO("gta4-trainer: F-16 airborne: rolling at {:.1f} m/s, launched at {:.1f} ({:.2f} m over the "
-                    "ground on its wheels, engines {})",
-                    ground_speed, j.speed, clearance, spooled ? "at full power" : "spooling");
+                    "ground on its wheels, engines {}, spool {:.2f})",
+                    ground_speed, j.speed, clearance, spooled ? "at full power" : "spooling", rpm);
       }
     }
     if (j.flying) {
@@ -3538,6 +3756,9 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       const float ease = std::min(1.0f, dt * 5.0f);
       for (int a = 0; a < 3; ++a)
         j.rate[a] += (want[a] - j.rate[a]) * ease;
+      const bool launching = now - j.airborne_at < kLaunchGrace;
+      if (now - j.airborne_at < kRotateMs)
+        j.rate[0] = std::max(j.rate[0], kRotateRate);  // rotating off the runway
       j.q = QMul(j.q, QAxis(1, 0, 0, j.rate[0] * dt));   // stick back: nose up
       j.q = QMul(j.q, QAxis(0, 1, 0, j.rate[1] * dt));   // stick right: roll right
       j.q = QMul(j.q, QAxis(0, 0, 1, -j.rate[2] * dt));  // RB: nose right
@@ -3582,13 +3803,24 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         j.climbed = true;
       const bool near_ground = clearance < j.rest_clearance + 0.5f && f[2] > -0.35f;
       // Something solid in the way (a wall, a tower): the physics has it.
-      if (j.speed > 20.0f && ground_speed < 0.25f * j.speed) {
+      // (Not while it leaves the ground: from a standstill the physics needs
+      // a moment to reach the speed set.)
+      if (!launching && j.speed > 20.0f && ground_speed < 0.25f * j.speed) {
         if (!j.blocked_since)
           j.blocked_since = now;
       } else {
         j.blocked_since = 0;
       }
-      if ((near_ground && (j.climbed || now - j.airborne_at > 3000)) ||
+      if (j.flight_logs < 6 && now >= j.next_flight_log) {
+        ++j.flight_logs;
+        j.next_flight_log = now + 1500;
+        REXLOG_INFO("gta4-trainer: F-16 flying {} ms: {:.1f} m/s (moving at {:.1f}), {:.1f} m up ({}), nose {:.0f} "
+                    "degrees, throttle {:.2f}",
+                    now - j.airborne_at, j.speed, ground_speed, clearance - j.rest_clearance,
+                    j.climbed ? "climbed" : "not yet 4 m", std::asin(std::clamp(f[2], -1.0f, 1.0f)) * 57.2958f,
+                    throttle);
+      }
+      if ((near_ground && (j.climbed || now - j.airborne_at > 5000)) ||
           (j.blocked_since && now - j.blocked_since > 800)) {
         const bool landed = near_ground;
         j.flying = false;
@@ -3757,9 +3989,9 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       break;
     case Action::kTogglePopupAuto:
       s.popup_auto = !s.popup_auto;
-      g_popup.in_car = false;  // re-applied on the next look
-      Toast(s, s.popup_auto ? "Deimos pop-ups rise with the headlights (night, rain, fog)."
-                            : "Deimos pop-ups: d-pad left in the car raises and lowers them.");
+      g_popup.in_car = g_nexus_popup.in_car = false;  // re-applied on the next look
+      Toast(s, s.popup_auto ? "Deimos and Nexus pop-ups rise with the headlights (night, rain, fog)."
+                            : "Deimos and Nexus pop-ups: d-pad left in the car raises and lowers them.");
       break;
     case Action::kToggleAnyRide:
       if (!RideHooksInstalled()) {
@@ -4154,8 +4386,9 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool missiles_live = std::any_of(g_jet.missiles.begin(), g_jet.missiles.end(),
                                          [](const Missile& m) { return m.live; });
   const bool jet_due = g_have_f16 && (g_jet.in_jet || missiles_live || now >= g_jet.next_probe);
-  const bool popup_due = g_have_deimos && (g_popup.in_car || (g_popup.car && g_popup.angle > 0.0f) ||
-                                            now >= g_popup.next_probe);
+  const bool popup_due = g_have_deimos && PopupsDue(g_popup, now);
+  const bool nexus_popup_due = g_have_nexus && PopupsDue(g_nexus_popup, now);
+  const bool gullwing_due = g_have_nexus && (GullwingsBusy(g_gullwing, now) || now >= g_gullwing.next_probe);
   const bool lights_due = s.car_lights && (g_lights.in_car || now >= g_lights.next_look);
   // With the menu open: whether the player is driving (R2 then still reaches
   // the game), looked at four times a second.
@@ -4175,12 +4408,19 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
                                                    now >= g_bat_engine.next_probe);
   const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
                                                    now >= g_deimos_engine.next_probe);
+  auto engine_due = [now](bool have, const CarEngineState& e) {
+    return have && (e.in_car || e.running || now >= e.next_probe);
+  };
+  const bool nexus_engine_due = engine_due(g_have_nexus, g_nexus_engine);
+  const bool arbiter_engine_due = engine_due(g_have_arbiter, g_arbiter_engine);
+  const bool dominator_engine_due = engine_due(g_have_dominator, g_dominator_engine);
+  const bool any_engine_due = bat_engine_due || deimos_engine_due || nexus_engine_due || arbiter_engine_due ||
+                              dominator_engine_due;
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
-      !jet_canopy_due && !teleport_due && !bat_engine_due && !deimos_engine_due &&
-      s.pending_model < 0 && !jet_due && !rain_due && !popup_due && !lights_due && !drive_due &&
-      g_addons_probed)
+      !jet_canopy_due && !teleport_due && !any_engine_due && s.pending_model < 0 && !jet_due && !rain_due &&
+      !popup_due && !nexus_popup_due && !gullwing_due && !lights_due && !drive_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -4216,10 +4456,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_deimos = installed("DEIMOS");
     g_have_f16 = installed("F16");
     g_have_batmobile = installed("BATMOBILE");
+    g_have_nexus = installed("NEXUS");
+    g_have_arbiter = installed("ARBITERX");
+    g_have_dominator = installed("DOM645T");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}, Nexus {}, "
                 "Arbiter X {}",
-                g_have_batmobile, g_have_f16, g_have_deimos, installed("DOM645T"), installed("NEXUS"),
-                installed("ARBITERX"));
+                g_have_batmobile, g_have_f16, g_have_deimos, g_have_dominator, g_have_nexus, g_have_arbiter);
   }
 
   bool acted = false;
@@ -4273,7 +4515,7 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   if (jet_canopy_due)
     vehicle_mask |= Canopy(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), kJetCanopy,
                            g_jet_canopy);
-  if (bat_engine_due || deimos_engine_due) {
+  if (any_engine_due) {
     DrivePad pad;
     {
       std::lock_guard lock(g_drive_mutex);
@@ -4283,6 +4525,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       CarEngine(ctx, base, game, pad, g_bat_engine, g_gadget.boosting ? 1.0f : 0.0f);
     if (deimos_engine_due)
       CarEngine(ctx, base, game, pad, g_deimos_engine, 0.0f);
+    if (nexus_engine_due)
+      CarEngine(ctx, base, game, pad, g_nexus_engine, 0.0f);
+    if (arbiter_engine_due)
+      CarEngine(ctx, base, game, pad, g_arbiter_engine, 0.0f);
+    if (dominator_engine_due)
+      CarEngine(ctx, base, game, pad, g_dominator_engine, 0.0f);
   }
   if (jet_due) {
     DrivePad pad;
@@ -4292,9 +4540,14 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     }
     vehicle_mask |= JetControls(ctx, base, game, s, pad);
   }
-  if (popup_due &&
-      PopupLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed)))
+  if (popup_due && PopupLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), g_popup,
+                               g_have_deimos))
     vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
+  if (nexus_popup_due && PopupLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed),
+                                     g_nexus_popup, g_have_nexus))
+    vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
+  if (gullwing_due)
+    Gullwings(ctx, base, game);
   if (lights_due && CarLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed)))
     vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
   g_vehicle_mask.store(vehicle_mask, std::memory_order_relaxed);

@@ -1,1 +1,1 @@
-arbiterx, arbiterx, car, ARBITERX, BANSHEE, VEH@LOW, VEH@LOW_LE2_RI2, 0, 10, 0.2240, 0.2240, 0, 5, 1.0, 2, -
+arbiterx, arbiterx, car, ARBITERX, ARBITERX, VEH@LOW, VEH@LOW_LE2_RI2, 0, 10, 0.2240, 0.2240, 0, 5, 1.0, 2, -

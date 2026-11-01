@@ -27,8 +27,9 @@ keeps going while you browse.
 
 - **Player** — God mode, Never Wanted, set wanted level 0–6, +$100,000, heal & armor
 - **Vehicle**: vehicle god mode, repair, warp-into-spawned-car toggle, Batmobile
-  gadgets, F-16 flight and weapons, Deimos pop-up lights (d-pad left in the
-  car, animated, or automatic with the headlights), and **Bring Your Own
+  gadgets, F-16 flight and weapons (on from the start: it only acts inside
+  the jet), Deimos and Nexus pop-up lights (d-pad left in the car, animated,
+  or automatic with the headlights), and **Bring Your Own
   Ride**: a mission that wants a particular vehicle accepts the one you're in, as
   long as it's the same kind (anything on wheels for a car or bike, a helicopter
   for a helicopter, a boat for a boat). A mission's own story vehicle is a
@@ -52,8 +53,13 @@ keeps going while you browse.
     trainer swings on their hinge and opening doors
   - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin), with
     opening doors
-  - **Dinka Nexus** (IGNO / Milcin) and **Imponte Arbiter X** (johndoe968 /
-    Milcin, with opening doors)
+  - **Dinka Nexus** (IGNO / Milcin), with gullwing doors that lift as you
+    get in and out and pop-up headlights like the Deimos's
+  - **Imponte Arbiter X** (johndoe968 / Milcin), with opening doors
+  - Each car has its own engine, synthesized in the trainer (no recordings):
+    the Batmobile's turbine over a V8, the Deimos's flat-plane V8, the
+    Nexus's V6 with its cam switch-over wail, the Arbiter's choppy big V8,
+    the Dominator's raspier small V8, the F-16's jet
   - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets.
   The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
@@ -66,8 +72,9 @@ keeps going while you browse.
   switch any car's lights on and off; getting out switches them off
 - **Trainer Status** — shows which game natives resolved, for debugging
 
-Every option but the headlight switch starts off: the menu changes nothing
-else until you ask it to.
+Every option but the headlight switch and the F-16's flight (which does
+nothing outside the jet) starts off: the menu changes nothing else until you
+ask it to.
 
 The menu is **single-player only**: it closes itself and refuses to act inside a
 network session.
@@ -138,6 +145,17 @@ network session.
 
 ## Changes
 
+- **v1.7.17**: the F-16 flies again: *F-16 Flight and Weapons* started off at
+  every launch, and off the jet is a car that cannot take off (now it starts
+  on); the takeoff rotates the nose up off the wheels at once and nothing ends
+  the flight in its first 1.5 s; log lines for what the takeoff sees. The
+  Dinka Nexus gets gullwing doors that follow the game's own (unseen) doors
+  as Niko opens and shuts them, pop-up headlights like the Deimos's, and its
+  own engine (an even V6 to 8,000 rpm with a cam switch-over at 5,800); the
+  Imponte Arbiter X (a choppy big cross-plane V8) and the Vapid Dominator 645
+  (a raspier small one) get theirs. Their game names (NEXUS, ARBITERX,
+  DOM645T) have no IV engine, so the borrowed Infernus and Banshee engines
+  are gone.
 - **v1.7.16**: the Batmobile's engine leans toward the film car: a turbine's
   roar rising under load over the V8, the idle hum and canopy sounds kept.
 - **v1.7.15**: the Dinka Nexus and the Imponte Arbiter X added; the F-16
@@ -190,7 +208,7 @@ network session.
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
 | `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
-| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's, the Deimos's) and their canopy and pop-up lamp sounds (the same way; `tools/car/` renders them) |
+| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's, the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's) and their canopy, gullwing and pop-up lamp sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |

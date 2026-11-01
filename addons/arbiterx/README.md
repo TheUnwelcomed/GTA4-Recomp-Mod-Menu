@@ -2,7 +2,11 @@
 
 An add-on car on PC, and here too: its own vehicle (`arbiterx`), with the
 mod's handling and colour combinations. Spawn **Car Spawning → Imponte
-Arbiter X**. It shows the Banshee's name and has its engine sound, as the
+Arbiter X**. Its game name is its own (`ARBITERX`, which IV has no engine
+sound for), so the engine you hear is the trainer's synthesized one
+(`src/gta4_car_engine.h`: the late-60s Pontiac 400 V8 the car is drawn from,
+a choppy idle, a deep, heavy cross-plane beat and the hood scoops' roar
+under load). Up to v1.7.16 it borrowed the Banshee's name and engine, as the
 mod's line chooses.
 
 Built from the mod's `arbiterx.wft` and its *No liveries* `arbiterx.wtd`

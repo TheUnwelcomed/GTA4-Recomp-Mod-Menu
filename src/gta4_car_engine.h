@@ -9,14 +9,26 @@
 //    over a big, lumpy cross-plane V8, a deep roar on the booster;
 //  - the Grotti Deimos: a small mid-engined Italian V8 with a flat-plane
 //    crank, as the 1970s-80s cars it echoes had (an even, rasping beat that
-//    revs high and howls through its carburettors), no turbine.
+//    revs high and howls through its carburettors), no turbine;
+//  - the Dinka Nexus: the early-90s mid-engined Japanese sports car it is
+//    drawn from, a 3-litre V6 with variable valve timing (smooth and even to
+//    5,800 rpm, where the second cam profile comes in and the intake hardens
+//    into a wail up to 8,000);
+//  - the Imponte Arbiter X: the late-60s Pontiac muscle car it is drawn from,
+//    a big 400 cubic-inch V8 with a long-duration cam (a lumpy, choppy idle,
+//    a deep, heavy cross-plane beat, the hood scoops' intake roar under load);
+//  - the Vapid Dominator 645: the 1964-66 pony car it is drawn from, a small
+//    289 cubic-inch V8 (a milder lope, a lighter, raspier beat, revving
+//    higher than the big Pontiac).
 //
 //  - start: the starter cranks, the engine catches with a flare (and a
 //    turbine whines up behind it); shut down, it stops (the turbine spins
 //    down).
-//  - rumble: the firing pulses (8 cylinders: the firing rate is rpm / 15)
-//    with the crank's beat and the idle's lope, through an exhaust resonance
-//    and a saturation that growls under load.
+//  - rumble: the firing pulses (8 cylinders: the firing rate is rpm / 15; 6:
+//    rpm / 20) with the crank's beat and the idle's lope, through an exhaust
+//    resonance and a saturation that growls under load. A second cam profile
+//    (variable valve timing) brightens the top end, the intake and the howl
+//    above its switch-over revs.
 //  - howl: the carburettors' tone at twice the firing rate (the Deimos).
 //  - turbine: two soft tones and a partial whose pitch lags the engine.
 //  - intake: band-passed noise opening with throttle and revs, gated by the
@@ -60,6 +72,10 @@ struct Character {
   float flare;                    // the catch's flare, times idle
   float roar_hz, roar_range;      // the booster's roar: its top, hz + range x boost
   float jet, jet_hz, jet_range;   // a turbine's roar under load: level, its top hz + range x revs^2
+  int cylinders = 8;              // 8 or 6 (the beat's first six), evenly spaced firing
+  // a second cam profile: above cam_rpm (0: none) the intake and the howl
+  // gain cam_gain (x their level), the top end opens cam_bright hz
+  float cam_rpm = 0.0f, cam_gain = 0.0f, cam_bright = 0.0f;
 };
 // The Batmobile, after the film car (Batman Returns): a turbine car. The
 // turbine's hum at idle, its roar rising under load (a jet's: noise opening
@@ -77,13 +93,34 @@ constexpr Character kDeimos{950.0f,  7700.0f, {1.00f, 0.93f, 1.02f, 0.95f, 1.00f
                             0.14f,   150.0f,  2.3f,  0.75f, 1.35f, 2.2f, 0.10f, 0.10f, 0.08f, 1500.0f, 3200.0f,
                             0.22f,   0.0f,    0.0f,  750.0f, 2550.0f, 0.009f, 0.08f, 650.0f, 2700.0f, 14.0f,
                             2.2f,    120.0f,  1300.0f, 0.0f, 0.0f, 0.0f};
+// The Dinka Nexus: an even-firing 90-degree V6 (a smooth, refined beat, no
+// lope), revving to 8,000; past 5,800 the high-lift cam comes in: the
+// intake's rasp and howl jump and the top end opens up (the wail).
+constexpr Character kNexus{800.0f,  8000.0f, {1.00f, 0.95f, 1.03f, 0.97f, 1.01f, 0.94f, 1.00f, 1.00f},
+                           0.05f,   170.0f,  1.9f,  0.8f, 1.25f, 1.9f, 0.095f, 0.10f, 0.08f, 1200.0f, 3000.0f,
+                           0.16f,   0.0f,    0.0f,  0.0f, 0.0f, 0.008f, 0.06f, 600.0f, 2600.0f, 3.0f,
+                           1.9f,    120.0f,  1300.0f, 0.0f, 0.0f, 0.0f, 6, 5800.0f, 0.9f, 1100.0f};
+// The Imponte Arbiter X: a big-block-sized cross-plane V8 on a long cam (a
+// choppy idle, uneven bank-to-bank pulses), deep and heavy, the hood scoops
+// roaring under load; it runs out of breath near 5,800.
+constexpr Character kArbiter{850.0f,  5800.0f, {1.00f, 0.78f, 1.15f, 0.90f, 0.84f, 1.08f, 0.76f, 1.18f},
+                             0.55f,   48.0f,   1.05f, 2.2f, 2.3f, 3.2f, 0.075f, 0.125f, 0.05f, 560.0f, 1150.0f,
+                             0.03f,   0.08f,   0.0f,  0.0f, 0.0f, 0.006f, 0.065f, 240.0f, 950.0f, 12.0f,
+                             2.0f,    100.0f,  900.0f, 0.0f, 0.0f, 0.0f};
+// The Vapid Dominator 645: a small cross-plane V8 (a milder lope and a
+// lighter, raspier beat than the Arbiter's), revving to 6,300.
+constexpr Character kDominator{750.0f,  6300.0f, {1.00f, 0.84f, 1.10f, 0.92f, 0.88f, 1.05f, 0.81f, 1.12f},
+                               0.32f,   70.0f,   1.35f, 1.6f, 1.9f, 2.7f, 0.08f, 0.12f, 0.06f, 700.0f, 1700.0f,
+                               0.05f,   0.05f,   0.0f,  0.0f, 0.0f, 0.006f, 0.05f, 320.0f, 1400.0f, 10.0f,
+                               2.1f,    110.0f,  1000.0f, 0.0f, 0.0f, 0.0f};
 
 class EngineSynth {
  public:
   static constexpr float kRate = 48000.0f;
   static constexpr float kIdle = 0.16f;  // normalized revs at idle
 
-  explicit EngineSynth(const Character& character) : c_(character) {}
+  explicit EngineSynth(const Character& character)
+      : c_(character), cylinders_(std::clamp(character.cylinders, 1, 8)) {}
 
   // rpm: 0 off, kIdle idle, 1 the rev limit (the caller works it out from road
   // speed and gears); throttle and boost 0..1; volume 0..1.
@@ -160,14 +197,17 @@ class EngineSynth {
       const float rpm_real =
           rpm_ >= kIdle ? c_.idle_rpm + (c_.limit_rpm - c_.idle_rpm) * r : c_.idle_rpm * rpm_ / kIdle;
 
-      // ---- V8 firing pulses (the crank's beat, a lope at idle)
-      const float fire = rpm_real / 15.0f;
+      // ---- firing pulses (the crank's beat, a lope at idle): a four-stroke
+      // fires half its cylinders each turn
+      const float fire = rpm_real * float(cylinders_) / 120.0f;
+      // the second cam profile, coming in over 300 rpm about its switch-over
+      const float cam = c_.cam_rpm > 0.0f ? Smooth(c_.cam_rpm - 150.0f, c_.cam_rpm + 150.0f, rpm_real) : 0.0f;
       fire_ph_ += fire * dt;
       if (fire_ph_ >= 1.0f && rpm_ > 0.004f) {
         fire_ph_ -= std::floor(fire_ph_);
         const float lope = c_.lope * (1.0f - r) * (1.0f - r);
         pulse_amp_ = c_.beat[cyl_] * (1.0f + lope * Noise()) * (0.55f + 0.45f * std::min(1.0f, rpm_ / kIdle));
-        cyl_ = (cyl_ + 1) & 7;
+        cyl_ = (cyl_ + 1) % cylinders_;
         pulse_t_ = 0.0f;
         if (cranking)
           pulse_amp_ *= 0.35f;  // compression thumps, no firing yet
@@ -181,14 +221,15 @@ class EngineSynth {
       const float low = thump_lp_.Lowpass(pulse, 3.14159265f * std::min(fire * 1.4f + 30.0f, 700.0f) / kRate,
                                           1.2f);
       const float body = exhaust_bp_.Bandpass(pulse, res, 0.9f);
-      const float drive = c_.growl + c_.growl_load * throttle_ + 1.2f * r;
+      const float drive = c_.growl + c_.growl_load * throttle_ + 1.2f * r + 0.5f * c_.cam_gain * cam;
       float rumble = std::tanh((low * c_.thump + body * 0.9f) * drive) *
                      (c_.level + c_.level_load * throttle_ + c_.level_revs * r);
       // the pulses are one-sided: the DC goes (a 20 Hz high-pass), and the
       // buzz above the exhaust's own range (a low-pass rising with the revs)
       dc_y_ = rumble - dc_x_ + 0.9974f * dc_y_;
       dc_x_ = rumble;
-      rumble = rumble_lp_.Lowpass(dc_y_, 3.14159265f * (c_.bright + c_.bright_revs * r) / kRate, 0.9f);
+      rumble = rumble_lp_.Lowpass(dc_y_, 3.14159265f * (c_.bright + c_.bright_revs * r + c_.cam_bright * cam) / kRate,
+                                  0.9f);
       // weight: the firing rate's own tone, in step with the pulses, firmer
       // under load
       if (c_.sub > 0.0f && rpm_ > 0.002f)
@@ -198,7 +239,8 @@ class EngineSynth {
       if (c_.howl > 0.0f && rpm_ > 0.002f) {
         const float hg = std::min(0.9f, 3.14159265f * (2.0f * fire) / kRate);
         const float h = howl_bp_.Bandpass(pulse, hg, 0.18f);
-        rumble += std::tanh(h * 2.5f) * c_.howl * (0.15f + 0.55f * r) * (0.4f + 0.6f * throttle_);
+        rumble += std::tanh(h * 2.5f) * c_.howl * (0.15f + 0.55f * r) * (0.4f + 0.6f * throttle_) *
+                  (1.0f + c_.cam_gain * cam);
       }
       if (rpm_ <= 0.002f && std::fabs(rumble) < 1e-4f)
         rumble = 0.0f;
@@ -217,8 +259,10 @@ class EngineSynth {
       const float whine_r = (Sin(t1r_) + 0.3f * Sin(t2_) + 0.08f * Sin(t3_)) * whine_amp;
 
       // ---- intake rasp: noise gated by the firing pulses
-      const float rasp_g = 3.14159265f * std::min(c_.intake_hz + c_.intake_revs * r, 4500.0f) / kRate;
-      const float rasp_amp = (c_.intake + c_.intake_load * throttle_ * (0.3f + r)) * std::min(1.0f, rpm_ / kIdle);
+      const float rasp_g =
+          3.14159265f * std::min(c_.intake_hz + c_.intake_revs * r + 0.5f * c_.cam_bright * cam, 4500.0f) / kRate;
+      const float rasp_amp = (c_.intake + c_.intake_load * throttle_ * (0.3f + r)) * std::min(1.0f, rpm_ / kIdle) *
+                             (1.0f + c_.cam_gain * cam);
       const float gate = 0.35f + 0.65f * std::min(1.0f, pulse * 1.5f);
       const float rasp_l = rasp_l_.Bandpass(Noise(), rasp_g, 1.3f) * rasp_amp * gate;
       const float rasp_r = rasp_r_.Bandpass(Noise(), rasp_g * 1.07f, 1.3f) * rasp_amp * gate;
@@ -335,6 +379,7 @@ class EngineSynth {
 
   std::atomic<float> target_rpm_{0}, target_throttle_{0}, target_boost_{0}, target_volume_{0};
   const Character c_;
+  const int cylinders_;
   std::atomic<uint32_t> opens_{0}, shuts_{0}, motors_{0}, motor_len_x1000_{400};
   std::atomic<bool> quiet_{true};
   std::atomic<float> rpm_out_{0};

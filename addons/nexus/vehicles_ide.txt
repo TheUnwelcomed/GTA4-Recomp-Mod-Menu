@@ -1,1 +1,1 @@
-nexus, nexus, car, NEXUS, INFERNUS, VEH@LOW, VEH@LOW_INFERNUS, 0, 10, 0.2500, 0.2500, 0, 5, 1.0, 2, sports
+nexus, nexus, car, NEXUS, NEXUS, VEH@LOW, VEH@LOW_INFERNUS, 0, 10, 0.2500, 0.2500, 0, 5, 1.0, 2, sports
