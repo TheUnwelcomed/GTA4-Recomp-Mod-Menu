@@ -23,7 +23,8 @@ usage: run_vehicle.py <export_dir> <work_dir> <pc.wft> <pc.wtd>[,parent.wtd...] 
   options     optional ("-": none), batconv.parse_options: "lods=0:0:2" draws the
               donor's LOD 0 in the first two slots and leaves its LOD 1 out;
               "tex=512,detail=256" holds colour / detail maps to those sides
-              (a heavy model: the BTTF IV DeLoreans)
+              (a heavy model: the BTTF IV DeLoreans); "textures=<dir>" takes
+              <dir>/<name>.png in place of the mod's texture <name> (remaster.py)
 """
 import os
 import struct
@@ -73,9 +74,13 @@ def main():
             print('shader: %s -> 360 %s' % (sps, tsps))
     if getattr(conv, 'split_moved', 0):
         print('pivots: %d vertex influences re-bound by position' % conv.split_moved)
+    if getattr(conv, 'faces_moved', 0):
+        print('pivots: %d triangles cut out whole, %d shared corners copied' % (conv.faces_moved, conv.faces_copied))
 
     embedded = rsc5.read_fragtype(dft)['drawable']['shader_group']['texdict']
     tex_sources = [batconv.pc_textures(t, 0) for t in dtds]
+    if options.get('textures'):
+        tex_sources.insert(0, batconv.texture_overrides(options['textures']))
     if embedded and embedded[0] == 'v':
         tex_sources.append(batconv.pc_textures(dft, embedded[1]))
     xtd_flags, xtd_body = batconv.build_xtd(tt, tex_sources, conv.texture_names, options=options)

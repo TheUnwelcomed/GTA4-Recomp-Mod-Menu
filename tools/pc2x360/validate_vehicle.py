@@ -26,7 +26,11 @@ for _p, _spec in PIVOTS.items():
     for _b, _cond in _spec['sources']:
         PIVOT_OF.setdefault(_b, set()).add(_p)
 UNCONDITIONAL = {_b for _spec in PIVOTS.values() for _b, _cond in _spec['sources'] if _cond is None}
-SPLIT_RULES = [(_b, _cond, _p) for _p, _spec in PIVOTS.items() for _b, _cond in _spec['sources'] if _cond]
+SPLIT_RULES = [(_b, _cond, _p) for _p, _spec in PIVOTS.items() for _b, _cond in _spec['sources']
+               if _cond and not getattr(_cond, 'faces', False)]
+# whole triangles a pivot takes (batconv.face_cut): their shared corners copied
+FACE_RULES = [(_b, _cond, _p) for _p, _spec in PIVOTS.items() for _b, _cond in _spec['sources']
+              if getattr(_cond, 'faces', False)]
 flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
 x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
 t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
@@ -64,6 +68,38 @@ def vcount(g):
     return g['vertex_count'] or g.get('vb_count', 0)
 _, xbones = batconv.bones(x, xd['skeleton_off'])
 dbo, dbones = batconv.bones(d, dd['skeleton_off'])
+_CUTS = {}
+
+
+def donor_cut(g, table):
+    """A donor geometry as the converter cuts it (batconv.face_cut, worked out
+    again here from the donor's own data): (index list, the donor vertex each
+    vertex of the cut geometry carries, {vertex: the pivot it rides})."""
+    if g['off'] in _CUTS:
+        return _CUTS[g['off']]
+    n = vcount(g)
+    idx = list(struct.unpack_from('<%dH' % g['ib_count'], d.phys, g['ib_data'][1]))
+    rules = [(dbones.index(b), cond, pv) for b, cond, pv in FACE_RULES if b in dbones and dbones.index(b) in table]
+    usage = g['decl']['usage']
+    if not rules or not usage & 4:
+        out = (idx, list(range(n)), {})
+    else:
+        at = dict(batconv.vertex_layout(usage, batconv.SIZE_PC)[0])
+        st, vb = g['vb_stride'], bytes(d.phys[g['vb_data'][1]:g['vb_data'][1] + n * g['vb_stride']])
+        pos = [struct.unpack_from('<3f', vb, v * st + at[0]) for v in range(n)]
+        bone_of = []
+        for v in range(n):
+            k = batconv.main_influence(vb, at, v, st)
+            bone_of.append(table[k] if k < len(table) else -1)
+        cut, dup, assign = batconv.face_cut(pos, bone_of, idx, rules)
+        out = (cut, list(range(n)) + dup, assign)
+    _CUTS[g['off']] = out
+    return out
+
+
+def dtable(g):
+    bp = d.vptr(g['off'] + 56)
+    return [d.u16(bp + 2 * k) for k in range(d.u16(g['off'] + 62))] if bp is not None else []
 # Doors the car swings (batconv Converter._doors): the template's door bone
 # at the donor's hinge, with the donor's travel. The donor's door and what
 # hangs under it must ride on it.
@@ -142,8 +178,8 @@ def runs(xgeoms, dgeoms):
 
 
 def counts(draw, n, res=None, bones=None):
-    if res is not None:
-        return [(len(expanded(res, lod, bones)), sum(vcount(g) for g, _, _ in expanded(res, lod, bones)))
+    if res is not None:  # (the donor: a face cut's copied corners counted in)
+        return [(len(expanded(res, lod, bones)), sum(len(donor_cut(g, t)[1]) for g, _, t in expanded(res, lod, bones)))
                 for lod in draw['lods'][:n]]
     return [(sum(len(m['geometries']) for m in lod), sum(vcount(g) for m in lod for g in m['geometries']))
             for lod in draw['lods'][:n]]
@@ -165,7 +201,8 @@ def joined(xdraw, ddraw, n):
             src_lod = min(OPTIONS['lods'][min(k, len(OPTIONS['lods']) - 1)], len(dl) - 1)
         dgs = [g for m in dl[src_lod] for g in m['geometries']] if dl else []
         rs = runs([g for m in lod for g in m['geometries']], dgs)
-        c = None if rs is None else (len(rs), sum(vcount(r[0]) if len(r) == 1 else vcount(dg) for r, dg in zip(rs, dgs)))
+        c = None if rs is None else (len(rs), sum(vcount(r[0]) if len(r) == 1 else len(donor_cut(dg, dtable(dg))[1])
+                                                  for r, dg in zip(rs, dgs)))
         out.append((src_lod, dgs, rs, c))
     return out
 
@@ -212,30 +249,38 @@ def dec_pc(i, b):
 
 
 def vertex_pairs(run, dg):
-    """[(converted geometry, [(its vertex, the donor vertex it carries)])] for
-    a run of converted geometries standing for donor geometry `dg`. A whole
-    geometry keeps the donor's vertex order (a sample of up to 400 checked);
-    split parts are matched corner by corner with the donor's index list, so a
-    part vertex met at two corners holding different donor vertices, a part
-    vertex no triangle uses, or a corner out of order counts in split_bad."""
+    """[(converted geometry, [(its vertex, the donor vertex it carries, its
+    vertex in the cut geometry)])] for a run of converted geometries standing
+    for donor geometry `dg`. A whole geometry keeps the donor's vertex order,
+    the copies a face cut makes appended (a sample of up to 400 checked, and
+    every copy); split parts are matched corner by corner with the cut index
+    list, so a part vertex met at two corners holding different vertices, a
+    part vertex no triangle uses, or a corner out of order counts in
+    split_bad. Every corner of the whole geometry is checked against the cut
+    too (a moved triangle's corners on the copies, the others untouched)."""
     global split_bad
+    cut, src, assign = donor_cut(dg, dtable(dg))
     if len(run) == 1:
         xg = run[0]
+        xidx = struct.unpack_from('>%dH' % xg['ib_count'], x.phys, xg['ib_data'][1])
+        if list(xidx) != cut:
+            split_bad += 1
         step = max(1, xg['vertex_count'] // 400)
-        return [(xg, [(v, v) for v in range(0, xg['vertex_count'], step)])]
-    didx = struct.unpack_from('<%dH' % dg['ib_count'], d.phys, dg['ib_data'][1])
+        n = vcount(dg)
+        vs = sorted(set(range(0, xg['vertex_count'], step)) | set(range(n, xg['vertex_count'])) | set(assign))
+        return [(xg, [(v, src[v], v) for v in vs if v < len(src)])]
     out, c = [], 0
     for xg in run:
         xidx = struct.unpack_from('>%dH' % xg['ib_count'], x.phys, xg['ib_data'][1])
         m = {}
         for xv in xidx:
-            if m.setdefault(xv, didx[c]) != didx[c]:
+            if m.setdefault(xv, cut[c]) != cut[c]:
                 split_bad += 1
             c += 1
         if sorted(m) != list(range(xg['vertex_count'])):
             split_bad += 1
         items = sorted(m.items())
-        out.append((xg, items[::max(1, len(items) // 400)]))
+        out.append((xg, [(xv, src[cv], cv) for xv, cv in items[::max(1, len(items) // 400)]]))
     return out
 
 
@@ -248,6 +293,18 @@ for _J, _draw in ((JM, xd), (JW, xwheel)):
     for _slot, (_, _dgs, _rs, _) in enumerate(_J):
         for _r, _dg in zip(_rs or [], _dgs):
             pairs += [(_xg, _dg, _vm) for _xg, _vm in vertex_pairs(_r, _dg)]
+FACE_CUT = {}  # pivot: triangles moved, corners copied
+for _J in (JM, JW):
+    for _, _dgs, _rs, _ in _J:
+        for _dg in _dgs:
+            _cut, _src, _assign = donor_cut(_dg, dtable(_dg))
+            _orig = list(struct.unpack_from('<%dH' % _dg['ib_count'], d.phys, _dg['ib_data'][1]))
+            for _t in range(0, len(_cut), 3):
+                if _cut[_t] in _assign:
+                    _e = FACE_CUT.setdefault(_assign[_cut[_t]], [0, 0])
+                    _e[0] += 1
+            for _v in range(vcount(_dg), len(_src)):
+                FACE_CUT.setdefault(_assign[_v], [0, 0])[1] += 1
 pose_bad = 0
 uv_fill_bad = 0
 for xg, dg, vm in pairs:
@@ -280,7 +337,8 @@ for xg, dg, vm in pairs:
     for xi in xtab[len(dtab):]:  # slots appended for vertices a pivot claims by position
         if xbones[xi] not in PIVOTS:
             bone_bad += 1
-    for xv, dv in vm:
+    _cut_assign = donor_cut(dg, dtab)[2]
+    for xv, dv, cv in vm:
         xa, da = xb + xv * xs, db + dv * ds
         for i in filled:  # a filled texcoord set repeats texcoord 0
             if xs and x.phys[xa + xat[i]:xa + xat[i] + 4] != x.phys[xa + xat[6]:xa + xat[6] + 4]:
@@ -291,7 +349,7 @@ for xg, dg, vm in pairs:
             else:
                 a = dec(i, bytes(x.phys[xa + xo:xa + xo + 4]))
             b = dec_pc(i, bytes(d.phys[da + do:da + do + batconv.SIZE_PC[i]]))
-            if i == 2 and SPLIT_RULES and dtab:
+            if i == 2 and (SPLIT_RULES or FACE_RULES) and dtab:
                 # each influence: the 360 bone must be the PC bone's own mapping,
                 # or the pivot a conditional source gives this vertex's position
                 dat = dict(dl)
@@ -303,7 +361,8 @@ for xg, dg, vm in pairs:
                         continue
                     dbone = dbones[dtab[b[k]]] if b[k] < len(dtab) else None
                     xbone = xbones[xtab[a[k]]] if a[k] < len(xtab) else None
-                    claim = next((pv for sb, cond, pv in SPLIT_RULES if sb == dbone and batconv.meets(pos, cond)), None)
+                    claim = _cut_assign.get(cv) or next(
+                        (pv for sb, cond, pv in SPLIT_RULES if sb == dbone and batconv.meets(pos, cond)), None)
                     expect = claim or (xbones[xtab[b[k]]] if b[k] < len(xtab) else None)
                     if xbone != expect:
                         err = 1
@@ -332,6 +391,10 @@ check('normals/tangents within packing precision (<= 2/511)',
 check('UVs within half precision (rel <= 2^-10)', max(worst.get(i, 0) for i in range(6, 14)) <= 2 ** -10,
       'max rel err %.6f' % max(worst.get(i, 0) for i in range(6, 14)))
 check('weights/indices/colors carried byte-exact', max(worst.get(1, 0), worst.get(2, 0), worst.get(4, 0)) == 0)
+if FACE_RULES:
+    check('face cuts: whole triangles on their pivots, shared corners copied (index lists as cut)',
+          split_bad == 0 and bool(FACE_CUT),
+          '; '.join('%s %d triangles, %d corners copied' % (k, v[0], v[1]) for k, v in sorted(FACE_CUT.items())))
 check('bone tables: same-named safe bones, a pivot, a door or the chassis', bone_bad == 0,
       'bad=%d; doors on the donor\'s hinges: %s' % (bone_bad, ', '.join(sorted(DOORS)) or 'none'))
 _ok, _msg = restpose.check_rest_pose(x, set(PIVOTS) | set(DOORS))
@@ -360,6 +423,8 @@ tex_bad = 0
 src = {}
 for _t in reversed(DTDS):  # the car's own dictionary first, as the converter takes them
     src.update(batconv.pc_textures(_t, 0))
+if OPTIONS.get('textures'):
+    src.update(batconv.texture_overrides(OPTIONS['textures']))
 emb = dd['shader_group']['texdict']
 src_e = batconv.pc_textures(d, emb[1]) if emb else {}
 for i in range(tn):

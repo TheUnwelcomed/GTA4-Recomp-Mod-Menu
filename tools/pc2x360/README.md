@@ -204,6 +204,12 @@ packer stays under 100.
   Several pivots are separated by `;`, a hinge is given with `@x,y,z` (else
   the first donor bone's position), and a donor bone can be split between
   pivots by position (`boot:y>1.5`): its vertices are re-bound one by one.
+  When the part to move shares its mesh and corners with what stays (the
+  Batwing's canopy is part of its body shell), a **face cut** takes whole
+  triangles instead: `pivot@hinge=bone:faces:<conditions>`, the conditions
+  linear in x, y, z joined by `&` (`y+0.62z>-0.75&z>-0.05&x>-0.8&x<0.8`);
+  a triangle goes when all its corners meet them, and a corner shared with
+  a triangle that stays is copied, so both keep their own.
   The Deimos's pop-up lamp pods swing on the Banshee's `extra_1`; the F-16's
   nose gear (the front of the mod's `boot`) and two main gears fold on the
   Cavalcade's `extra_1`, `extra_5` and `extra_6`; the Batmobile's canopy

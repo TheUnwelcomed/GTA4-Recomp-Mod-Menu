@@ -1,0 +1,6 @@
+# Batman's Batwing (metalwars; the model from the Batman game), converted for the 360 build
+model=batwing
+donor=fbi
+# built on the stock Cavalcade (its spare extras carry the landing gear), as the F-16
+template=cavalcade
+colours=airtug

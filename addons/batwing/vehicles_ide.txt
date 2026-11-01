@@ -1,0 +1,1 @@
+batwing, batwing, car, BATWING, BATWING, VEH@STD, VEH@STD_LO4_LO4, 0, 999, 0.2622, 0.2622, 0, 5, 1.0, 0, ext_strong

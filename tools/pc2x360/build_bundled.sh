@@ -20,6 +20,8 @@ while read -r model template pivot shaders wtds options; do
   [ -z "$model" ] && continue
   [ "$only" != "  " ] && [[ "$only" != *" $model "* ]] && continue
   [ "$pivot" = "-" ] && pivot=""
+  options="${options:-}"
+  options="${options//@/$sources/}"  # (@: the sources directory)
   wtd="$sources/$model/$model.wtd"
   if [ -n "${wtds:-}" ] && [ "$wtds" != "-" ]; then
     wtd=""
@@ -52,5 +54,6 @@ delone     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delor
 deltwo     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delorean.wtd,bttf/vehshare_bttf.wtd  lods=0:0:2,tex=512,detail=256
 delthr     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delorean.wtd,bttf/vehshare_bttf.wtd  lods=0:0:2,tex=512,detail=256
 delhov     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delorean.wtd,bttf/vehshare_bttf.wtd  lods=0:0:2,tex=512,detail=256
+batwing    cavalcade  interiorlight@0,-1.05,0.47=bodyshell:faces:y+0.62z>-0.75&z>-0.05&x>-0.8&x<0.8&y<0.88;extra_1@0,1.48,-1.22=wheel_lf;extra_5@-1.37,-1.49,-1.04=wheel_lr;extra_6@1.37,-1.49,-1.04=wheel_rr  airtug,fbi  -  textures=@batwing/remaster,colour=batwing_d,bump=batwing_n,spec=batwing_s
 CARS
 exit $fails

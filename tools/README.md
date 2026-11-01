@@ -14,6 +14,11 @@ console exports and the mods' own files.
 | `jet/flight_model_sim.py` | The F-16's flight model (the trainer's equations) run through takeoff, an idle glide, banks, a pulled turn, a stall, the afterburner and the rudder; prints speed, climb, bank, heading and height. |
 | `car/render_preview.cpp` | Renders an add-on car's synthesized engine (`src/gta4_car_engine.h`: `batmobile` or `deimos`) through a scripted drive (start-up, idle, blips, four gears, cruise, booster or full throttle, lift-off, the canopy or the pop-up lamps, shut down). |
 | `unarc.py` | Unpacks `.rar` / `.7z` / `.zip` mod archives with the system's libarchive (no unrar needed): `python3 -I unarc.py mod.rar outdir`. |
+| `jet/flight_test.cpp` | The jets' flight model and autopilot (`src/gta4_jet_flight.h`) flown through takeoffs, stalls, gear and brake changes, landings ahead and full approaches to Francis International's runway, with pass/fail checks; `FLIGHT_TRACE=1` prints each phase. |
+| `pc2x360/remaster.py` | A car's textures remastered from its own colour map: the DXT blocks smoothed (edge-keeping), resized and lightly sharpened, and real normal and specular maps made from its detail where a mod ships flat placeholders (the Batwing). |
+| `missions/` | Complete Current Mission's table. `analyze.py` and `table.py` read decompiled mission scripts (not included) for each mission's pass routine, its debug pass key and the stage statics its pass needs, with a value signature to find them in memory; `gen_header.py` writes `src/gta4_mission_pass.h`: `python3 -I gen_header.py <scripts dir> <out.h>`. |
+| `maps/arx.py` | Lists or extracts any archive libarchive reads, block by block, so an archive whose checksum fails still yields what was decoded (and says so). |
+| `maps/rpf7.py` | Lists, checks and extracts a GTA V RPF7 pack (`dlc.rpf`, unencrypted), nested RPFs included: every resource must inflate to its page flags' size. For the map ports to come. |
 
 ## Game addresses the trainer relies on (360 build)
 
@@ -21,7 +26,10 @@ Found with `re/ppc_asm.py`:
 
 | what | where | how it is used |
 |---|---|---|
-| vehicle pool | `*(0x82FB0700)`: +0 storage, +4 generation bytes, +12 slot size | handle → `CVehicle` (as `IS_CAR_MODEL`'s worker `sub_82594230` does) |
+| vehicle pool | `*(0x82FB0700)`: +0 storage, +4 generation bytes (top bit: free), +8 slot count, +12 slot size | handle → `CVehicle` (as `IS_CAR_MODEL`'s worker `sub_82594230` does); the jet's targeting walks it |
+| an entity's position | `+32` its matrix (position row at +48), or inline at `+16` without one | the player's and, once checked against `GET_CAR_COORDINATES`, the targets' |
+| the executing script thread | `*(0x8319277C)` during a native call; its program key (joaat of the script's name) at +8 | Bring Your Own Ride answers only mission scripts; Complete Current Mission finds the mission's thread and statics |
+| the current viewport | `0x831C2200` (a `grcViewport`, or a pointer to one): camera position +0x70, view-projection +0x100 | the jet's target marks, used only while its camera matches `GET_CAM_POS` |
 | model index of an entity | `+0x2E` (s16) | |
 | live skeleton of an entity | `sub_8217DB60` | locals at +0x0C (80 bytes a bone), count +0x10, skeleton data +0x04 |
 | a bone's local matrix | `sub_822832E8(entity, bone)` | how the game hides extras |

@@ -18,6 +18,7 @@ into the .xtd), bounds, and the positions of the template's point bones
 copy of the skeleton's pose (see "the transplant" below).
 """
 import math
+import os
 import re
 import struct
 import sys
@@ -39,7 +40,15 @@ SPS_FALLBACK = {
     'gta_vehicle_paint2.sps': 'gta_vehicle_paint1.sps',
     'gta_vehicle_paint3.sps': 'gta_vehicle_paint1.sps',
     'gta_vehicle_generic.sps': 'gta_vehicle_mesh.sps',
+    # (the Batwing's cockpit glass: a mod's own name for a glass shader)
+    'gta_vehicle_glass_shades_lights.sps': 'gta_vehicle_vehglass.sps',
 }
+# Texture slots of the vehicle shaders, by their name hashes: the colour map,
+# and the bump, specular and dirt maps a mod may fill with it.
+SAMPLER_TEXTURE = 0x2B5170FD                       # TextureSampler
+SAMPLER_PLACEHOLDER = {0x46B7C64F: 'bump',         # BumpSampler
+                       0x608799C6: 'spec',         # SpecSampler
+                       0x7E9A27FE: 'dirt'}         # DirtSampler (always the template's)
 BONE_ALIAS = {'chasiss': 'chassis'}  # a typo in the Batmobile's skeleton
 # Shaders the game drives per car (the body colours, lights on and off, the
 # glass, the tyres), in the order they are moved to the front of the shader
@@ -545,19 +554,86 @@ def pose(bones, translations):
     return pos, rot
 
 
+class Cond:
+    """A source's condition: half-spaces of the car's space, all to be met.
+    `faces`: it picks whole triangles (by their centre) rather than vertices,
+    and a vertex a picked triangle shares with one left behind is copied, so
+    the part comes away cleanly when it turns (a canopy cut out of a body
+    modelled in one piece)."""
+
+    def __init__(self, terms, faces=False):
+        self.terms = terms  # [((a, b, c), op, value)]: a x + b y + c z  op  value
+        self.faces = faces
+
+    def __call__(self, pos):
+        ops = {'>': float.__gt__, '>=': float.__ge__, '<': float.__lt__, '<=': float.__le__}
+        return all(ops[op](float(k[0] * pos[0] + k[1] * pos[1] + k[2] * pos[2]), float(v))
+                   for k, op, v in self.terms)
+
+    def __repr__(self):
+        return ('faces:' if self.faces else '') + '&'.join(
+            '%s%s%g' % ('+'.join('%g%s' % (c, 'xyz'[i]) for i, c in enumerate(k) if c), op, v)
+            for k, op, v in self.terms)
+
+
+def _linear(text):
+    """'y+0.62z' -> (0, 1, 0.62); '-x', '2*y - 0.5 z' likewise."""
+    k = [0.0, 0.0, 0.0]
+    t = text.replace(' ', '').replace('*', '')
+    if not t:
+        raise ValueError('empty condition')
+    if t[0] not in '+-':
+        t = '+' + t
+    term, terms = '', []
+    for ch in t:
+        if ch in '+-' and term:
+            terms.append(term)
+            term = ''
+        term += ch
+    terms.append(term)
+    for term in terms:
+        axis = term[-1]
+        if axis not in 'xyz':
+            raise ValueError('bad term %r in %r' % (term, text))
+        num = term[:-1]
+        coef = 1.0 if num in ('+', '') else -1.0 if num == '-' else float(num)
+        k['xyz'.index(axis)] += coef
+    return tuple(k)
+
+
+def parse_cond(text):
+    faces = text.startswith('faces:')
+    if faces:
+        text = text[len('faces:'):]
+    terms = []
+    for part in text.split('&'):
+        for op in ('>=', '<=', '>', '<'):
+            if op in part:
+                lhs, value = part.split(op)
+                terms.append((_linear(lhs), op, float(value)))
+                break
+        else:
+            raise ValueError('bad condition %r' % part)
+    return Cond(terms, faces)
+
+
 def parse_pivots(spec):
     """Pivot spec -> {template bone: {'hinge': (x, y, z) or None,
-    'sources': [(donor bone, condition or None)]}}.
+    'sources': [(donor bone, Cond or None)]}}.
 
     spec   := entry (';' entry)*
     entry  := template_bone ['@' x ',' y ',' z] '=' source (',' source)*
-    source := donor_bone [':' axis op value]     (axis x|y|z, op > >= < <=)
+    source := donor_bone [':' ['faces:'] cond ('&' cond)*]
+    cond   := linear op value     (linear: terms in x y z, e.g. y, -x, y+0.62z;
+                                   op > >= < <=)
 
     A plain source binds all of the donor bone's geometry to the pivot; one
-    with a condition only the vertices (in the car's space) that meet it, so
-    one donor bone can be split between pivots (the F-16's nose gear and left
-    main gear share the mod's `boot`). The pivot bone goes to the hinge when
-    one is given, else to the first source bone's position."""
+    with conditions only the vertices (in the car's space) that meet them all,
+    so one donor bone can be split between pivots (the F-16's nose gear and
+    left main gear share the mod's `boot`); with `faces:`, the triangles whose
+    centres meet them, their shared corners copied (the Batwing's canopy, cut
+    out of its one-piece body). The pivot bone goes to the hinge when one is
+    given, else to the first source bone's position."""
     out = {}
     for entry in filter(None, (spec or '').split(';')):
         head, srcs = entry.split('=', 1)
@@ -571,22 +647,79 @@ def parse_pivots(spec):
             if ':' not in src:
                 sources.append((src, None))
                 continue
-            name, cond = src.split(':')
-            for op in ('>=', '<=', '>', '<'):
-                if op in cond:
-                    axis, value = cond.split(op)
-                    break
-            else:
-                raise ValueError('bad condition %r' % src)
-            sources.append((name, (axis.strip(), op, float(value))))
+            name, cond = src.split(':', 1)
+            sources.append((name, parse_cond(cond)))
         out[head] = dict(hinge=hinge, sources=sources)
     return out
 
 
 def meets(pos, cond):
+    if isinstance(cond, Cond):
+        return cond(pos)
     axis, op, value = cond
     x = pos['xyz'.index(axis)]
     return {'>': x > value, '>=': x >= value, '<': x < value, '<=': x <= value}[op]
+
+
+def main_influence(vsrc, at, v, stride):
+    """The bone-table slot of a vertex's strongest influence."""
+    o = v * stride
+    if 2 not in at:
+        return 0
+    if 1 not in at:
+        return vsrc[o + at[2]]
+    w = vsrc[o + at[1]:o + at[1] + 4]
+    k = max(range(4), key=lambda q: w[q])
+    return vsrc[o + at[2] + k]
+
+
+def face_cut(pos, bone_of, idx, rules):
+    """Triangles moved to pivots whole. pos: vertex positions; bone_of: each
+    vertex's donor bone; idx: the index list; rules: [(donor bone, Cond, key)].
+    A triangle whose three corners ride the rule's donor bone and whose centre
+    meets its condition goes to `key` (the first rule that takes it). Returns
+    (new index list, dup, assign): `dup` lists, for each vertex appended,
+    the vertex it copies; `assign` maps vertices (original or appended) to
+    the key they now ride. A vertex used only by moved triangles moves
+    itself; one shared with triangles staying behind (or moving elsewhere)
+    is copied for the moved ones, so no triangle is stretched."""
+    n = len(pos)
+    tri_key = []
+    for t in range(0, len(idx), 3):
+        a, b, c = idx[t:t + 3]
+        key = None
+        for donor_bone, cond, k in rules:
+            if bone_of[a] == bone_of[b] == bone_of[c] == donor_bone:
+                centre = [(pos[a][i] + pos[b][i] + pos[c][i]) / 3.0 for i in range(3)]
+                if cond(centre):
+                    key = k
+                    break
+        tri_key.append(key)
+    users = {}
+    for t, key in enumerate(tri_key):
+        for v in idx[3 * t:3 * t + 3]:
+            users.setdefault(v, [])
+            if key not in users[v]:
+                users[v].append(key)
+    home, assign, dup = {}, {}, []  # (vertex, key) -> the vertex carrying it
+    for v in sorted(users):
+        keys = users[v]
+        stay = None if None in keys else keys[0]  # the original keeps this one
+        for key in keys:
+            if key == stay:
+                home[(v, key)] = v
+                if key is not None:
+                    assign[v] = key
+            else:
+                home[(v, key)] = n + len(dup)
+                assign[n + len(dup)] = key
+                dup.append(v)
+    out = list(idx)
+    for t, key in enumerate(tri_key):
+        if key is not None:
+            for j in range(3):
+                out[3 * t + j] = home[(idx[3 * t + j], key)]
+    return out, dup, assign
 
 
 class Converter:
@@ -754,6 +887,7 @@ class Converter:
             target[ti] = p
         self.pivot_of = {}     # donor bone index -> template pivot bone (all its geometry)
         self.split_rules = []  # (donor bone index, condition, template pivot bone): some of it
+        self.face_rules = []   # (likewise, by whole triangles: Cond.faces)
         for tname, spec in self.pivots.items():
             assert tname in tindex, 'pivot %s not in the template' % tname
             ti = tindex[tname]
@@ -763,6 +897,8 @@ class Converter:
                 assert s in dindex, 'pivot source %s not in the donor' % s
                 if cond is None:
                     self.pivot_of[dindex[s]] = tname
+                elif getattr(cond, 'faces', False):
+                    self.face_rules.append((dindex[s], cond, tname))
                 else:
                     self.split_rules.append((dindex[s], cond, tname))
             target[ti] = spec['hinge'] or db[dindex[spec['sources'][0][0]]]['pos']
@@ -1101,6 +1237,13 @@ class Converter:
         d, v = self.d, self.v
         tparams = shader_params(src, ts)
         dparams = {p['hash']: p for p in shader_params(d, ds)}
+        # the donor's colour map: a bump, specular or dirt slot naming it is a
+        # placeholder (the Batwing's), filled from the options or the template
+        colour = None
+        if SAMPLER_TEXTURE in dparams and dparams[SAMPLER_TEXTURE]['type'] == 0 and \
+                dparams[SAMPLER_TEXTURE]['value'] is not None:
+            np_ = d.vptr(dparams[SAMPLER_TEXTURE]['value'] + 20)
+            colour = d.cstr(np_).lower() if np_ is not None else None
         so = v.put(src.virt[ts:ts + 0x60])
         if foreign:
             # its strings (effect and .sps names) live in the other file; the
@@ -1141,6 +1284,20 @@ class Converter:
                     np_ = d.vptr(dp['value'] + 20)
                     name = d.cstr(np_) if np_ is not None else None
                 use = name is not None
+                if use and colour and p['hash'] in SAMPLER_PLACEHOLDER and name.lower() == colour:
+                    opts = self.options or {}
+                    # (only on the colour map they were made from, when named)
+                    wanted = opts.get(SAMPLER_PLACEHOLDER[p['hash']]) \
+                        if opts.get('colour', colour).lower() == colour else None
+                    self.placeholders = getattr(self, 'placeholders', 0) + 1
+                    if wanted:
+                        name = wanted
+                    else:
+                        name = None
+                        use = p['value'] is not None
+                        if use:
+                            np_ = src.vptr(p['value'] + 20)
+                            name = src.cstr(np_) if np_ is not None else None
                 # A PC reflection map ("vehicleenvmap128", in no dictionary
                 # the console has; the BTTF IV DeLoreans name it in their dirt
                 # slot) leaves the template's own texture there, or none.
@@ -1211,19 +1368,51 @@ class Converter:
         bc = d.u16(g['off'] + 62)
         table = [d.u16(bp + 2 * k) for k in range(bc)] if bp is not None else []
         tb = [self.bone_map[b] for b in table]
+        n = g['ib_count']
+        isrc = d.phys[g['ib_data'][1]:g['ib_data'][1] + 2 * n]
+        idx = list(struct.unpack('<%dH' % n, isrc))
+        assert max(idx) < vcount
+        vsrc, idx, vcount = self._cut_faces(vsrc, src_usage, vcount, g['vb_stride'], table, tb, idx)
         vsrc = self._split_vertices(vsrc, src_usage, vcount, g['vb_stride'], table, tb)
         vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
         if fill_uv:
             self.uv_filled += 1
-        n = g['ib_count']
-        isrc = d.phys[g['ib_data'][1]:g['ib_data'][1] + 2 * n]
-        idata = struct.pack('>%dH' % n, *struct.unpack('<%dH' % n, isrc))
-        assert max(struct.unpack('<%dH' % n, isrc)) < vcount
+        idata = struct.pack('>%dH' % n, *idx)
+        assert max(idx) < vcount
         decl_src = d.vptr(g['vb_off'] + 16)
         # vo/io: set by place_buffers once every geometry is converted
         return dict(usage=usage, stride=stride, vcount=vcount, icount=n,
                     vdata=vdata, vbytes=len(vdata), idata=idata, ibytes=len(idata), bones=tb,
                     decl_src=decl_src)
+
+    def _cut_faces(self, vsrc, usage, vcount, stride, table, tb, idx):
+        """Whole triangles to their pivots (face_cut, Cond.faces): the copies
+        appended to the vertex data, every moved vertex's influences pointed
+        at the pivot's bone-table slot (appended to `tb` when new)."""
+        rules = [(di, cond, tname) for di, cond, tname in self.face_rules if di in table]
+        if not rules or not usage & 4:
+            return vsrc, idx, vcount
+        at = dict(vertex_layout(usage, SIZE_PC)[0])
+        pos = [struct.unpack_from('<3f', vsrc, v * stride + at[0]) for v in range(vcount)]
+        bone_of = [table[main_influence(vsrc, at, v, stride)] if main_influence(vsrc, at, v, stride) < len(table)
+                   else -1 for v in range(vcount)]
+        idx, dup, assign = face_cut(pos, bone_of, idx, rules)
+        out = bytearray(vsrc)
+        for v in dup:
+            out += vsrc[v * stride:(v + 1) * stride]
+        for v, tname in assign.items():
+            ti = self.template_bone_index[tname]
+            if ti not in tb:
+                tb.append(ti)
+            o = v * stride
+            for slot in range(4):
+                if 1 in at and out[o + at[1] + slot] == 0:
+                    continue  # (an unused influence)
+                out[o + at[2] + slot] = tb.index(ti)
+        self.faces_moved = getattr(self, 'faces_moved', 0) + sum(1 for t in range(0, len(idx), 3)
+                                                                 if idx[t] in assign)
+        self.faces_copied = getattr(self, 'faces_copied', 0) + len(dup)
+        return bytes(out), idx, vcount + len(dup)
 
     def _split_vertices(self, vsrc, usage, vcount, stride, table, tb):
         """Re-bind the vertices a conditional pivot source claims (see
@@ -1492,11 +1681,44 @@ def parse_options(text):
     """'lods=0:0:2,tex=512,detail=256' -> {'lods': [0, 0, 2], 'tex': 512, 'detail': 256}.
     lods: the donor LOD drawn in each of the template's LOD slots (a
     heavy model can leave out a middle LOD); tex / detail: the biggest side
-    kept for colour maps / detail maps."""
+    kept for colour maps / detail maps; textures: a directory of maps taking
+    the place of the mod's own (remaster.py); bump / spec: the maps a shader
+    gets where the mod gives its bump or specular slot its colour map (the
+    Batwing's: its colour map in every slot); colour: the colour map those
+    two go with (other shaders' placeholders take the template's)."""
     out = {}
     for item in filter(None, (text or '').split(',')):
         key, value = item.split('=', 1)
-        out[key] = [int(v) for v in value.split(':')] if key == 'lods' else int(value)
+        if key == 'lods':
+            out[key] = [int(v) for v in value.split(':')]
+        elif key in ('textures', 'bump', 'spec', 'colour'):
+            out[key] = value
+        else:
+            out[key] = int(value)
+    return out
+
+
+class _Data:
+    """Texel data standing in for a resource's physical segment."""
+    def __init__(self, phys):
+        self.phys = phys
+
+
+def texture_overrides(directory):
+    """<directory>/<name>.png -> pc_textures-style entries (DXT5, one level)
+    that take the place of the mod's own textures of those names (the
+    textures= option: maps remastered by remaster.py)."""
+    from PIL import Image
+    import numpy as np
+    out = {}
+    for f in sorted(os.listdir(directory)):
+        if not f.lower().endswith('.png'):
+            continue
+        name = f[:-4].lower()
+        img = Image.open(os.path.join(directory, f)).convert('RGBA')
+        w, h = img.size
+        bgra = np.asarray(img)[..., [2, 1, 0, 3]].tobytes()
+        out[name] = dict(name=name, w=w, h=h, fmt='DXT5', levels=1, res=_Data(dxt.encode_dxt5(bgra, w, h)), data=0)
     return out
 
 

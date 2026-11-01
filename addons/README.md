@@ -18,7 +18,8 @@ trainer's **Car Spawning** list.
 | `delone/` | DeLorean time machine, Part I (same) | Time Machine (Part I): time travel, plutonium |
 | `deltwo/` | DeLorean time machine, Part II (same) | Time Machine (Part II): time travel, Mr. Fusion, flies |
 | `delthr/` | DeLorean time machine, Part III (same) | Time Machine (Part III): time travel |
-| `delhov/` | Part II's flying form (same) | not in the list: swapped in when Part II takes off |
+| `delhov/` | Part II's flying form (same) | not in the list: v1.7.21 swapped it in to fly; since v1.7.22 Part II folds its own wheels and this is only kept for cars left from v1.7.21 |
+| `batwing/` | Batman's Batwing (metalwars) | Batwing: flies like the F-16, canopy, gear, cannons and missiles, its own jet voice, remastered textures |
 
 Add-on cars are kept out of traffic: nobody else drives them, they only
 appear when you spawn them.
