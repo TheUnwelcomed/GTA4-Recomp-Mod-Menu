@@ -33,7 +33,7 @@ keeps going while you browse.
   long as it's the same kind (anything on wheels for a car or bike, a helicopter
   for a helicopter, a boat for a boat). A mission's own story vehicle is a
   different check and still counts
-- **Car Spawning**: 29 stock cars, bikes and helicopters plus four bundled
+- **Car Spawning**: 29 stock cars, bikes and helicopters plus six bundled
   **add-on vehicles**, spawned in front of you. Episode-only vehicles are
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
@@ -52,6 +52,8 @@ keeps going while you browse.
     trainer swings on their hinge and opening doors
   - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin), with
     opening doors
+  - **Dinka Nexus** (IGNO / Milcin) and **Imponte Arbiter X** (johndoe968 /
+    Milcin, with opening doors)
   - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets.
   The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
@@ -136,6 +138,11 @@ network session.
 
 ## Changes
 
+- **v1.7.16**: the Batmobile's engine leans toward the film car: a turbine's
+  roar rising under load over the V8, the idle hum and canopy sounds kept.
+- **v1.7.15**: the Dinka Nexus and the Imponte Arbiter X added; the F-16
+  takes off as soon as its engines are at full power (pull back), leaving the
+  ground at flying speed.
 - **v1.7.14**: the Batmobile's engine deeper (a slow-revving V8 with a dark
   exhaust and weight in the low end, the turbine soft and low) and about half
   as loud; the Deimos's engine at a similar level.
@@ -215,5 +222,10 @@ one in `/data/homebrew/` — your installed game, saves and settings stay.
   Combat IV, whose controls the F-16's flight follows.
 - **SkylineGTRFreak**: the F-16C model.
 - **harithd** (original model) and **Milcin** (IV port): the Grotti Deimos GTS.
+- **johndoe968** and **Rodger Dodger** (original model) and **Milcin** (IV
+  port): the Vapid Dominator 645.
+- **IGNO** (original model) and **Milcin** (IV port): the Dinka Nexus.
+- **johndoe968** (original model) and **Milcin** (IV port): the Imponte
+  Arbiter X.
 
 Single-player fun only. Don't bring it into other people's sessions.

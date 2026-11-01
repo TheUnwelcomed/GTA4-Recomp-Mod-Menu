@@ -30,5 +30,7 @@ batmobile  fbi      interiorlight@0,-0.44,0.38=door_pside_f,windscreen  -
 f16        cavalcade  extra_1@0,2.73,-0.22=boot:y>1.5;extra_5@-0.658,-0.073,-0.028=boot:y<=1.5;extra_6@0.651,-0.073,-0.027=door_pside_f;interiorlight@0,2.3,1.22=windscreen  airtug,fbi
 deimos     banshee  extra_1=misc_a,misc_y,misc_w,misc_p,misc_m,misc_headlight_l,misc_headlight_r  -
 dom645t    banshee  -  -
+nexus      banshee  -  -
+arbiterx   banshee  -  -
 CARS
 exit $fails

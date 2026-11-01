@@ -31,8 +31,8 @@ while True:
     if r < -20:
         sys.exit('header error: %s' % lib.archive_error_string(a))
     name = lib.archive_entry_pathname(entry).decode('utf-8', 'replace').replace('\\', '/')
-    dest = os.path.normpath(os.path.join(out, name))
-    if not dest.startswith(os.path.abspath(out)):
+    dest = os.path.abspath(os.path.join(out, name))
+    if not dest.startswith(os.path.abspath(out) + os.sep):
         continue  # no escaping the output directory
     if lib.archive_entry_filetype(entry) == 0o040000:
         os.makedirs(dest, exist_ok=True)

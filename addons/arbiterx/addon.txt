@@ -1,0 +1,4 @@
+# Imponte Arbiter X (model by johndoe968, ported to IV by Milcin), converted for the 360 build
+model=arbiterx
+donor=banshee
+template=banshee

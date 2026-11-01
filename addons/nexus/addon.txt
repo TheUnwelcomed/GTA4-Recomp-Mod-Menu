@@ -1,0 +1,4 @@
+# Dinka Nexus (model by IGNO, ported to IV by Milcin), converted for the 360 build
+model=nexus
+donor=infernus
+template=banshee

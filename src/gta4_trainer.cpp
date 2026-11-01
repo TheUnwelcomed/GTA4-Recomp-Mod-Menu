@@ -587,6 +587,8 @@ constexpr std::array kVehicles = {
     VehicleChoice{"F-16 Fighter Jet", "F16", 16.0f},
     VehicleChoice{"Grotti Deimos GTS", "DEIMOS"},
     VehicleChoice{"Vapid Dominator 645", "DOM645T"},
+    VehicleChoice{"Dinka Nexus", "NEXUS"},
+    VehicleChoice{"Imponte Arbiter X", "ARBITERX"},
 };
 struct WeaponChoice {
   std::string_view label;
@@ -1871,7 +1873,7 @@ struct JetState {
   // the jet's height over the ground on its wheels; touchdown bookkeeping
   float rate[3]{};
   float rest_clearance = 1.2f;
-  bool climbed = false;
+  bool climbed = false, ready_told = false;
   uint64_t airborne_at = 0, blocked_since = 0;
   JetLock lock;
 };
@@ -1884,7 +1886,11 @@ JetState g_jet;
 // LB/RB work the rudder. The wings hold it up from about 32 m/s: slower,
 // steeply banked or upside down the nose drops, and a stall dives until the
 // speed comes back. v1.7.10 kept whatever speed it had at idle, up to 105.
-constexpr float kTakeoffSpeed = 26.0f;  // m/s (~95 km/h): pull back to rotate
+// Taking off: pull back once the engines are at full power (the spool you
+// hear, the throttle held), or rolling at 12 m/s; the jet leaves at flying
+// speed, nose a little up. (v1.7.14 and before needed 26 m/s on the ground.)
+constexpr float kTakeoffSpeed = 12.0f;  // m/s (~43 km/h)
+constexpr float kLaunchSpeed = 38.0f;   // m/s: what it leaves the ground at, at least
 constexpr float kStallSpeed = 16.0f;    // on the ground below this the gear comes down
 constexpr float kMaxJetSpeed = 95.0f;   // m/s (~340 km/h)
 constexpr float kIdleThrust = 1.3f, kDryThrust = 10.3f, kBurnerThrust = 6.7f;  // m/s^2
@@ -3466,8 +3472,8 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   }
   if (!j.announced) {
     j.announced = true;
-    Toast(s, s.jet ? "F-16: RT throttle, LT air brake; pull back at speed to take off; LB/RB rudder. D-pad right: "
-                     "cannon, left: missile (both lock on a car ahead). R3: landing gear."
+    Toast(s, s.jet ? "F-16: hold RT until the engines are at full power, then pull back to take off. LT air "
+                     "brake, LB/RB rudder. D-pad right: cannon, left: missile (both lock on a car ahead). R3: gear."
                    : "F-16: R3 landing gear. Flight and weapons: Vehicle Options > F-16 Flight and Weapons.",
           7000);
   }
@@ -3489,19 +3495,28 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   if (!s.jet) {
     j.flying = false;
   } else {
-    if (!j.flying && ground_speed > kTakeoffSpeed && ly < -0.4f) {
+    const bool spooled = throttle > 0.85f && g_jet_synth.Rpm() > 0.9f;  // full power, heard
+    if (!j.flying && spooled && !j.ready_told && ground_speed < kTakeoffSpeed) {
+      j.ready_told = true;
+      Toast(s, "F-16: full power. Pull back to take off.", 1500);
+    }
+    if (throttle < 0.5f)
+      j.ready_told = false;
+    if (!j.flying && ly < -0.4f && (ground_speed > kTakeoffSpeed || spooled)) {
       const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {*car, 0, 0, 0, 0}, 1, 0, 4);
       if (q && NativeKnown("SET_VEHICLE_QUATERNION")) {
-        j.q = QNormalize({q->f(0), q->f(1), q->f(2), q->f(3)});
-        j.speed = ground_speed;
+        // Launched: at flying speed at least, the nose 7 degrees up.
+        j.q = QNormalize(QMul(QNormalize({q->f(0), q->f(1), q->f(2), q->f(3)}), QAxis(1, 0, 0, 0.12f)));
+        j.speed = std::max(ground_speed, kLaunchSpeed);
         j.flying = true;
         j.rate[0] = j.rate[1] = j.rate[2] = 0.0f;
         j.rest_clearance = std::clamp(clearance, 0.3f, 3.0f);
         j.climbed = false;
         j.airborne_at = now;
         j.blocked_since = 0;
-        REXLOG_INFO("gta4-trainer: F-16 airborne at {:.1f} m/s ({:.2f} m over the ground on its wheels)", ground_speed,
-                    clearance);
+        REXLOG_INFO("gta4-trainer: F-16 airborne: rolling at {:.1f} m/s, launched at {:.1f} ({:.2f} m over the "
+                    "ground on its wheels, engines {})",
+                    ground_speed, j.speed, clearance, spooled ? "at full power" : "spooling");
       }
     }
     if (j.flying) {
@@ -4201,8 +4216,10 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_deimos = installed("DEIMOS");
     g_have_f16 = installed("F16");
     g_have_batmobile = installed("BATMOBILE");
-    REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}",
-                g_have_batmobile, g_have_f16, g_have_deimos, installed("DOM645T"));
+    REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}, Nexus {}, "
+                "Arbiter X {}",
+                g_have_batmobile, g_have_f16, g_have_deimos, installed("DOM645T"), installed("NEXUS"),
+                installed("ARBITERX"));
   }
 
   bool acted = false;

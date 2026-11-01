@@ -55,12 +55,13 @@ and let go a moment later, up to four times, then put back in the seat.
 ## Engine sound
 
 An original voice in the spirit of the 1989/1992 film car, synthesized from
-scratch (nothing from the films): a big, slow-revving cross-plane V8's firing
-pulses (rpm / 15 Hz; 650 to 5,200 rpm, a lopey idle) through a deep exhaust
-resonance, with the firing rate's own tone for weight and a growl that grows
-with load, kept dark (nothing much above ~1.3 kHz), a soft turbine under it
-(420 Hz to ~1.3 kHz), a low intake rasp, pops on lift-off, and a deep roar
-with crackles on the booster, at 35% level. v1.7.11-v1.7.13 revved to 6,500
+scratch (nothing from the films): a turbine car. At idle the turbine's hum
+(420 Hz) over a big, slow cross-plane V8's lopey beat; under load a turbine's
+roar (noise opening from ~260 Hz to ~1.6 kHz with the revs, louder with the
+throttle) and its whine under it (to ~1.1 kHz, never shrill), the V8 (rpm /
+15 Hz firing pulses, 650 to 5,200 rpm, a deep exhaust, the firing rate's own
+tone for weight) for the body, a low intake rasp, pops on lift-off, and a
+deep roar with crackles on the booster, at 35% level. v1.7.11-v1.7.13 revved to 6,500
 with a bright exhaust and a turbine whining to 3.3 kHz, at full level: shrill
 and much louder than the game's cars. The trainer works the revs out of the road
 speed through five simulated gears (the throttle revs it standing still);

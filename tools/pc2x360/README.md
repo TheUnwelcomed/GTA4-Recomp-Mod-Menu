@@ -50,6 +50,8 @@ every donor texture untiles back to its source.
 | F-16C (airtug slot on PC) | Cavalcade | 22/22 checks: paint2/paint3 from the airtug, landing gear on three pivots (12,872 vertex influences split by position), the canopy on a fourth (`interiorlight`, hinged at its rear edge), 74,436 vertices exact |
 | Grotti Deimos GTS | Banshee | 22/22 checks: doors on the Deimos's hinges, lamp pods on a pivot, 119,139 vertices exact |
 | Vapid Dominator 645 | Banshee | 22/22 checks: doors on the Dominator's hinges, 91 geometries, 293,238 vertices exact |
+| Dinka Nexus | Banshee | 22/22 checks: gullwing doors kept shut (they turn about the length), 108 geometries |
+| Imponte Arbiter X | Banshee | 22/22 checks: doors on the Arbiter's hinges (0.40 m), 119 geometries |
 
 `build_bundled.sh` converts, packs and validates all four in one go.
 

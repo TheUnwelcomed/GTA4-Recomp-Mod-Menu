@@ -10,6 +10,8 @@ trainer's **Car Spawning** list.
 | `f16/` | F-16C Fighting Falcon (SkylineGTRFreak) | F-16 Fighter Jet: flies, cannon, missiles |
 | `deimos/` | Grotti Deimos GTS (harithd, ported by Milcin) | Grotti Deimos GTS: pop-up lamps on d-pad left |
 | `dom645t/` | Vapid Dominator 645 (johndoe968, Rodger Dodger, ported by Milcin) | Vapid Dominator 645 |
+| `nexus/` | Dinka Nexus (IGNO, ported by Milcin) | Dinka Nexus |
+| `arbiterx/` | Imponte Arbiter X (johndoe968, ported by Milcin) | Imponte Arbiter X |
 
 Add-on cars are kept out of traffic: nobody else drives them, they only
 appear when you spawn them.

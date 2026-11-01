@@ -59,21 +59,24 @@ struct Character {
   float pops;                     // lift-off pops (a rate)
   float flare;                    // the catch's flare, times idle
   float roar_hz, roar_range;      // the booster's roar: its top, hz + range x boost
+  float jet, jet_hz, jet_range;   // a turbine's roar under load: level, its top hz + range x revs^2
 };
-// The Batmobile: a big, slow-revving cross-plane V8 (an uneven beat, a lopey
-// idle, a deep exhaust, weight in the low end), a soft turbine under it.
-// (v1.7.11-v1.7.13 revved to 6,500 with a bright exhaust and a turbine
-// whining to 3.3 kHz: thin and shrill at speed.)
+// The Batmobile, after the film car (Batman Returns): a turbine car. The
+// turbine's hum at idle, its roar rising under load (a jet's: noise opening
+// up with the revs, kept below ~1.6 kHz), its whine under it but never shrill
+// (to ~1.1 kHz), a big slow V8's beat and weight for the body, a deep roar on
+// the booster. (v1.7.11-v1.7.13: a bright V8 and a turbine whining to 3.3
+// kHz; v1.7.14: the V8 alone, dark and low.)
 constexpr Character kBatmobile{650.0f,  5200.0f, {1.00f, 0.80f, 1.12f, 0.93f, 0.86f, 1.06f, 0.78f, 1.16f},
-                               0.45f,   55.0f,   1.0f,  2.1f, 2.1f, 3.0f, 0.12f, 0.12f, 0.05f, 480.0f, 820.0f,
-                               0.0f,    0.07f,   0.35f, 420.0f, 900.0f, 0.004f, 0.022f, 220.0f, 520.0f, 16.0f,
-                               1.8f,    90.0f,   650.0f};
+                               0.45f,   55.0f,   1.0f,  2.1f, 2.1f, 3.0f, 0.10f, 0.09f, 0.04f, 480.0f, 820.0f,
+                               0.0f,    0.07f,   0.45f, 420.0f, 700.0f, 0.004f, 0.022f, 220.0f, 520.0f, 16.0f,
+                               1.8f,    90.0f,   650.0f, 0.20f, 260.0f, 1300.0f};
 // The Grotti Deimos: a flat-plane Italian V8 (an even beat alternating
 // between the banks, a busy idle, high revs, carburettor howl), no turbine.
 constexpr Character kDeimos{950.0f,  7700.0f, {1.00f, 0.93f, 1.02f, 0.95f, 1.00f, 0.93f, 1.02f, 0.95f},
                             0.14f,   150.0f,  2.3f,  0.75f, 1.35f, 2.2f, 0.10f, 0.10f, 0.08f, 1500.0f, 3200.0f,
                             0.22f,   0.0f,    0.0f,  750.0f, 2550.0f, 0.009f, 0.08f, 650.0f, 2700.0f, 14.0f,
-                            2.2f,    120.0f,  1300.0f};
+                            2.2f,    120.0f,  1300.0f, 0.0f, 0.0f, 0.0f};
 
 class EngineSynth {
  public:
@@ -220,6 +223,17 @@ class EngineSynth {
       const float rasp_l = rasp_l_.Bandpass(Noise(), rasp_g, 1.3f) * rasp_amp * gate;
       const float rasp_r = rasp_r_.Bandpass(Noise(), rasp_g * 1.07f, 1.3f) * rasp_amp * gate;
 
+      // ---- a turbine's roar under load (the Batmobile): noise opening up
+      // with the revs, louder with the throttle
+      float jet_l = 0.0f, jet_r = 0.0f;
+      if (c_.jet > 0.0f && rpm_ > 0.002f) {
+        const float jg = 3.14159265f * (c_.jet_hz + c_.jet_range * r * r) / kRate;
+        const float jamp =
+            c_.jet * (0.12f + 0.88f * throttle_) * (0.15f + 0.85f * r) * std::min(1.0f, rpm_ / kIdle);
+        jet_l = jet_l_.Lowpass(Noise(), jg, 0.75f) * jamp;
+        jet_r = jet_r_.Lowpass(Noise(), jg, 0.75f) * jamp;
+      }
+
       // ---- booster: a deep roar opening up, and sparse crackles
       const float roar_g = 3.14159265f * (c_.roar_hz + c_.roar_range * boost_) / kRate;
       const float roar_amp = 0.33f * boost_;
@@ -275,8 +289,8 @@ class EngineSynth {
       }
 
       const float shared = rumble + crack;
-      float l = (shared + whine_l + rasp_l + roar_l) * vol_ + canopy;
-      float rr = (shared * 0.97f + whine_r + rasp_r + roar_r) * vol_ + canopy;
+      float l = (shared + whine_l + rasp_l + roar_l + jet_l) * vol_ + canopy;
+      float rr = (shared * 0.97f + whine_r + rasp_r + roar_r + jet_r) * vol_ + canopy;
       // a soft ceiling at 0.6
       l = 0.6f * std::tanh(l * (1.0f / 0.6f));
       rr = 0.6f * std::tanh(rr * (1.0f / 0.6f));
@@ -334,8 +348,8 @@ class EngineSynth {
   bool hiss_rising_ = true;
   float motor_t_ = 1.0f, motor_len_ = 0.0f, motor_ph_ = 0, gear_ph_ = 0;
   uint32_t seed_ = 0x7F4A7C15u;
-  Svf thump_lp_, exhaust_bp_, rumble_lp_, howl_bp_, rasp_l_, rasp_r_, roar_l_, roar_r_, crack_bp_, hiss_bp_,
-      click_bp_, clunk_lp_, motor_bp_;
+  Svf thump_lp_, exhaust_bp_, rumble_lp_, howl_bp_, rasp_l_, rasp_r_, roar_l_, roar_r_, jet_l_, jet_r_, crack_bp_,
+      hiss_bp_, click_bp_, clunk_lp_, motor_bp_;
 };
 
 }  // namespace gta4::car
