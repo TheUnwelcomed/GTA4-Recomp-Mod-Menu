@@ -8,7 +8,11 @@ trainer's **Car Spawning** list.
 |---|---|---|
 | `batmobile/` | Batmobile (JulioNIB) | Batmobile, with *Batmobile Gadgets* |
 | `f16/` | F-16C Fighting Falcon (SkylineGTRFreak) | F-16 Fighter Jet: flies, cannon, missiles |
-| `deimos/` | Grotti Deimos GTS (harithd, ported by Milcin) | Grotti Deimos GTS |
+| `deimos/` | Grotti Deimos GTS (harithd, ported by Milcin) | Grotti Deimos GTS: pop-up lamps on d-pad left |
+| `dom645t/` | Vapid Dominator 645 (johndoe968, Rodger Dodger, ported by Milcin) | Vapid Dominator 645 |
+
+Add-on cars are kept out of traffic: nobody else drives them, they only
+appear when you spawn them.
 
 The converted model files (`<model>.xft` / `<model>.xtd`) are in the release
 zip only, because they contain data from the game. `tools/pc2x360` makes them
@@ -19,7 +23,9 @@ from the mods' PC files.
 For every `addons/<folder>/addon.txt` in the app:
 
 1. **vehicles.ide**: puts `vehicles_ide.txt` into the `cars` section, right
-   after the donor car's line.
+   after the donor car's line, rebuilt in the console's format on the
+   template car's line, with the traffic frequency set to 0 (unless
+   `traffic=yes`).
 2. **handling.dat**: puts `handling.txt` right after the donor's line.
 3. **carcols.dat**: adds the car's own row from `carcols.txt` to that
    section, or else copies the colour rows of the car named by `colours=`
@@ -40,9 +46,16 @@ the FBI's slot).
 ```
 model=f16        # the model name (lower case); <model>.xft / .xtd sit beside it
 donor=fbi        # stock car whose lines it goes next to and whose rows it borrows
+template=banshee # optional: the stock car it was converted on (default: the donor)
 colours=airtug   # optional: copy this car's colour rows instead of the donor's
+traffic=yes      # optional: let it appear in traffic (default: never)
 ```
 
 `vehicles_ide.txt` must start with the model name. Flags the console game
-does not know (ZolikaPatch's `wheelangle:` or `popuplights`, say) are left
-out.
+does not know (ZolikaPatch's `wheelangle:` or `livery`, say) are left out.
+
+The fifth field, the game name, is also what IV picks the engine sound by:
+an add-on with a name of its own is silent, so the Batmobile drives with the
+Sabre GT's engine and the F-16 with the Infernus's (their names show when you
+get in). The Deimos and Dominator keep the names their mods chose (Turismo,
+Banshee).

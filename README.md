@@ -27,12 +27,13 @@ keeps going while you browse.
 
 - **Player** — God mode, Never Wanted, set wanted level 0–6, +$100,000, heal & armor
 - **Vehicle**: vehicle god mode, repair, warp-into-spawned-car toggle, Batmobile
-  gadgets, F-16 flight and weapons, Deimos pop-up lights, and **Bring Your Own
+  gadgets, F-16 flight and weapons, Deimos pop-up lights (d-pad left in the
+  car, animated, or automatic with the headlights), and **Bring Your Own
   Ride**: a mission that wants a particular vehicle accepts the one you're in, as
   long as it's the same kind (anything on wheels for a car or bike, a helicopter
   for a helicopter, a boat for a boat). A mission's own story vehicle is a
   different check and still counts
-- **Car Spawning**: 29 stock cars, bikes and helicopters plus three bundled
+- **Car Spawning**: 29 stock cars, bikes and helicopters plus four bundled
   **add-on vehicles**, spawned in front of you. Episode-only vehicles are
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
@@ -40,8 +41,10 @@ keeps going while you browse.
   - **Batmobile** (JulioNIB), with its gadgets re-created
   - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a nose cannon and
     missiles (the PC mod's Air Combat IV script, re-done in the trainer)
-  - **Grotti Deimos GTS** (harithd / Milcin), with pop-up headlights switched
-    by the trainer
+  - **Grotti Deimos GTS** (harithd / Milcin), with pop-up headlights the
+    trainer swings on their hinge
+  - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin)
+  - All kept out of traffic: nobody else drives them
 - **Teleporting** — to the map waypoint, save/restore a position, landmark presets
 - **Time & Weather** — set the clock, force or release any weather
 - **Weapons** — full loadout with ammo, or strip all weapons
@@ -100,6 +103,21 @@ network session.
   stock data) and says so, and the one after tries again.
 - **Self-measurement**: every 10 seconds the log gets a
   `gta4-trainer: cost over 10.0 s` line with the trainer's own time per frame.
+- **Deimos pop-ups**: the converter hangs the lamp pods on the template's
+  `extra_1`, placed on their hinge; the trainer turns that bone's local
+  matrix in the car's live skeleton (`sub_8217DB60` gives the skeleton, the
+  same place `sub_822832E8` hands the game when it hides an extra), eased,
+  and keeps the extra shown. D-pad left is kept from the radio in the car.
+
+## Changes
+
+- **v1.7.5**: the long black lines on the add-on cars are gone (the
+  converter moved bones in only one of the three places the file keeps a
+  pose: see `tools/pc2x360/README.md`); Batmobile front wheels at its own
+  wheel spots; F-16 liveries (paint shaders from the stock airtug); engine
+  sounds for the Batmobile and F-16; add-ons kept out of traffic; Deimos
+  pop-ups on d-pad left with a real swing; Vapid Dominator 645 added; the
+  tools used for all this in `tools/`.
 
 ## Files
 
@@ -109,7 +127,8 @@ network session.
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
-| `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI |
+| `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI, with the rest-pose check |
+| `tools/inspect/`, `tools/re/`, `tools/unarc.py` | car file inspection, the game-code disassembly helper, the mod-archive unpacker (see `tools/README.md`) |
 
 ## Building
 
@@ -119,7 +138,7 @@ describes:
 ```
 git clone https://github.com/elripalda/gta4-ps5 && cd gta4-ps5 && ./setup.sh
 git apply /path/to/patches/liberty-trainer.patch
-cp /path/to/src/gta4_trainer.* glue/rexglue-sdk-main/gta4-recomp/src/
+cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* glue/rexglue-sdk-main/gta4-recomp/src/
 # then the cmake + ninja commands from ps5/BUILD.md
 # (glslangValidator must be built with ENABLE_OPT=ON: the shader overrides use -Os)
 ```

@@ -1,9 +1,8 @@
 """Structural validation of a converted 360 vehicle against its PC donor.
 
-usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd> [poses]
+usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd> [pivot]
 
-poses: as given to run_vehicle.py; posed copies are checked against the
-donor's vertices turned by each pose's angle.
+pivot: as given to run_vehicle.py ("extra_1=misc_a,...").
 """
 import os
 import struct
@@ -14,14 +13,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import batconv  # noqa: E402
 import dxt  # noqa: E402
 import rsc5  # noqa: E402
+import restpose  # noqa: E402
 import xenos  # noqa: E402
 
 out_dir, name, wft, wtd = sys.argv[1:5]
-POSES = {}
+PIVOT, PIVOT_SOURCES = None, []
 if len(sys.argv) > 5:
-    _bones, _poses = sys.argv[5].split('=')
-    _parsed = [(t, float(deg)) for t, deg in (x.split('@') for x in _poses.split(','))]
-    POSES = {b: _parsed for b in _bones.split(',')}
+    PIVOT, _src = sys.argv[5].split('=')
+    PIVOT_SOURCES = _src.split(',')
 flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
 x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
 t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
@@ -43,7 +42,9 @@ xf, df = rsc5.read_fragtype(x), rsc5.read_fragtype(d)
 xd, dd = xf['drawable'], df['drawable']
 # the template's wheel child (the one holding bone wheel_lf's mesh slot); the
 # donor may have none (wheels modelled into the body)
-dwheel = next((c['drawable'] for c in df['children'] if c['drawable'] and c['drawable']['lods']), None)
+_, _dbn = batconv.bones(d, df['drawable']['skeleton_off'])
+_dw = [(d.u16(c['off'] + 0x0E), c['drawable']) for c in df['children'] if c['drawable'] and c['drawable']['lods']]
+dwheel = next((dr for b, dr in _dw if _dbn[b] == 'wheel_lf'), next((dr for b, dr in _dw if _dbn[b].startswith('wheel_')), None))
 xwheel = next((c['drawable'] for c in xf['children'] if c['drawable'] and c['drawable']['lods']), None)
 EMPTY = {'lods': []}
 if dwheel is None:
@@ -81,22 +82,14 @@ check('vertex/index GPU descriptors and declarations consistent', bad_desc == 0,
 check('index buffers: whole triangles, indices in range', bad_idx == 0, 'bad=%d' % bad_idx)
 
 # geometry counts and vertex totals equal the donor's (main LOD 0/1, wheel LOD 0/1)
-def poses_of(r, g, bones):
-    bp = r.vptr(g['off'] + 56)
-    table = [r.u16(bp + 2 * k) for k in range(r.u16(g['off'] + 62))] if bp is not None else []
-    for b in table:
-        if bones[b] in POSES:
-            return [(b, deg) for _, deg in POSES[bones[b]]], table
-    return [None], table
-
-
 def expanded(r, lod, bones):
-    """Donor geometries of a LOD, each repeated once per pose."""
+    """Donor geometries of a LOD (with their bone tables)."""
     out = []
     for m in lod:
         for g in m['geometries']:
-            poses, table = poses_of(r, g, bones)
-            out += [(g, p, table) for p in poses]
+            bp = r.vptr(g['off'] + 56)
+            table = [r.u16(bp + 2 * k) for k in range(r.u16(g['off'] + 62))] if bp is not None else []
+            out.append((g, None, table))
     return out
 
 
@@ -108,7 +101,7 @@ def counts(draw, n, res=None, bones=None):
             for lod in draw['lods'][:n]]
 nd = len(dd['lods'])
 dcounts = counts(dd, 3, d, dbones)
-check('main LOD geometry/vertex counts equal donor (%d donor LODs%s)' % (nd, ', posed copies' if POSES else ''),
+check('main LOD geometry/vertex counts equal donor (%d donor LODs)' % nd,
       counts(xd, min(nd, 3)) == dcounts[:min(nd, 3)], str(counts(xd, 3)))
 if nd < 3:
     check('main LOD 2 reuses the donor\'s last LOD (template has 3 LOD slots)', counts(xd, 3)[2] == dcounts[-1])
@@ -163,13 +156,16 @@ for xg, (dg, pose, dtable) in pairs:
     xbp, dbp = x.vptr(xg['off'] + 56), d.vptr(dg['off'] + 56)
     xtab = [x.u16(xbp + 2 * k) for k in range(x.u16(xg['off'] + 62))] if xbp is not None else []
     dtab = [d.u16(dbp + 2 * k) for k in range(d.u16(dg['off'] + 62))] if dbp is not None else []
-    for xi, di in zip(xtab, dtab):  # bone tables bind the same-named bones
+    for xi, di in zip(xtab, dtab):  # bone tables: the same-named safe bone, the pivot, or the chassis
         want = batconv.BONE_ALIAS.get(dbones[di], dbones[di])
-        if pose is not None and di == pose[0]:
-            want = POSES[dbones[di]][[p for _, p in POSES[dbones[di]]].index(pose[1])][0]
-        elif want not in xbones:
-            want = batconv.BONE_FALLBACK
-        if xbones[xi] != want:
+        got = xbones[xi]
+        if dbones[di] in PIVOT_SOURCES:
+            ok = got == PIVOT
+        elif got == want:
+            ok = batconv.carries(got)
+        else:
+            ok = got in (batconv.BONE_FALLBACK, PIVOT)
+        if not ok:
             bone_bad += 1
     step = max(1, xg['vertex_count'] // 400)
     for v in range(0, xg['vertex_count'], step):
@@ -182,15 +178,6 @@ for xg, (dg, pose, dtable) in pairs:
             else:
                 a = dec(i, bytes(x.phys[xb + v * xs + xo:xb + v * xs + xo + 4]))
             b = dec_pc(i, bytes(d.phys[db + v * ds + do:db + v * ds + do + batconv.SIZE_PC[i]]))
-            if pose is not None and i in (0, 3, 14, 15):
-                dl_at = dict(dl)
-                w = d.phys[db + v * ds + dl_at[1]:db + v * ds + dl_at[1] + 4]
-                ix = d.phys[db + v * ds + dl_at[2]:db + v * ds + dl_at[2] + 4]
-                k = max(range(4), key=lambda j: w[j])
-                if ix[k] < len(dtable) and dtable[ix[k]] == pose[0]:
-                    pivot = struct.unpack_from('<3f', d.virt, dbo + 0xE0 * pose[0] + 0x60)
-                    b = list(batconv.rotate_x(b, pivot if i == 0 else (0, 0, 0), pose[1]))
-                    b = list(struct.unpack('<3f', struct.pack('<3f', *b[:3])))  # stored as float32
             if i in (6, 7, 8, 9, 10, 11, 12, 13):
                 err = max(abs(p - q) / max(1.0, abs(q)) for p, q in zip(a, b))
             else:
@@ -204,7 +191,9 @@ check('normals/tangents within packing precision (<= 2/511)',
 check('UVs within half precision (rel <= 2^-10)', max(worst.get(i, 0) for i in range(6, 14)) <= 2 ** -10,
       'max rel err %.6f' % max(worst.get(i, 0) for i in range(6, 14)))
 check('weights/indices/colors carried byte-exact', max(worst.get(1, 0), worst.get(2, 0), worst.get(4, 0)) == 0)
-check('bone tables bind the same-named template bones (or the fallback)', bone_bad == 0, 'bad=%d' % bone_bad)
+check('bone tables: same-named safe bones, the pivot or the chassis', bone_bad == 0, 'bad=%d' % bone_bad)
+_ok, _msg = restpose.check_rest_pose(x, PIVOT)
+check('rest pose: every vertex skinned where it is stored; safe bones only', _ok, _msg.split(': ', 1)[1])
 check('texcoord sets filled for the 360 shader repeat texcoord 0', uv_fill_bad == 0, 'bad=%d' % uv_fill_bad)
 
 # shaders: inputs satisfied; texture names resolvable
@@ -241,15 +230,11 @@ for i in range(tn):
     f = struct.unpack_from('>6I', t.virt, d3d + 28)
     base = ((f[1] >> 12) << 12) & 0x0FFFFFFF
     w, h = (f[2] & 0x1FFF) + 1, ((f[2] >> 13) & 0x1FFF) + 1
-    fmt, bpp = xenos.FORMATS['DXT5' if s['fmt'] == batconv.A8R8G8B8 else s['fmt']]
-    bw, bh = w // 4, h // 4
+    fmt, bpp, lin, _ = batconv.linear_texture(s)
+    bw, bh = max(1, w // 4), max(1, h // 4)
     tiled_size = xenos.align(bw, 32) * xenos.align(bh, 32) * bpp
     ok = (w, h) == (s['w'], s['h']) and (f[1] & 0x3F) == fmt and base % 4096 == 0 and \
         base + tiled_size <= t.psize and ((f[0] >> 22) & 0x1FF) << 5 == xenos.align(bw, 32) * 4
-    if s['fmt'] == batconv.A8R8G8B8:
-        lin = dxt.encode_dxt5(s['res'].phys[s['data']:s['data'] + w * h * 4], w, h)
-    else:
-        lin = s['res'].phys[s['data']:s['data'] + bw * bh * bpp]
     back = xenos.untile_level(t.phys[base:base + tiled_size], bw, bh, bpp)
     if not ok or back != xenos.swap16(lin):
         tex_bad += 1

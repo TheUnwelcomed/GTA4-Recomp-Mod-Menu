@@ -6,10 +6,13 @@ mods ship `.wft`/`.wtd`. This converts a PC car into the 360 format by
 **transplanting** it into a stock 360 car of your own game:
 
 - kept from the stock 360 car: physics/collision, fragment groups, skeleton
-  topology, the non-wheel children;
+  topology and rotations, the non-wheel children;
 - taken from the PC car: the body (all LODs), the wheel, shaders (cloned from
-  the same-named 360 shaders, values transferred by parameter name hash),
-  textures (merged into the `.xtd`), bounds, and bone positions (by bone name).
+  the same-named 360 shaders - the template's or another stock car's - values
+  transferred by parameter name hash), textures (merged into the `.xtd`),
+  bounds, and the positions of the template's point bones (wheels, hubs and
+  suspension, seats, lamps, exhausts), moved consistently everywhere the
+  file keeps a bone's pose.
 
 ## Verified against ground truth
 
@@ -21,10 +24,14 @@ compares with the real 360 file:
 | check | result |
 |---|---|
 | skeleton: 58 bones + 3 × 58 transform matrices | byte-identical |
+| both ready-made skeleton poses and the collision parts | untouched (nothing to move) |
 | fragment and drawable bounds | byte-identical |
 | all 9 shaders: parameter values and texture names | byte-identical |
-| lod0 vertices (position, normal, tangent, UVs, colour, weighted bones) | 13,913 / 13,913 identical |
+| lod0 vertices (position, normal, tangent, UVs, colour, weighted bones*) | 13,913 / 13,913 identical |
 | GPU vertex/index descriptors | consistent |
+
+\* Parts the converter deliberately draws rigid on the chassis (doors, glass,
+lamps: see the skeleton section) are compared as bound to the chassis.
 
 Texture conversion (8-in-16 endian swap + Xenos 2D tiling) reproduces the 360
 FBI's texture blocks exactly at every mip level. Rockstar's tools truncate
@@ -39,9 +46,49 @@ every donor texture untiles back to its source.
 
 | car | template | result |
 |---|---|---|
-| Batmobile | FBI | 18/18 checks, 1,134 pointed objects within pages |
-| F-16C (airtug slot on PC) | FBI | 18/18 checks: 3 LODs, 35,295 lod0 vertices |
-| Grotti Deimos GTS | Banshee | 18/18 checks: lamp pods in 3 poses, 2,596 pointed objects within pages |
+| Batmobile | FBI | 19/19 checks: 262,043 vertices skinned at rest, 0.00000 m off |
+| F-16C (airtug slot on PC) | FBI | 19/19 checks: paint2/paint3 from the airtug, 74,436 vertices exact |
+| Grotti Deimos GTS | Banshee | 19/19 checks: lamp pods on a pivot, 119,139 vertices exact |
+| Vapid Dominator 645 | Banshee | 19/19 checks: 91 geometries, 293,238 vertices exact |
+
+`build_bundled.sh` converts, packs and validates all four in one go.
+
+### The skeleton (the v1.7.4 black lines)
+
+A converted car drew long black slivers across the map. The game keeps a
+car's bone poses in several places: the skeleton data (each bone's local
+translation at +0x20, its position in the car at +0x60, and three matrix
+arrays: global rotations, their inverses, local matrices), **two ready-made
+copies of the whole pose in the fragment** (fragType +0x1DC and +0x1E0: the
+pose a spawned car starts from), and the collision composite's part matrices
+for the physics parts (doors, bonnet, glass, bumpers, wheels). Skinning
+draws a vertex with the bone's current matrix times the inverse of its rest
+pose. v1.7.4 moved bones in the skeleton data only, so for every moved bone
+the two disagreed: the Batmobile's door and windscreen bones sit 13 m under
+the car in the mod, and their parts were drawn 14 m up. The game also hides a
+bone (an extra switched off, a part broken off, a smashed window or lamp) by
+overwriting its local matrix with a constant that sends it, and everything
+under it, to the world's origin: the Deimos's rear glass hung under the
+Banshee's roof extra the pop-ups switched.
+
+Since v1.7.5:
+
+- A moved bone is moved everywhere, its local translation recomputed against
+  its template parent, and its collision part (wheels) with it; the
+  composite's bounds grow to hold it.
+- Only point bones move: wheels, hubs, suspension, seats, lamps, exhausts,
+  engine, interior light. Never a part the physics poses (except the wheels,
+  which the vehicle code drives). A donor bone parked outside its own model
+  is ignored.
+- The donor's geometry rides only on bones the game never hides or poses
+  from a different car's parts: the chassis, the body shell, the wheel
+  assembly and a pivot. Everything else is drawn rigid on the chassis, where
+  the modder put it.
+- `restpose.py` checks it the way the game draws it: every vertex skinned
+  with the ready-made pose and the rest pose must land where it is stored,
+  using only those bones, with the collision parts on their bones. The
+  shipped v1.7.4 files fail it (Batmobile 13.97 m, F-16 5.87 m, Deimos
+  2.76 m); every car since passes with 0.
 
 ### The page rule (the v1.7 crash)
 
@@ -59,26 +106,32 @@ object (records, arrays, strings, texture headers) against the rule.
 
 ### What the converter handles (beyond a like-for-like car)
 
-- **Donor bones the template lacks** (`misc_*`, `steeringwheel`, ...) are drawn
-  rigid on the chassis. Vertices are stored in model space, so parts keep
-  their place and lose only their own motion.
+- **Donor bones the template lacks** (`misc_*`, `steeringwheel`, ...), and
+  parts the game would pose from the template's physics parts (doors, bonnet,
+  boot, bumpers, glass) or hide (lamps, extras), are drawn rigid on the
+  chassis. Vertices are stored in model space, so parts keep their place and
+  lose only their own motion.
 - **A missing wheel** takes its opposite's place (a tricycle's nose wheel fills
   both front slots). **No wheel mesh at all** hides the template's wheels.
-- **Shaders the template lacks** map to the nearest one it has (`paint2`/`paint3`
-  to `paint1`, `generic` to `mesh`, `interior`/`default` to `interior2`). When
-  the 360 shader reads a texcoord set the part lacks, it is filled from set 0.
-- **Uncompressed A8R8G8B8 textures** are compressed to DXT5 (`dxt.py`), so they
-  take the same verified path as every other texture.
+- **Shaders the template lacks** are cloned from another stock 360 car that
+  has them (`paint2`/`paint3` from the airtug, `interior` from the police car;
+  their name strings are copied along). Only shaders no stock car has map to
+  the nearest one (`generic` to `mesh`, `default` to `interior2`). When the
+  360 shader reads a texcoord set the part lacks, it is filled from set 0.
+- **Uncompressed textures** (A8R8G8B8, A8, L8) are compressed to DXT5
+  (`dxt.py`), so they take the same verified path as every other texture.
 - **Exporter quirks**: geometry counts left zero (taken from the buffers), the
   buffer's data pointer only at +24, and un-normalised normals (normalised;
   in-range ones are untouched).
 - **Textures borrowed from another stock car's dictionary** get a black
   stand-in. The shared `vehicle_generic_*` pack resolves the rest.
-- **Posed copies** (`poses` argument): geometry bound to a donor bone is
-  emitted once per pose, each copy bound to a template *extra* and turned
-  about X through the bone's origin. The game shows or hides extras, so the
-  trainer can switch poses. This is how the Deimos's pop-up headlights work:
-  it's built on the Banshee, which has extras 1, 2 and 5.
+- **Pivots** (`pivot` argument, `template_bone=donor_bone,...`): the listed
+  donor bones' geometry is bound to one template bone (one no physics part
+  drives and nothing hangs from), moved to the first donor bone's position.
+  The trainer turns it in the car's live skeleton: the Deimos's pop-up lamp
+  pods swing on the Banshee's `extra_1`. (v1.7.1-v1.7.4 emitted posed copies
+  on three extras instead; hiding an extra drew their shared triangles to the
+  world's origin.)
 
 ## Format notes (what was mapped)
 
@@ -108,11 +161,15 @@ object (records, arrays, strings, texture headers) against the rule.
 clang++ -std=c++20 -O2 -I<libmspack/mspack> xlzx.cpp lzxd.o -o xlzx   # port's patched libmspack
 ./xlzx unrsc fbi.xft work/fbi.xft.bin && ./xlzx unrsc fbi.xtd work/fbi.xtd.bin
 python3 identity_test.py <export_dir> <stock PC fbi dir> work         # prove the rules
-python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [poses]   # template: fbi
-python3 validate_vehicle.py out mycar car.wft car.wtd                 # structural checks
+python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [pivot]   # template: fbi
+python3 validate_vehicle.py out mycar car.wft car.wtd [pivot]         # structural checks, rest pose included
+python3 restpose.py out/mycar.xft out/mycar.xft.bin [pivot bone]      # the rest-pose check alone
 ./xlzx rsc 112 <flags> out/mycar.xft.bin mycar.xft   # flags from out/flags.txt
 ./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd
 ```
+
+`build_bundled.sh <export_dir> <work_dir> <sources_dir> <out_dir>` does the
+whole set for the bundled cars (sources: `<sources>/<model>/<model>.wft/.wtd`).
 
 Then add an `addons/mycar/` folder (see `addons/README.md`) and the app
 installs it as a new vehicle.
@@ -125,7 +182,11 @@ Converted files are not committed here — they contain data from the game.
 
 ## Known limits
 
-- Collision stays the template car's (the Batmobile collides like a Buffalo).
+- Collision stays the template car's (the Batmobile collides like a Buffalo),
+  including its physics wheels' size (FBI 0.40 m, Banshee 0.38 m): a donor
+  with smaller wheels sits a few centimetres high.
+- Doors, bonnet, boot and glass are fixed to the body: they don't open,
+  break or fall off.
 - Template bones the donor lacks (rear doors, sirens, …) keep their position;
   nothing of the donor is drawn there.
 - Donor textures: DXT1/3/5 or A8R8G8B8. Mip chains beyond level 0 are not

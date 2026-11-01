@@ -74,7 +74,15 @@ check('shader parameter values + texture names equal real 360 (%d shaders)' % le
 # Blend indices are palette slots into each geometry's bone table, and the
 # two files group geometry differently, so they are compared as the bones
 # they resolve to.
-def vertex_set(r, draw):
+# The converter draws parts the game poses from collision parts or hides
+# (doors, glass, lamps) rigid on the chassis, on purpose; the real file's
+# bones are resolved through the same rule before comparing.
+_dn = conv.donor_bone_names
+_tbo, _tnames = batconv.bones(tx, conv.tf['drawable']['skeleton_off'])
+POLICY = {ti: conv.bone_map[_dn.index(n)] if n in _dn else ti for ti, n in enumerate(_tnames)}
+
+
+def vertex_set(r, draw, policy=None):
     out_ = set()
     for m in draw['lods'][0]:
         for g in m['geometries']:
@@ -92,17 +100,17 @@ def vertex_set(r, draw):
                 if bi_off is not None and bw_off is not None and table:
                     # zero-weight slots carry arbitrary indices: compare only
                     # weighted influences, as (resolved bone, weight)
-                    infl = tuple(sorted((table[v[bi_off + k]], v[bw_off + k])
-                                        for k in range(4) if v[bw_off + k]))
+                    infl = tuple(sorted(((policy or {}).get(table[v[bi_off + k]], table[v[bi_off + k]]),
+                                         v[bw_off + k]) for k in range(4) if v[bw_off + k]))
                     rest = v[:bi_off] + v[bi_off + 4:]
                 out_.add((usage, rest, infl))
     return out_
 
 
-real = vertex_set(tx, td)
+real = vertex_set(tx, td, POLICY)
 conv_v = vertex_set(out, od)
 exact = len(conv_v & real)
-check('converted lod0 vertices identical to real 360 (all elements)',
+check('converted lod0 vertices identical to real 360 (all elements; rigid parts on the chassis)',
       exact == len(conv_v), '%d/%d (%.2f%%)' % (exact, len(conv_v), 100.0 * exact / len(conv_v)))
 
 # 5. index/fetch consistency on the output

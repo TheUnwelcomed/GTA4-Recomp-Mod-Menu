@@ -1,0 +1,15 @@
+# Game data and mods are never committed: converted or original models,
+# archives, and caches the tools leave.
+*.wft
+*.wtd
+*.wdr
+*.wdd
+*.xft
+*.xtd
+*.xft.bin
+*.xtd.bin
+*.rpf
+*.img
+*.rar
+*.oiv
+__pycache__/

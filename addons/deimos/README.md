@@ -2,29 +2,41 @@
 
 An add-on car on PC, and here too: its own vehicle (`deimos`), with the mod's
 own handling and colour combinations. Spawn **Car Spawning → Grotti Deimos
-GTS**. In-game it shows the Turismo's name, as the mod's line chooses.
+GTS**. In-game it shows the Turismo's name (and has its engine sound), as the
+mod's line chooses.
 
 ## Pop-up headlights
 
-On PC the lamp pods are turned 30° by ZolikaPatch, a patch to the PC game the
-port cannot run. Here the car is built on the stock **Banshee**, which has
-three *extras* (parts the game can show or hide). The converter puts the pods
-on them in three poses: extra 1 is down, extras 2 and 5 are 30° up, tilted
-one way or the other. The trainer shows the right pose:
+In the car, **d-pad left** raises or lowers the lamp pods, and the headlights
+follow (pods up: lights on, pods down: lights off). The pods swing up on
+their hinge in about a third of a second. The d-pad doesn't change the radio
+in the Deimos. *Vehicle Options → Deimos Pop-ups* switches to **Automatic**:
+up whenever IV turns car lights on (night, rain, fog).
 
-- *Vehicle Options → Deimos Pop-up Lights*: **With Headlights** (up at
-  night, 20:00-06:00, and in rain or fog, when IV turns car lights on),
-  **Always Up** or **Always Down**.
-- *Deimos Pop-up Tilt*: **A** or **B**. Pick whichever looks right; the
-  direction could not be checked without a console.
+On PC, ZolikaPatch (a patch the port cannot run) turns the pods 30°. Here:
 
-The pods switch between poses rather than swinging smoothly. Converted with:
-`run_vehicle.py ... deimos banshee "misc_headlight_l,misc_headlight_r=extra_1@0,extra_2@30,extra_5@-30"`
+- The mod's pods are a box per side behind the front bumper: housing
+  (`misc_y`), rear wall and floor (`misc_m`), front lamps (`misc_w`,
+  `misc_p`) and lenses (`misc_headlight_l/r`), all hung from `misc_a`, the
+  hinge at their back edge, flush with the bonnet.
+- The car is built on the stock **Banshee**, whose `extra_1` is a bone no
+  physics part drives. The converter binds every pod part to it and moves it
+  to the hinge, in every copy of the skeleton's pose.
+- The trainer turns that bone the way the game itself poses a bone: it
+  writes the bone's local matrix in the car's live skeleton (the one
+  `sub_822832E8` hands the game when it hides an extra), turning it about the
+  car's width, front edge rising, to 30°. The extra is kept switched on (the
+  game picks extras at random, and a hidden one is sent to the world's
+  origin).
+
+Converted with:
+`run_vehicle.py ... deimos banshee "extra_1=misc_a,misc_y,misc_w,misc_p,misc_m,misc_headlight_l,misc_headlight_r"`
 
 ## Limits
 
 | | |
 |---|---|
+| Doors, bonnet, boot, glass | fixed to the body: they don't open or break (the Banshee's parts are elsewhere; posing the Deimos's on them drew them displaced) |
 | Moving steering wheel | a ZolikaPatch feature: the wheel is fixed |
 | Collision | the Banshee's (the template) |
 | Tuning parts (`misc_*` bones) | the non-tuning version, as the mod's Addon folder ships it |

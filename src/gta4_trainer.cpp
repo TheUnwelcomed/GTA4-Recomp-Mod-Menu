@@ -159,9 +159,9 @@ std::array g_natives = {
     NativeEntry{"SET_OBJECT_COLLISION"}, NativeEntry{"FREEZE_OBJECT_POSITION"},
     // Chaos: raining cars, gravity.
     NativeEntry{"SET_CAR_HEADING"}, NativeEntry{"SET_GRAVITY_OFF"},
-    // Grotti Deimos pop-up headlights (vehicle extras).
+    // Grotti Deimos pop-up headlights (the pods' extra, the lamps).
     NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"GET_TIME_OF_DAY"},
-    NativeEntry{"GET_CURRENT_WEATHER"},
+    NativeEntry{"GET_CURRENT_WEATHER"}, NativeEntry{"FORCE_CAR_LIGHTS"},
     // Bring Your Own Ride: the checks it answers and the vehicle kinds.
     NativeEntry{"IS_CHAR_IN_MODEL"}, NativeEntry{"IS_CAR_MODEL"},
     NativeEntry{"IS_THIS_MODEL_A_CAR"}, NativeEntry{"IS_THIS_MODEL_A_BIKE"},
@@ -230,6 +230,47 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
   for (size_t w = 0; w < out.words.size(); ++w)
     out.words[w] = Read(base, result + uint32_t(w) * 4);
   return out;
+}
+
+// Calls a game function (not a native) with up to two arguments on the same
+// kind of scratch frame; returns its r3.
+std::optional<uint32_t> CallGuest(PPCContext& parent, uint8_t* base, uint32_t address, uint32_t r3,
+                                  uint32_t r4 = 0) {
+  auto* runtime = rex::Runtime::instance();
+  auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
+  auto* function = dispatcher ? dispatcher->GetFunction(address) : nullptr;
+  if (!function || parent.r1.u32 < 0x200)
+    return std::nullopt;
+  const uint32_t frame = (parent.r1.u32 - 0x200u) & ~15u;
+  if (!Span(base, frame, 0x200, true))
+    return std::nullopt;
+  Write(base, frame, parent.r1.u32);
+  PPCContext call = parent;
+  call.r1.u32 = frame;
+  call.r3.u32 = r3;
+  call.r4.u32 = r4;
+  call.lr = 0x82844BA0;
+  function(call, base);
+  return call.r3.u32;
+}
+
+// A script vehicle handle's CVehicle, as the game's own handle lookups do it
+// (IS_CAR_MODEL's worker, sub_82594230): the vehicle pool at 0x82FB0700
+// (+0 storage, +4 a generation byte per slot, +12 the slot size), the slot
+// in the handle's upper bits, its generation in the low byte.
+uint32_t VehicleAddress(uint8_t* base, uint32_t handle) {
+  constexpr uint32_t kVehiclePool = 0x82FB0700;
+  if (!handle || !Span(base, kVehiclePool, 4))
+    return 0;
+  const uint32_t pool = Read(base, kVehiclePool);
+  if (!Span(base, pool, 16))
+    return 0;
+  const uint32_t slot = handle >> 8, storage = Read(base, pool), flags = Read(base, pool + 4),
+                 size = Read(base, pool + 12);
+  if (!Span(base, flags + slot, 1) || *rex::memory::GuestPtr(base, flags + slot) != (handle & 0xFF))
+    return 0;
+  const uint32_t vehicle = storage + slot * size;
+  return Span(base, vehicle, 64) ? vehicle : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +548,7 @@ constexpr std::array kVehicles = {
     VehicleChoice{"Batmobile", "BATMOBILE"},
     VehicleChoice{"F-16 Fighter Jet", "F16", 16.0f},
     VehicleChoice{"Grotti Deimos GTS", "DEIMOS"},
+    VehicleChoice{"Vapid Dominator 645", "DOM645T"},
 };
 struct WeaponChoice {
   std::string_view label;
@@ -546,7 +588,7 @@ enum class Action {
   kToggleGod, kToggleNeverWanted, kWantedUp, kWantedDown, kWantedApply,
   kMoney, kHeal,
   kToggleVehicleGod, kRepair, kToggleWarpIn, kToggleGadgets, kToggleJet,
-  kCyclePopups, kTogglePopupTilt, kToggleAnyRide,
+  kTogglePopupAuto, kToggleAnyRide,
   kSpawnVehicle, kTeleportWaypoint, kTeleportPreset, kSavePosition, kLoadPosition,
   kHourUp, kHourDown, kMinuteUp, kMinuteDown, kTimeApply,
   kWeatherNext, kWeatherPrevious, kWeatherApply, kWeatherRelease,
@@ -570,8 +612,7 @@ struct State {
   bool jet = true;  // F-16 flight and weapons, active only in the jet
   bool raining = false, gravity_off = false;
   bool any_ride = false;     // Bring Your Own Ride: missions take the player's vehicle
-  int popup_mode = 0;        // Deimos pop-ups: 0 with the lights, 1 always up, 2 always down
-  bool popup_flip = false;   // which way they tilt up (the model's two up poses)
+  bool popup_auto = false;   // Deimos pop-ups: d-pad left (false) or up with the lights (true)
   int wanted_target = 0;
   int hour = 12, minute = 0, weather = 1;
   // Async vehicle spawn.
@@ -709,12 +750,9 @@ std::vector<Item> PageItems(const State& s) {
                 Action::kToggleGadgets},
                {s.jet ? "F-16 Flight and Weapons: ON" : "F-16 Flight and Weapons: OFF",
                 Action::kToggleJet},
-               {s.popup_mode == 0   ? "Deimos Pop-up Lights: With Headlights"
-                : s.popup_mode == 1 ? "Deimos Pop-up Lights: Always Up"
-                                    : "Deimos Pop-up Lights: Always Down",
-                Action::kCyclePopups},
-               {s.popup_flip ? "Deimos Pop-up Tilt: B" : "Deimos Pop-up Tilt: A",
-                Action::kTogglePopupTilt},
+               {s.popup_auto ? "Deimos Pop-ups: Automatic (with the lights)"
+                             : "Deimos Pop-ups: D-pad Left",
+                Action::kTogglePopupAuto},
                {s.any_ride ? "Bring Your Own Ride: ON" : "Bring Your Own Ride: OFF",
                 Action::kToggleAnyRide}};
       break;
@@ -1154,18 +1192,75 @@ void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const Mode
   rex::FlushLogging();
 }
 
-// The Grotti Deimos's pop-up headlights: the model carries its lamp pods in
-// three poses on the template's extras (1: down, 2 and 5: up, tilted one way
-// or the other); the game shows or hides extras, the trainer picks the pose.
-// Up when the game would have headlights on (night, rain, fog), or as set.
+// The Grotti Deimos's pop-up headlights. The converter hangs both lamp pods
+// (housings, lamps and lenses) on the template's extra_1, placed on their
+// hinge at the back of the pods, flush with the bonnet at rest. The trainer
+// swings that bone the way the game itself poses a bone: the bone's local
+// matrix in the car's live skeleton (what sub_822832E8 hands the game when
+// it hides an extra), a rotation about the car's width, front edge rising.
+// D-pad left in the car raises or lowers them, the headlights following; or
+// they rise whenever IV turns car lights on (night, rain, fog).
 struct PopupState {
   uint32_t car = 0;
-  int pose = 0;
   bool in_car = false;
-  uint64_t next_probe = 0, next_check = 0;
+  bool up = false;          // where they are heading
+  float angle = 0.0f;       // where they are, degrees
+  uint16_t prev_buttons = 0;
+  uint64_t next_probe = 0, next_check = 0, last_ms = 0, next_write = 0;
 };
 PopupState g_popup;
-constexpr std::array<int, 3> kPopupExtras = {1, 2, 5};
+constexpr uint32_t kPopupExtra = 1;          // extra_1 holds the pods
+constexpr uint32_t kPopupComponent = 88 + kPopupExtra;  // the model structure's slot for it
+constexpr float kPopupUpDegrees = 30.0f;     // ZolikaPatch's angle for this mod on PC
+constexpr float kPopupDegreesPerSecond = 85.0f;  // up in about a third of a second
+constexpr uint32_t kEntitySkeleton = 0x8217DB60;  // entity -> its live crSkeleton
+
+// Turns the pods' bone to `degrees` (0: down). False when the car, its
+// skeleton or the bone cannot be read safely; nothing is written then.
+bool PosePopupBone(PPCContext& ctx, uint8_t* base, uint32_t handle, float degrees) {
+  static const uint32_t kDeimos = ModelHash("DEIMOS");
+  const uint32_t vehicle = VehicleAddress(base, handle);
+  const uint32_t info = vehicle ? FindModelInfo(base, kDeimos) : 0;
+  if (!info || !Span(base, info + 196, 4))
+    return false;
+  const uint32_t structure = Read(base, info + 196);
+  if (!Span(base, structure + 4 * kPopupComponent, 4))
+    return false;
+  const int32_t bone = int32_t(Read(base, structure + 4 * kPopupComponent));
+  const auto skeleton = CallGuest(ctx, base, kEntitySkeleton, vehicle);
+  if (bone < 0 || !skeleton || !*skeleton || !Span(base, *skeleton, 0x18))
+    return false;
+  const uint32_t data = Read(base, *skeleton + 4), locals = Read(base, *skeleton + 0x0C),
+                 count = Read(base, *skeleton + 0x10);
+  if (uint32_t(bone) >= count || !Span(base, data, 24) ||
+      !Span(base, locals + 80 * uint32_t(bone), 64, true))
+    return false;
+  // The bone's rest local matrix (skeleton data +16: rotation rows, then the
+  // translation row: the hinge), turned about its own X axis.
+  const uint32_t rest = Read(base, data + 16) + 64 * uint32_t(bone);
+  if (!Span(base, rest, 64))
+    return false;
+  const float rad = degrees * 3.14159265f / 180.0f, c = std::cos(rad), s = std::sin(rad);
+  const float turn[3][3] = {{1, 0, 0}, {0, c, s}, {0, -s, c}};
+  const uint32_t local = locals + 80 * uint32_t(bone);
+  for (uint32_t row = 0; row < 3; ++row) {
+    for (uint32_t col = 0; col < 3; ++col) {
+      float v = 0;
+      for (uint32_t k = 0; k < 3; ++k)
+        v += turn[row][k] * ReadFloat(base, rest + 16 * k + 4 * col);
+      Write(base, local + 16 * row + 4 * col, Bits(v));
+    }
+    Write(base, local + 16 * row + 12, Read(base, rest + 16 * row + 12));
+  }
+  for (uint32_t w = 0; w < 4; ++w)  // the hinge stays put
+    Write(base, local + 48 + 4 * w, Read(base, rest + 48 + 4 * w));
+  return true;
+}
+
+void SetPopupLights(PPCContext& ctx, uint8_t* base, uint32_t car, bool up, bool automatic) {
+  // FORCE_CAR_LIGHTS: 0 the game's choice, 1 off, 2 on.
+  Invoke(ctx, base, "FORCE_CAR_LIGHTS", {car, automatic ? 0u : (up ? 2u : 1u)});
+}
 
 bool HeadlightsWanted(PPCContext& ctx, uint8_t* base) {
   if (const auto t = Invoke(ctx, base, "GET_TIME_OF_DAY", {0, 0}, 0, 0, 2)) {
@@ -1181,40 +1276,77 @@ bool HeadlightsWanted(PPCContext& ctx, uint8_t* base) {
   return false;
 }
 
-int WantedPopupPose(PPCContext& ctx, uint8_t* base, const State& s) {
-  const bool up = s.popup_mode == 1 || (s.popup_mode == 0 && HeadlightsWanted(ctx, base));
-  return up ? (s.popup_flip ? 5 : 2) : 1;
+// A Deimos just made (or first met): its pods' extra shown (the game picks
+// extras at random, and a hidden one is sent to the world's origin), pods
+// down.
+void PreparePopups(PPCContext& ctx, uint8_t* base, uint32_t car) {
+  Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, kPopupExtra, 0u});
+  g_popup.car = car;
+  g_popup.up = false;
+  g_popup.angle = 0.0f;
+  g_popup.next_write = 0;
+  PosePopupBone(ctx, base, car, 0.0f);
 }
 
-void SetPopupPose(PPCContext& ctx, uint8_t* base, uint32_t car, int pose) {
-  for (const int extra : kPopupExtras)
-    Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, uint32_t(extra), extra == pose ? 0u : 1u});
-}
-
-void PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const State& s) {
+// Every frame in the Deimos (a look a few times a second otherwise). Returns
+// whether the player is in it with the d-pad switch on (d-pad left is then
+// the pods', not the radio's).
+bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const State& s,
+                 uint16_t buttons) {
   if (!g_have_deimos)
-    return;
+    return false;
   const uint64_t now = NowMs();
   if (!g_popup.in_car && now < g_popup.next_probe)
-    return;
-  g_popup.next_probe = now + 400;
-  if (g_popup.in_car && now < g_popup.next_check)
-    return;
-  g_popup.next_check = now + 250;
-  static const uint32_t kDeimos = ModelHash("DEIMOS");
-  const auto& vehicle = PlayerVehicle(ctx, base, game);
-  if (!vehicle.car || vehicle.model != kDeimos) {
-    g_popup.in_car = false;
-    return;
+    return false;
+  if (!g_popup.in_car || now >= g_popup.next_check) {
+    g_popup.next_probe = now + 400;
+    g_popup.next_check = now + 250;
+    static const uint32_t kDeimos = ModelHash("DEIMOS");
+    const auto& vehicle = PlayerVehicle(ctx, base, game);
+    if (!vehicle.car || vehicle.model != kDeimos) {
+      g_popup.in_car = false;
+      return false;
+    }
+    const uint32_t car = *vehicle.car;
+    if (!g_popup.in_car || g_popup.car != car) {
+      if (g_popup.car != car)
+        PreparePopups(ctx, base, car);
+      else  // back in the same car: make sure the pods' extra is still shown
+        Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, kPopupExtra, 0u});
+      g_popup.prev_buttons = buttons;  // no edge from a button held while getting in
+      g_popup.last_ms = now;
+      SetPopupLights(ctx, base, car, g_popup.up, s.popup_auto);
+    }
+    if (s.popup_auto) {
+      const bool want = HeadlightsWanted(ctx, base);
+      if (want != g_popup.up)
+        g_popup.up = want;
+    }
+    g_popup.in_car = true;
   }
-  const uint32_t car = *vehicle.car;
-  const int pose = WantedPopupPose(ctx, base, s);
-  if (!g_popup.in_car || g_popup.car != car || g_popup.pose != pose) {
-    SetPopupPose(ctx, base, car, pose);
-    g_popup.car = car;
-    g_popup.pose = pose;
+  // The switch.
+  const bool pressed = (buttons & X_INPUT_GAMEPAD_DPAD_LEFT) &&
+                       !(g_popup.prev_buttons & X_INPUT_GAMEPAD_DPAD_LEFT);
+  g_popup.prev_buttons = buttons;
+  if (pressed && !s.popup_auto) {
+    g_popup.up = !g_popup.up;
+    SetPopupLights(ctx, base, g_popup.car, g_popup.up, false);
   }
-  g_popup.in_car = true;
+  // The swing, eased at both ends; the pose is re-applied now and then while
+  // settled, in case the game reset the skeleton (a car streamed back in).
+  const float dt = std::min<float>(float(now - g_popup.last_ms), 100.0f) / 1000.0f;
+  g_popup.last_ms = now;
+  const float target = g_popup.up ? kPopupUpDegrees : 0.0f;
+  const float before = g_popup.angle;
+  const float step = kPopupDegreesPerSecond * dt;
+  g_popup.angle = std::fabs(target - before) <= step ? target : before + (target > before ? step : -step);
+  if (g_popup.angle != before || now >= g_popup.next_write) {
+    const float t = g_popup.angle / kPopupUpDegrees;
+    const float eased = kPopupUpDegrees * t * t * (3.0f - 2.0f * t);
+    PosePopupBone(ctx, base, g_popup.car, eased);
+    g_popup.next_write = now + 250;
+  }
+  return !s.popup_auto;
 }
 
 void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s) {
@@ -1287,8 +1419,8 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   if (car && car->words[0]) {
     const uint32_t handle = car->words[0];
     Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {handle});
-    if (s.pending_hash == ModelHash("DEIMOS"))  // extras come up random: set the pods
-      SetPopupPose(ctx, base, handle, WantedPopupPose(ctx, base, s));
+    if (s.pending_hash == ModelHash("DEIMOS"))  // extras come up random: show the pods
+      PreparePopups(ctx, base, handle);
     if (s.warp_in)
       Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, handle});
     // Hand the car to the world so it cleans up like traffic.
@@ -1737,17 +1869,11 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       Invoke(ctx, base, "SET_GRAVITY_OFF", {s.gravity_off ? 1u : 0u});
       Toast(s, s.gravity_off ? "Gravity off: everything floats." : "Gravity back to normal.");
       break;
-    case Action::kCyclePopups:
-      s.popup_mode = (s.popup_mode + 1) % 3;
-      g_popup.in_car = false;  // re-apply on the next look
-      Toast(s, s.popup_mode == 0   ? "Deimos pop-ups follow the headlights."
-               : s.popup_mode == 1 ? "Deimos pop-ups always up."
-                                   : "Deimos pop-ups always down.");
-      break;
-    case Action::kTogglePopupTilt:
-      s.popup_flip = !s.popup_flip;
-      g_popup.in_car = false;
-      Toast(s, "Deimos pop-ups tilt the other way.");
+    case Action::kTogglePopupAuto:
+      s.popup_auto = !s.popup_auto;
+      g_popup.in_car = false;  // re-applied on the next look
+      Toast(s, s.popup_auto ? "Deimos pop-ups rise with the headlights (night, rain, fog)."
+                            : "Deimos pop-ups: d-pad left in the car raises and lowers them.");
       break;
     case Action::kToggleAnyRide:
       if (!RideHooksInstalled()) {
@@ -2189,8 +2315,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     };
     g_have_deimos = installed("DEIMOS");
     g_have_f16 = installed("F16");
-    REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}",
-                installed("BATMOBILE"), g_have_f16, g_have_deimos);
+    REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Deimos {}, Dominator 645 {}",
+                installed("BATMOBILE"), g_have_f16, g_have_deimos, installed("DOM645T"));
   }
 
   bool acted = false;
@@ -2247,11 +2373,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     if (JetControls(ctx, base, game, s, pad, previous))
       vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT;
   }
+  if (popup_due &&
+      PopupLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed)))
+    vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
   g_vehicle_mask.store(vehicle_mask, std::memory_order_relaxed);
   if (rain_due)
     RainCars(ctx, base, game);
-  if (popup_due)
-    PopupLights(ctx, base, game, s);
   if (acted || s.toast_until > now) {
     const auto missing = MissingNatives();
     PublishDraw(s, g_natives.size(), missing.size(), missing);

@@ -9,10 +9,13 @@ which exists on both platforms (see the verification log in the repo):
   vertex element encodings, texture tiling/endian, skeleton/matrix parity,
   shader parameter subsetting, VB/IB/D3D header layouts.
 
-The 360 template keeps: physics, fragment groups/children, skeleton topology,
-all other children. The donor provides: main drawable LODs, the wheel child's
-LODs, shaders (cloned from same-named 360 shaders, values by name hash),
-textures (merged into the .xtd), bounds, and bone transforms (by bone name).
+The 360 template keeps: physics, fragment groups/children, skeleton topology
+and rotations, all other children. The donor provides: main drawable LODs,
+the wheel child's LODs, shaders (cloned from same-named 360 shaders - the
+template's, or another stock car's - values by name hash), textures (merged
+into the .xtd), bounds, and the positions of the template's point bones
+(wheels and suspension, seats, lamps, exhausts), moved consistently in every
+copy of the skeleton's pose (see "the transplant" below).
 """
 import math
 import struct
@@ -246,22 +249,123 @@ def bones(r, skel):
 
 
 # ---------------------------------------------------------------- the transplant
-def rotate_x(p, pivot, degrees):
-    """Rotation about the X axis through `pivot` (+: forward rises)."""
-    a = math.radians(degrees)
-    c, s_ = math.cos(a), math.sin(a)
-    y, z = p[1] - pivot[1], p[2] - pivot[2]
-    return (p[0], pivot[1] + y * c - z * s_, pivot[2] + y * s_ + z * c)
+#
+# How the game poses a car (worked out on the console files and the game code):
+#  - The skeleton data holds each bone's local translation (+0x20), its
+#    position in the car (+0x60), and three matrix arrays: global rotations
+#    (+8), their inverses (+12) and the local matrices (+16).
+#  - The fragment also carries two ready-made poses of the whole skeleton
+#    (fragType +0x1DC and +0x1E0: locals, 0x50 apart, and globals, 0x40 apart).
+#    A spawned car starts from those, and the physics parts (fragment
+#    children: doors, bonnet, glass, bumpers, wheels) are placed from the
+#    collision composite's part matrices.
+#  - Skinning draws a vertex with (the bone's current matrix) x (the inverse
+#    of its rest pose). Every copy of a bone's rest pose must therefore agree,
+#    or the parts on that bone are drawn displaced: v1.7.4 moved bones in the
+#    skeleton data only, and a part could land metres away (the Batmobile's
+#    door bones sit 13 m under the car in the mod).
+#  - The game hides a bone (an extra switched off, a part broken off, a
+#    smashed window or lamp) by overwriting its local matrix with a constant
+#    that sends it, and every bone under it, to the world's origin. A
+#    triangle with one corner there is a long black sliver across the map.
+#
+# So the donor's geometry rides only on bones the game never hides or poses
+# from physics parts of a different car: the chassis, the body shell, the
+# wheel assembly (moved, consistently, to the donor's wheels) and a pivot
+# bone the trainer turns (pop-up lamps). Everything else is drawn rigid on
+# the chassis: it stays where the modder put it.
+
+# Template bones moved to the donor's position (where the game reads a point
+# from the skeleton: wheels and suspension, seats, lamps, exhausts, smoke).
+POINT_PREFIXES = ('wheel_', 'hub_', 'suspension_', 'seat_', 'headlight_', 'taillight_',
+                  'brakelight_', 'indicator_', 'reversinglight_', 'exhaust', 'overheat', 'siren')
+POINT_NAMES = {'engine', 'interiorlight', 'petrolcap', 'steeringwheel'}
+# Bones the donor's geometry may stay on: never hidden, never posed by a
+# collision part of the template's own shape.
+CARRY_PREFIXES = ('wheel_', 'hub_', 'suspension_')
+CARRY_NAMES = {'chassis', 'bodyshell'}
+# A donor bone further than this outside its own model is a parking spot
+# (the Batmobile keeps its unused door bones 13 m below the car).
+POINT_MARGIN = 0.6
+
+
+def is_point(name):
+    return name.startswith(POINT_PREFIXES) or name in POINT_NAMES
+
+
+def carries(name):
+    return name.startswith(CARRY_PREFIXES) or name in CARRY_NAMES
+
+
+def v_mat(v, m):
+    """Row vector times 3x3 (rows are the basis vectors, as RAGE stores them)."""
+    return tuple(v[0] * m[0][j] + v[1] * m[1][j] + v[2] * m[2][j] for j in range(3))
+
+
+def m_mul(a, b):
+    return [v_mat(a[i], b) for i in range(3)]
+
+
+def m_t(m):
+    return [tuple(m[j][i] for j in range(3)) for i in range(3)]
+
+
+def v_sub(a, b):
+    return tuple(x - y for x, y in zip(a, b))
+
+
+def v_add(a, b):
+    return tuple(x + y for x, y in zip(a, b))
+
+
+def close(a, b, tol=2e-3):
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def read_skeleton(r, sk):
+    """Bones of a skeleton: name, parent, local translation and rotation,
+    stored position and global rotation."""
+    e = r.e
+    bo, n = r.vptr(sk), r.u16(sk + 20)
+    garr, larr = r.vptr(sk + 8), r.vptr(sk + 16)
+    out = []
+    for i in range(n):
+        b = bo + 0xE0 * i
+        par = r.u32(b + 0x10)
+        pi = ((par & 0x0FFFFFFF) - bo) // 0xE0 if par else -1
+        out.append(dict(
+            name=r.cstr(r.vptr(b)), parent=pi, rec=b,
+            t=struct.unpack_from(e + '3f', r.virt, b + 0x20),
+            pos=struct.unpack_from(e + '3f', r.virt, b + 0x60),
+            L=[struct.unpack_from(e + '3f', r.virt, larr + 64 * i + 16 * k) for k in range(3)],
+            G=[struct.unpack_from(e + '3f', r.virt, garr + 64 * i + 16 * k) for k in range(3)]))
+    return bo, out
+
+
+def pose(bones, translations):
+    """Global positions and rotations from local translations (and the
+    bones' own local rotations), parents first."""
+    pos, rot = [None] * len(bones), [None] * len(bones)
+    for i, b in enumerate(bones):
+        p = b['parent']
+        assert p < i, 'bone %s comes before its parent' % b['name']
+        if p < 0:
+            rot[i], pos[i] = b['L'], translations[i]
+        else:
+            rot[i] = m_mul(b['L'], rot[p])
+            pos[i] = v_add(v_mat(translations[i], rot[p]), pos[p])
+    return pos, rot
 
 
 class Converter:
-    def __init__(self, tmpl, donor, log=print, variants=None):
-        """`variants`: {donor bone: [(template bone, degrees), ...]} - every
-        geometry bound to that donor bone is emitted once per entry, bound to
-        the template bone (an extra, say) and turned by `degrees` about X
-        through the donor bone's origin. The game switches extras on and off,
-        so the trainer can show one pose at a time (pop-up headlights)."""
-        self.variants = variants or {}
+    def __init__(self, tmpl, donor, log=print, pivots=None, shader_sources=()):
+        """`pivots`: {template bone: [donor bones]} - the donor bones' geometry
+        is bound to that template bone, which is moved to the first donor
+        bone's position; the trainer turns it (pop-up lamps).
+        `shader_sources`: other stock 360 cars to take a shader from when the
+        template lacks the donor's (paint2/paint3 live on the airtug, police,
+        taxi...)."""
+        self.pivots = pivots or {}
         self.t = tmpl     # rsc5.Resource (360, big-endian)
         self.d = donor    # rsc5.Resource (PC)
         self.log = log
@@ -272,6 +376,7 @@ class Converter:
         self.decls = {}
         self.uv_filled = 0
         self.texture_names = set()
+        self.shader_sources = list(shader_sources)
         self._templates()
 
     # Raw template structures to clone (vtables and constant fields).
@@ -292,13 +397,16 @@ class Converter:
         self.t_coll = t.virt[lod_collections(t, d['off'])[0]:lod_collections(t, d['off'])[0] + 8]
         sg = d['shader_group']['off']
         self.t_sg = t.virt[sg:sg + 0x50]
-        # template shaders by .sps, with their group-level per-shader values
+        # shaders by .sps: the template's first, then the other stock cars'
         self.t_shaders = {}
-        usage_arr, extra_arr = t.vptr(sg + 64), t.vptr(sg + 72)
-        for i, s in enumerate(d['shader_group']['shaders']):
-            sps = shader_sps(t, s['off'])
-            self.t_shaders.setdefault(sps, dict(off=s['off'], usage=t.u32(usage_arr + 4 * i),
-                                                extra=t.u32(extra_arr + 4 * i)))
+        for res in [t] + self.shader_sources:
+            rd = rsc5.read_fragtype(res)['drawable'] if res is not t else d
+            rsg = rd['shader_group']['off']
+            usage_arr, extra_arr = res.vptr(rsg + 64), res.vptr(rsg + 72)
+            for i, s in enumerate(rd['shader_group']['shaders']):
+                sps = shader_sps(res, s['off'])
+                self.t_shaders.setdefault(sps, dict(res=res, off=s['off'], usage=res.u32(usage_arr + 4 * i),
+                                                    extra=res.u32(extra_arr + 4 * i)))
         # a template texture-parameter object to clone when the template slot is empty
         self.t_texobj = None
         for s in d['shader_group']['shaders']:
@@ -319,65 +427,207 @@ class Converter:
         raise ValueError('template has no wheel child')
 
     def _donor_wheel(self):
+        """The donor's wheel mesh: the child on wheel_lf, else on another wheel."""
+        found = None
         for c in self.df['children']:
-            if c['drawable'] and c['drawable']['lods']:
+            if not (c['drawable'] and c['drawable']['lods']):
+                continue
+            bone = self.d.u16(c['off'] + 0x0E)
+            name = self.donor_bones[bone]['name'] if bone < len(self.donor_bones) else ''
+            if name == 'wheel_lf':
                 return c['drawable']
-        return None  # wheels modelled into the body (or none): template wheels hidden
+            if name.startswith('wheel_') and found is None:
+                found = c['drawable']
+        return found  # None: wheels modelled into the body (or none): template wheels hidden
 
     # ---------------- skeleton
+    def _instances(self):
+        """The fragment's two ready-made skeleton poses: (locals, globals)."""
+        out = []
+        sk = self.tf['drawable']['skeleton_off']
+        for hdr in (0x1DC, 0x1E0):
+            inst = self.t.vptr(hdr)
+            if inst is None:
+                continue
+            assert self.t.vptr(inst + 4) == sk and self.t.u32(inst + 0x10) == len(self.tmpl_bones), \
+                'fragment pose at +%X does not belong to the skeleton' % hdr
+            out.append((self.t.vptr(inst + 0x0C), self.t.vptr(inst + 0x14)))
+        return out
+
+    def _phys_children(self):
+        """{template bone index: child index} for the fragment's physics parts."""
+        t = self.t
+        lst = t.vptr(0xD4)
+        out = {}
+        for i in range(self.tf['child_count']):
+            c = t.vptr(lst + 4 * i)
+            if c is not None:
+                out[t.u16(c + 0x0E)] = i
+        return out
+
     def transplant_skeleton(self):
         t, d = self.t, self.d
         tsk = self.tf['drawable']['skeleton_off']
         dsk = self.df['drawable']['skeleton_off']
-        tbo, tnames = bones(t, tsk)
-        dbo, dnames = bones(d, dsk)
-        dindex = {n: i for i, n in enumerate(dnames)}
+        tbo, tb = read_skeleton(t, tsk)
+        _, db = read_skeleton(d, dsk)
+        self.tmpl_bones, self.donor_bones = tb, db
+        tnames = [b['name'] for b in tb]
+        dnames = [b['name'] for b in db]
+        tindex = {n: i for i, n in enumerate(tnames)}
+        dindex = {BONE_ALIAS.get(n, n): i for i, n in enumerate(dnames)}
+        self.template_bone_index = tindex
         self.donor_bone_names = dnames
-        self.donor_bone_pos = [struct.unpack_from('<3f', d.virt, dbo + 0xE0 * i + 0x60)
-                               for i in range(len(dnames))]
-        self.template_bone_index = {n: i for i, n in enumerate(tnames)}
-        for donor_bone, poses in self.variants.items():
-            assert donor_bone in dindex, 'variant bone %s not in the donor' % donor_bone
-            for target, _ in poses:
-                assert target in self.template_bone_index, \
-                    'variant target %s not in the template' % target
-        self.bone_map = {}
-        self.unmapped = []
-        for di, n in enumerate(dnames):
-            tn = BONE_ALIAS.get(n, n)
-            if tn not in tnames:
-                self.unmapped.append(n)
-                tn = BONE_FALLBACK
-            self.bone_map[di] = tnames.index(tn)
-        if self.unmapped:
-            self.log('skeleton: donor bones without a template bone, drawn on %s: %s'
-                     % (BONE_FALLBACK, ', '.join(self.unmapped)))
-        moved = 0
-        self.stand_ins = []
-        for ti, n in enumerate(tnames):
-            if n not in dindex:
-                if WHEEL_STAND_IN.get(n) in dindex:
-                    self.stand_ins.append('%s<-%s' % (n, WHEEL_STAND_IN[n]))
-                    di = dindex[WHEEL_STAND_IN[n]]
-                else:
-                    continue
+        phys = self._phys_children()
+
+        # The template's own data must chain to its stored poses, or the rules
+        # above don't describe this file.
+        tpos, trot = pose(tb, [b['t'] for b in tb])
+        for i, b in enumerate(tb):
+            assert close(tpos[i], b['pos']), 'template bone %s: chained %s, stored %s' % (b['name'], tpos[i], b['pos'])
+            assert all(close(trot[i][k], b['G'][k]) for k in range(3)), 'template bone %s rotation' % b['name']
+        instances = self._instances()
+        for loc, glo in instances:
+            for i in range(len(tb)):
+                assert close(struct.unpack_from('>3f', t.virt, loc + 0x50 * i + 0x30), tb[i]['t'])
+                assert close(struct.unpack_from('>3f', t.virt, glo + 0x40 * i + 0x30), tpos[i])
+
+        # where the donor's own bones are (its file chains the same way)
+        dmin = [x - POINT_MARGIN for x in self.df['drawable']['bmin'][:3]]
+        dmax = [x + POINT_MARGIN for x in self.df['drawable']['bmax'][:3]]
+
+        def sane(p):
+            return all(lo <= x <= hi for x, lo, hi in zip(p, dmin, dmax))
+
+        # targets: template bone -> new position in the car
+        target, why = {}, {}
+        self.stand_ins, self.parked = [], []
+        for ti, b in enumerate(tb):
+            n = b['name']
+            if not is_point(n) or (ti in phys and not n.startswith('wheel_')):
+                continue
+            src = n if n in dindex else (WHEEL_STAND_IN.get(n) if WHEEL_STAND_IN.get(n) in dindex else None)
+            if src is None:
+                continue
+            p = db[dindex[src]]['pos']
+            if not sane(p):
+                self.parked.append('%s (%.1f, %.1f, %.1f)' % (src, *p))
+                continue
+            if close(p, b['pos'], 1e-5):
+                continue  # already there (a car on itself, say): left byte for byte
+            if src != n:
+                self.stand_ins.append('%s<-%s' % (n, src))
+            target[ti] = p
+        self.pivot_of = {}  # donor bone index -> template pivot bone
+        for tname, sources in self.pivots.items():
+            assert tname in tindex, 'pivot %s not in the template' % tname
+            ti = tindex[tname]
+            assert ti not in phys, 'pivot %s is a physics part of the template' % tname
+            assert not any(b['parent'] == ti for b in tb), 'pivot %s has bones under it' % tname
+            for s in sources:
+                assert s in dindex, 'pivot source %s not in the donor' % s
+                self.pivot_of[dindex[s]] = tname
+            target[ti] = db[dindex[sources[0]]]['pos']
+        self.moved = set(target)
+
+        # new local translations, parents first (rotations stay the template's)
+        new_t = [b['t'] for b in tb]
+        npos = [None] * len(tb)
+        for i, b in enumerate(tb):
+            p = b['parent']
+            if i in target:
+                npos[i] = target[i]
+                new_t[i] = target[i] if p < 0 else v_mat(v_sub(target[i], npos[p]), m_t(trot[p]))
             else:
-                di = dindex[n]
-            src = d.virt[dbo + 0xE0 * di + 0x30:dbo + 0xE0 * di + 0xE0]
-            dst = tbo + 0xE0 * ti + 0x30
-            self.v.buf[dst:dst + len(src)] = swap_words(src)
-            for k in (8, 12, 16):
-                ta, da = t.vptr(tsk + k), d.vptr(dsk + k)
-                self.v.buf[ta + 64 * ti:ta + 64 * ti + 64] = swap_words(d.virt[da + 64 * di:da + 64 * di + 64])
-            moved += 1
-        self.log('skeleton: %d of %d template bones moved to the donor\'s pose; '
-                 '%d donor bones mapped%s' % (moved, len(tnames), len(self.bone_map),
-                                              ('; stand-ins ' + ', '.join(self.stand_ins))
-                                              if self.stand_ins else ''))
+                npos[i] = new_t[i] if p < 0 else v_add(v_mat(new_t[i], trot[p]), npos[p])
+        check_pos, _ = pose(tb, new_t)
+        assert all(close(a, b_, 1e-4) for a, b_ in zip(check_pos, npos))
+
+        def put3(off, v3):
+            struct.pack_into('>3f', self.v.buf, off, *v3)
+
+        larr = t.vptr(tsk + 16)
+        for i, b in enumerate(tb):
+            if close(new_t[i], b['t'], 0) and close(npos[i], b['pos'], 0):
+                continue
+            put3(b['rec'] + 0x20, new_t[i])
+            put3(b['rec'] + 0x60, npos[i])
+            put3(larr + 64 * i + 0x30, new_t[i])
+            for loc, glo in instances:
+                put3(loc + 0x50 * i + 0x30, new_t[i])
+                put3(glo + 0x40 * i + 0x30, npos[i])
+        self.bone_pos = npos
+        self._move_composite_parts(phys, tpos, npos)
+
+        # which template bone each donor bone's geometry is drawn with
+        self.bone_map, self.rigid = {}, []
+        for di, b in enumerate(db):
+            n = BONE_ALIAS.get(b['name'], b['name'])
+            if di in self.pivot_of:
+                tn = self.pivot_of[di]
+            elif n in tindex and carries(n) and (n in CARRY_NAMES or tindex[n] in self.moved or
+                                                  close(b['pos'], npos[tindex[n]], 1e-5)):
+                tn = n
+            else:
+                # inherits a pivot from a donor parent (parts hung under the pod)
+                p, tn = b['parent'], BONE_FALLBACK
+                while p >= 0:
+                    if p in self.pivot_of:
+                        tn = self.pivot_of[p]
+                        break
+                    p = db[p]['parent']
+                if tn == BONE_FALLBACK and n != BONE_FALLBACK:
+                    self.rigid.append(b['name'])
+            self.bone_map[di] = tindex[tn]
+        self.log('skeleton: %d template bones moved to the donor\'s points%s%s; donor parts drawn rigid on %s: %d'
+                 % (len(self.moved), ('; stand-ins ' + ', '.join(self.stand_ins)) if self.stand_ins else '',
+                    ('; parked donor bones ignored: ' + ', '.join(self.parked)) if self.parked else '',
+                    BONE_FALLBACK, len(self.rigid)))
+
+    def _move_composite_parts(self, phys, old_pos, new_pos):
+        """Wheel collision parts follow their bones; the composite's box grows to hold them."""
+        t, v = self.t, self.v
+        bnd = t.vptr(0xEC)
+        if bnd is None:
+            return
+        assert t.u8(bnd + 4) == 0x0C, 'fragment bound is not a composite'
+        n = t.u16(bnd + 0x90)
+        mats = {t.vptr(bnd + 0x84), t.vptr(bnd + 0x88)}
+        boxes = t.vptr(bnd + 0x8C)
+        mx = list(struct.unpack_from('>3f', t.virt, bnd + 0x10))
+        mn = list(struct.unpack_from('>3f', t.virt, bnd + 0x20))
+        grew = False
+        for bone, child in phys.items():
+            if bone not in self.moved or child >= n:
+                continue
+            for m in mats:
+                cur = struct.unpack_from('>3f', t.virt, m + 0x40 * child + 0x30)
+                assert close(cur, old_pos[bone]), 'collision part %d is not at its bone' % child
+                struct.pack_into('>3f', v.buf, m + 0x40 * child + 0x30, *new_pos[bone])
+            rot = [struct.unpack_from('>3f', t.virt, next(iter(mats)) + 0x40 * child + 16 * k) for k in range(3)]
+            lo = struct.unpack_from('>3f', t.virt, boxes + 0x20 * child)
+            hi = struct.unpack_from('>3f', t.virt, boxes + 0x20 * child + 0x10)
+            for cx in (lo[0], hi[0]):
+                for cy in (lo[1], hi[1]):
+                    for cz in (lo[2], hi[2]):
+                        w = v_add(v_mat((cx, cy, cz), rot), new_pos[bone])
+                        for k in range(3):
+                            if w[k] > mx[k]:
+                                mx[k], grew = w[k], True
+                            if w[k] < mn[k]:
+                                mn[k], grew = w[k], True
+        if grew:
+            r08, r0c = t.f32(bnd + 0x08), t.f32(bnd + 0x0C)
+            half = [(a - b) / 2 for a, b in zip(mx, mn)]
+            radius = sum(h * h for h in half) ** 0.5
+            struct.pack_into('>3f', v.buf, bnd + 0x10, *mx)
+            struct.pack_into('>3f', v.buf, bnd + 0x20, *mn)
+            struct.pack_into('>3f', v.buf, bnd + 0x30, *[(a + b) / 2 for a, b in zip(mx, mn)])
+            struct.pack_into('>2f', v.buf, bnd + 0x08, max(r08, radius), max(r0c, radius + (r0c - r08)))
 
     # ---------------- shaders
     def build_shader_group(self):
-        t, d = self.t, self.d
+        d = self.d
         dsg = self.df['drawable']['shader_group']
         n = len(dsg['shaders'])
         new_shaders, usages, extras = [], [], []
@@ -387,10 +637,11 @@ class Converter:
             tsps = sps if sps in self.t_shaders else SPS_FALLBACK.get(sps)
             assert tsps in self.t_shaders, 'no template shader for %s' % sps
             ts = self.t_shaders[tsps]
-            new_shaders.append(self._clone_shader(ts['off'], s['off']))
+            new_shaders.append(self._clone_shader(ts, s['off']))
             usages.append(ts['usage'])
             extras.append(ts['extra'])
-            self.shader_report.append((sps, tsps))
+            self.shader_report.append((sps, tsps if ts['res'] is self.t else '%s (from %s)'
+                                       % (tsps, ts['res'].name.split('/')[-1])))
         v = self.v
         sg = v.put(self.t_sg)
         arr = v.alloc(4 * n)
@@ -409,24 +660,33 @@ class Converter:
         self.shader_usage = usages
         return sg
 
-    def _clone_shader(self, ts, ds):
-        """Clone template shader ts; fill parameters from donor shader ds by
-        name hash. Parameter block laid out exactly as the template's:
-        offsets | types (16-aligned) | names (16-aligned) | values (16-aligned)."""
-        t, d, v = self.t, self.d, self.v
-        tparams = shader_params(t, ts)
+    def _clone_shader(self, ts_info, ds):
+        """Clone a 360 shader (the template's, or another stock car's); fill
+        parameters from donor shader ds by name hash. Parameter block laid out
+        exactly as the source's: offsets | types (16-aligned) | names
+        (16-aligned) | values (16-aligned)."""
+        src, ts = ts_info['res'], ts_info['off']
+        foreign = src is not self.t
+        d, v = self.d, self.v
+        tparams = shader_params(src, ts)
         dparams = {p['hash']: p for p in shader_params(d, ds)}
-        so = v.put(t.virt[ts:ts + 0x60])
+        so = v.put(src.virt[ts:ts + 0x60])
+        if foreign:
+            # its strings (effect and .sps names) live in the other file; the
+            # rest of the header is values (+0x28 is the effect's name hash)
+            for k in (0x44, 0x48):
+                p = src.vptr(ts + k)
+                v.w32(so + k, (VP | v.cstr(src.cstr(p))) if p is not None else 0)
         # The parameter block (offsets | types | names | values, size at +0x20)
         # is replicated byte for byte with the same 64-byte phase: the 360
         # compiler's packing has gaps no simple rule explains (tire: zeroes
-        # before its matrix), so every value keeps the template's position.
-        tpo, tpt, tpn = t.vptr(ts + 0x14), t.vptr(ts + 0x24), t.vptr(ts + 0x34)
-        size = t.u32(ts + 0x20)
+        # before its matrix), so every value keeps the source's position.
+        tpo, tpt, tpn = src.vptr(ts + 0x14), src.vptr(ts + 0x24), src.vptr(ts + 0x34)
+        size = src.u32(ts + 0x20)
         # Kept inside one page when it fits (each array and value in it is
-        # reached through its own pointer), with the template's 64-byte phase.
+        # reached through its own pointer), with the source's 64-byte phase.
         po = v.alloc(size, 64, tpo % 64)
-        v.buf[po:po + size] = t.virt[tpo:tpo + size]
+        v.buf[po:po + size] = src.virt[tpo:tpo + size]
         assert po % 64 == tpo % 64
         pt, pn = po + (tpt - tpo), po + (tpn - tpo)
         for i, p in enumerate(tparams):
@@ -439,7 +699,7 @@ class Converter:
             if dp and dp['type'] == p['type'] and dp['value'] is not None:
                 v.buf[o:o + vsize] = swap_words(d.virt[dp['value']:dp['value'] + vsize])
             v.w32(po + 4 * i, VP | o)
-        # texture parameters: objects outside the block, as in the template
+        # texture parameters: objects outside the block, as in the source
         for i, p in enumerate(tparams):
             if p['type'] != 0:
                 continue
@@ -451,15 +711,21 @@ class Converter:
                     name = d.cstr(np_) if np_ is not None else None
                 use = name is not None
             else:
-                use = p['value'] is not None  # donor lacks it: keep the template's
+                use = p['value'] is not None  # donor lacks it: keep the source's
+                if use and foreign:
+                    np_ = src.vptr(p['value'] + 20)
+                    name = src.cstr(np_) if np_ is not None else None
             if not use:
                 v.w32(po + 4 * i, 0)
                 continue
-            src = t.virt[p['value']:p['value'] + 32] if p['value'] is not None else self.t_texobj
-            obj = v.put(src, 16)
+            srcobj = src.virt[p['value']:p['value'] + 32] if p['value'] is not None else self.t_texobj
+            obj = v.put(srcobj, 16)
             if name is not None:
                 v.w32(obj + 20, VP | v.cstr(name))
-                self.texture_names.add(name.lower())
+                bare = name.split('/')[-1].lower().replace('.dds', '')
+                # a name kept from another car resolves in the shared pack or gets a stand-in
+                if dp is not None or not bare.startswith('vehicle'):
+                    self.texture_names.add(bare)
             v.w32(po + 4 * i, VP | obj)
         v.w32(so + 0x14, VP | po)
         v.w32(so + 0x24, VP | pt)
@@ -484,7 +750,7 @@ class Converter:
         self.decls[usage] = off
         return off
 
-    def convert_geometry(self, g, need=0, variant=None):
+    def convert_geometry(self, g, need=0):
         """Donor geometry -> phys data (shared across LOD duplicates). `need`:
         the vertex inputs of the 360 shader it is drawn with; a texcoord set
         the donor lacks is filled from texcoord 0."""
@@ -500,8 +766,6 @@ class Converter:
         bp = d.vptr(g['off'] + 56)
         bc = d.u16(g['off'] + 62)
         table = [d.u16(bp + 2 * k) for k in range(bc)] if bp is not None else []
-        if variant is not None:
-            vsrc = self._pose(vsrc, src_usage, vcount, g['vb_stride'], table, variant)
         vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
         if fill_uv:
             self.uv_filled += 1
@@ -512,8 +776,6 @@ class Converter:
         vo = self.p.put(vdata, 0x100)
         io = self.p.put(idata, 0x100)
         tb = [self.bone_map[b] for b in table]
-        if variant is not None:
-            tb = [variant[1] if b == variant[0] else t for b, t in zip(table, tb)]
         decl_src = d.vptr(g['vb_off'] + 16)
         return dict(usage=usage, stride=stride, vcount=vcount, icount=n,
                     vo=vo, vbytes=len(vdata), io=io, ibytes=len(idata), bones=tb,
@@ -588,47 +850,6 @@ class Converter:
         v.w16(coll + 6, len(models))
         return coll
 
-    def _pose(self, src, usage, count, stride, table, variant):
-        """Turns the vertices whose strongest bone is the variant's donor bone
-        (positions, normals, tangents, binormals) on the PC data."""
-        bone, _, degrees, pivot = variant
-        layout = dict(vertex_layout(usage, SIZE_PC)[0])
-        out = bytearray(src)
-        zero = (0.0, 0.0, 0.0)
-        for v in range(count):
-            b = v * stride
-            if 1 in layout and 2 in layout:
-                w = out[b + layout[1]:b + layout[1] + 4]
-                i = out[b + layout[2]:b + layout[2] + 4]
-                k = max(range(4), key=lambda j: w[j])
-                if k >= len(i) or i[k] >= len(table) or table[i[k]] != bone:
-                    continue
-            elif table != [bone]:
-                continue
-            p = struct.unpack_from('<3f', out, b + layout[0])
-            struct.pack_into('<3f', out, b + layout[0], *rotate_x(p, pivot, degrees))
-            for e in (3, 15):
-                if e in layout:
-                    n = struct.unpack_from('<3f', out, b + layout[e])
-                    struct.pack_into('<3f', out, b + layout[e], *rotate_x(n, zero, degrees))
-            if 14 in layout:
-                t = struct.unpack_from('<4f', out, b + layout[14])
-                struct.pack_into('<4f', out, b + layout[14], *rotate_x(t[:3], zero, degrees), t[3])
-        return bytes(out)
-
-    def _variants_for(self, gofs):
-        """[(variant or None)] per emitted copy of the donor geometry at gofs."""
-        d = self.d
-        bp = d.vptr(gofs + 56)
-        bc = d.u16(gofs + 62)
-        table = [d.u16(bp + 2 * k) for k in range(bc)] if bp is not None else []
-        for b in table:
-            name = self.donor_bone_names[b]
-            if name in self.variants:
-                pivot = self.donor_bone_pos[b]
-                return [(b, self.template_bone_index[t], deg, pivot) for t, deg in self.variants[name]]
-        return [None]
-
     def convert_drawable_lods(self, ddraw):
         out = []
         for coll in lod_collections(self.d, ddraw['off']):
@@ -642,10 +863,8 @@ class Converter:
                 smap = [self.d.u16(smap_p + 2 * k) for k in range(len(gs))]
                 geoms, shaders = [], []
                 for g, si in zip(gs, smap):
-                    for variant in self._variants_for(g):
-                        geoms.append(self.convert_geometry(rsc5.read_geometry(self.d, g),
-                                                           self.shader_usage[si], variant))
-                        shaders.append(si)
+                    geoms.append(self.convert_geometry(rsc5.read_geometry(self.d, g), self.shader_usage[si]))
+                    shaders.append(si)
                 lod.append((geoms, shaders))
             out.append(lod)
         return out
@@ -715,6 +934,32 @@ class Converter:
 
 # ---------------------------------------------------------------- textures
 A8R8G8B8 = '\x15\x00\x00\x00'  # D3DFMT_A8R8G8B8 as the PC info stores it
+# uncompressed D3D formats the PC info can carry: (kind, bytes per texel)
+UNCOMPRESSED = {A8R8G8B8: ('A8R8G8B8', 4), '\x1c\x00\x00\x00': ('A8', 1), '\x32\x00\x00\x00': ('L8', 1)}
+
+
+def linear_texture(src):
+    """A PC texture's level 0 as the 360 path takes it: (Xenos format, block
+    bytes, linear blocks, label). The odd uncompressed texture is compressed
+    to DXT5 so it takes the same verified path as every other one; one-channel
+    formats are spread to B, G, R, A the way D3D samples them (A8: black with
+    that alpha; L8: grey, opaque)."""
+    w, h = src['w'], src['h']
+    if src['fmt'] not in UNCOMPRESSED:
+        fmt, bpp = xenos.FORMATS[src['fmt']]
+        bw, bh = max(1, w // 4), max(1, h // 4)
+        return fmt, bpp, src['res'].phys[src['data']:src['data'] + bw * bh * bpp], None
+    kind, bpt = UNCOMPRESSED[src['fmt']]
+    raw = src['res'].phys[src['data']:src['data'] + w * h * bpt]
+    if kind == 'A8':
+        raw = b''.join(bytes((0, 0, 0, a)) for a in raw)
+    elif kind == 'L8':
+        raw = b''.join(bytes((l, l, l, 255)) for l in raw)
+    if w < 4 or h < 4:  # one block: clamp the texels into 4x4
+        px = [raw[4 * (min(y, h - 1) * w + min(x, w - 1)):][:4] for y in range(4) for x in range(4)]
+        raw, w, h = b''.join(px), 4, 4
+    fmt, bpp = xenos.FORMATS['DXT5']
+    return fmt, bpp, dxt.encode_dxt5(raw, w, h), 'DXT5 (from %s)' % kind
 
 
 def pc_textures(r, dict_off):
@@ -763,16 +1008,9 @@ def build_xtd(tmpl, sources, wanted, log=print):
             continue
         w, h = src['w'], src['h']
         bw, bh = max(1, w // 4), max(1, h // 4)
-        if src['fmt'] == A8R8G8B8:
-            # The odd uncompressed texture is compressed to DXT5 so it takes
-            # the same verified path as every other one.
-            raw = src['res'].phys[src['data']:src['data'] + w * h * 4]
-            lin = dxt.encode_dxt5(raw, w, h)
-            fmt, bpp = xenos.FORMATS['DXT5']
-            src = dict(src, fmt='DXT5 (from A8R8G8B8)')
-        else:
-            fmt, bpp = xenos.FORMATS[src['fmt']]
-            lin = src['res'].phys[src['data']:src['data'] + bw * bh * bpp]
+        fmt, bpp, lin, label = linear_texture(src)
+        if label:
+            src = dict(src, fmt=label)
         tiled = xenos.tile_level(xenos.swap16(lin), bw, bh, bpp)
         base = p.put(tiled, 0x1000)
         info = v.put(t_info)

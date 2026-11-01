@@ -1,0 +1,4 @@
+# Vapid Dominator 645 (johndoe968 and Rodger Dodger, ported to IV by Milcin), converted for the 360 build
+model=dom645t
+donor=banshee
+template=banshee

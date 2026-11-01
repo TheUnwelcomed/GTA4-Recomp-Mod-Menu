@@ -283,7 +283,11 @@ std::vector<std::string> RawTokens(std::string_view line) {
 // doors), with the add-on's name, texture dictionary, handling, game name,
 // frequency, count, wheel sizes, dirt, swankness, LOD multiplier and flags.
 // Anything else (a PC-format template) leaves the add-on's line as it is.
-std::string ConsoleIdeLine(const std::string& addon_line, const std::string& template_line) {
+// The frequency is the share of traffic the model gets once it is loaded:
+// an add-on stays out of traffic (0) unless its addon.txt asks for it, so
+// nobody else drives the Batmobile.
+std::string ConsoleIdeLine(const std::string& addon_line, const std::string& template_line,
+                           bool traffic = false) {
   const auto a = RawTokens(addon_line), t = RawTokens(template_line);
   if (t.size() != 15 || a.size() < 15)
     return addon_line;
@@ -291,6 +295,8 @@ std::string ConsoleIdeLine(const std::string& addon_line, const std::string& tem
   for (const size_t i : {0, 1, 3, 4, 7, 8, 9, 10, 11, 12, 13})
     r[i] = a[i];
   r[14] = a.back();
+  if (!traffic)
+    r[7] = "0";
   std::string line;
   for (size_t i = 0; i < 14; ++i)
     line += r[i] + (i < 13 ? ", " : "");
@@ -1246,6 +1252,7 @@ struct Addon {
   fs::path dir;
   std::string model, donor = "fbi", colours;
   std::string template_model;  // the stock car it was converted on (default: the donor)
+  bool traffic = false;        // traffic=yes: other drivers may use it too
   std::string handling, ide;
   std::string carcols_section, carcols_row;
 };
@@ -1283,6 +1290,7 @@ std::vector<Addon> FindAddons(const fs::path& app_addons) {
       else if (key == "donor") a.donor = Lower(value);
       else if (key == "colours" || key == "colors") a.colours = Lower(value);
       else if (key == "template") a.template_model = Lower(value);
+      else if (key == "traffic") a.traffic = Lower(value) == "yes" || value == "1";
     }
     if (a.colours.empty()) a.colours = a.donor;
     if (a.template_model.empty()) a.template_model = a.donor;
@@ -1362,7 +1370,7 @@ bool EditDataFile(const fs::path& file, const std::vector<Addon>& addons) {
       fine &= InsertAfterDonor(file, a.donor, a.handling, (label + " handling").c_str());
     if (name == "vehicles.ide")
       fine &= InsertAfterDonor(file, a.donor,
-                               ConsoleIdeLine(a.ide, TemplateLine(file, a.template_model)),
+                               ConsoleIdeLine(a.ide, TemplateLine(file, a.template_model), a.traffic),
                                (label + " vehicle").c_str());
     if (name == "carcols.dat") {
       // Its own colour row when it brought one and the section exists;
