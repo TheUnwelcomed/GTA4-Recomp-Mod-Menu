@@ -1191,6 +1191,109 @@ void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, cons
 // .wpl files beside them. What the PC map formats are converted against, as
 // the cars were against the stock cars. Once per version of this list; at
 // most 40 MB.
+// One map archive's entries copied to `dir` (its table in toc.txt, each
+// entry's raw resource beside a .toc line of its header words), with the
+// .ide/.wpl/.ipl beside the archive: up to `per_kind_max` entries of each
+// kind, none over 6 MB, while `total` stays under `total_cap`.
+int CopyImgEntries(const fs::path& img, const std::vector<uint8_t>& key, const fs::path& dir, int per_kind_max,
+                   uint64_t& total, uint64_t total_cap) {
+  std::error_code ec;
+  int copied = 0;
+  fs::create_directories(dir, ec);
+  do {
+    {
+      std::ofstream listing(dir / "toc.txt", std::ios::trunc);
+      ListImg(img, key, listing);
+    }
+    // the table again, read here to pick and copy entries
+    std::ifstream in(img, std::ios::binary);
+    std::array<uint8_t, 0x14> header{};
+    if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
+      break;
+    Endian e{};
+    bool encrypted = false;
+    auto match = [&](const uint8_t* p) {
+      uint32_t magic;
+      std::memcpy(&magic, p, 4);
+      if (magic == kImgMagic) { e.big = false; return true; }
+      if (Swap32(magic) == kImgMagic) { e.big = true; return true; }
+      return false;
+    };
+    if (!match(header.data())) {
+      std::array<uint8_t, 0x14> trial = header;
+      CryptBlocks(trial.data(), 16, key, false);
+      if (key.empty() || !match(trial.data()))
+        break;
+      encrypted = true;
+      header = trial;
+    }
+    const uint32_t count = e.R32(header.data() + 8), toc_size = e.R32(header.data() + 12);
+    if (count == 0 || count > 200000 || toc_size <= count * 16 || toc_size > (64u << 20))
+      break;
+    std::vector<uint8_t> toc(toc_size);
+    if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
+      break;
+    if (encrypted)
+      CryptBlocks(toc.data(), toc.size(), key, false);
+    struct Entry {
+      std::string name, ext;
+      uint64_t offset = 0, size = 0;
+      uint32_t word0 = 0, type = 0;
+      uint16_t flags = 0;
+    };
+    std::vector<Entry> entries;
+    const char* names = reinterpret_cast<const char*>(toc.data()) + count * 16;
+    size_t names_len = toc_size - count * 16, cursor = 0;
+    for (uint32_t i = 0; i < count && cursor < names_len; ++i) {
+      const uint8_t* p = toc.data() + i * 16;
+      const size_t len = strnlen(names + cursor, names_len - cursor);
+      Entry entry;
+      entry.name.assign(names + cursor, len);
+      cursor += len + 1;
+      entry.word0 = e.R32(p);
+      entry.type = e.R32(p + 4);
+      entry.offset = uint64_t(e.R32(p + 8)) * kBlock;
+      entry.flags = e.R16(p + 14);
+      entry.size = uint64_t(e.R16(p + 12)) * kBlock - (entry.flags & 0x7FF);
+      const auto dot = entry.name.rfind('.');
+      entry.ext = dot == std::string::npos ? std::string() : entry.name.substr(dot + 1);
+      for (char& c : entry.ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (entry.name.find('/') == std::string::npos && entry.name.find('\\') == std::string::npos &&
+          entry.name.find("..") == std::string::npos && !entry.name.empty())
+        entries.push_back(std::move(entry));
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry& a, const Entry& b) { return a.ext != b.ext ? a.ext < b.ext : a.size < b.size; });
+    std::map<std::string, int> per_kind;
+    for (const auto& entry : entries) {
+      if (per_kind[entry.ext] >= per_kind_max || entry.size > (6u << 20) || total + entry.size > total_cap)
+        continue;
+      std::vector<uint8_t> data(entry.size);
+      in.clear();
+      in.seekg(std::streamoff(entry.offset));
+      if (!in.read(reinterpret_cast<char*>(data.data()), std::streamsize(data.size())))
+        continue;
+      std::ofstream file(dir / entry.name, std::ios::binary | std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+      char line[160];
+      std::snprintf(line, sizeof(line), "word0=%08X type=%08X flags=%04X size=%llu\n", entry.word0, entry.type,
+                    unsigned(entry.flags), (unsigned long long)entry.size);
+      std::ofstream(dir / (entry.name + ".toc"), std::ios::trunc) << line;
+      ++per_kind[entry.ext];
+      total += entry.size;
+      ++copied;
+    }
+    // the placements and definitions beside the archive
+    for (const char* ext : {".ide", ".wpl", ".ipl"}) {
+      fs::path beside = img;
+      beside.replace_extension(ext);
+      if (fs::exists(beside, ec) && SizeOf(beside) < (4u << 20) && CopyBytes(beside, dir / beside.filename()))
+        ++copied;
+    }
+  } while (false);
+  return copied;
+}
+
 void ExportMapReference(const fs::path& game, const std::vector<uint8_t>& key, const fs::path& out) {
   std::error_code ec;
   constexpr std::string_view kVersion = "maps v2\n";
@@ -1237,101 +1340,70 @@ void ExportMapReference(const fs::path& game, const std::vector<uint8_t>& key, c
   for (const auto& img : picked) {
     std::string flat = RelativeTo(img, game.parent_path());
     std::replace(flat.begin(), flat.end(), '/', '_');
-    const fs::path dir = out / flat;
-    fs::create_directories(dir, ec);
-    {
-      std::ofstream listing(dir / "toc.txt", std::ios::trunc);
-      ListImg(img, key, listing);
-    }
-    // the table again, read here to pick and copy entries
-    std::ifstream in(img, std::ios::binary);
-    std::array<uint8_t, 0x14> header{};
-    if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
-      continue;
-    Endian e{};
-    bool encrypted = false;
-    auto match = [&](const uint8_t* p) {
-      uint32_t magic;
-      std::memcpy(&magic, p, 4);
-      if (magic == kImgMagic) { e.big = false; return true; }
-      if (Swap32(magic) == kImgMagic) { e.big = true; return true; }
-      return false;
-    };
-    if (!match(header.data())) {
-      std::array<uint8_t, 0x14> trial = header;
-      CryptBlocks(trial.data(), 16, key, false);
-      if (key.empty() || !match(trial.data()))
-        continue;
-      encrypted = true;
-      header = trial;
-    }
-    const uint32_t count = e.R32(header.data() + 8), toc_size = e.R32(header.data() + 12);
-    if (count == 0 || count > 200000 || toc_size <= count * 16 || toc_size > (64u << 20))
-      continue;
-    std::vector<uint8_t> toc(toc_size);
-    if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
-      continue;
-    if (encrypted)
-      CryptBlocks(toc.data(), toc.size(), key, false);
-    struct Entry {
-      std::string name, ext;
-      uint64_t offset = 0, size = 0;
-      uint32_t word0 = 0, type = 0;
-      uint16_t flags = 0;
-    };
-    std::vector<Entry> entries;
-    const char* names = reinterpret_cast<const char*>(toc.data()) + count * 16;
-    size_t names_len = toc_size - count * 16, cursor = 0;
-    for (uint32_t i = 0; i < count && cursor < names_len; ++i) {
-      const uint8_t* p = toc.data() + i * 16;
-      const size_t len = strnlen(names + cursor, names_len - cursor);
-      Entry entry;
-      entry.name.assign(names + cursor, len);
-      cursor += len + 1;
-      entry.word0 = e.R32(p);
-      entry.type = e.R32(p + 4);
-      entry.offset = uint64_t(e.R32(p + 8)) * kBlock;
-      entry.flags = e.R16(p + 14);
-      entry.size = uint64_t(e.R16(p + 12)) * kBlock - (entry.flags & 0x7FF);
-      const auto dot = entry.name.rfind('.');
-      entry.ext = dot == std::string::npos ? std::string() : entry.name.substr(dot + 1);
-      for (char& c : entry.ext) c = char(std::tolower(static_cast<unsigned char>(c)));
-      if (entry.name.find('/') == std::string::npos && entry.name.find('\\') == std::string::npos &&
-          entry.name.find("..") == std::string::npos && !entry.name.empty())
-        entries.push_back(std::move(entry));
-    }
-    std::sort(entries.begin(), entries.end(),
-              [](const Entry& a, const Entry& b) { return a.ext != b.ext ? a.ext < b.ext : a.size < b.size; });
-    std::map<std::string, int> per_kind;
-    for (const auto& entry : entries) {
-      if (per_kind[entry.ext] >= 3 || entry.size > (6u << 20) || total + entry.size > (40ull << 20))
-        continue;
-      std::vector<uint8_t> data(entry.size);
-      in.clear();
-      in.seekg(std::streamoff(entry.offset));
-      if (!in.read(reinterpret_cast<char*>(data.data()), std::streamsize(data.size())))
-        continue;
-      std::ofstream file(dir / entry.name, std::ios::binary | std::ios::trunc);
-      file.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
-      char line[160];
-      std::snprintf(line, sizeof(line), "word0=%08X type=%08X flags=%04X size=%llu\n", entry.word0, entry.type,
-                    unsigned(entry.flags), (unsigned long long)entry.size);
-      std::ofstream(dir / (entry.name + ".toc"), std::ios::trunc) << line;
-      ++per_kind[entry.ext];
-      total += entry.size;
-      ++copied;
-    }
-    // the placements and definitions beside the archive
-    for (const char* ext : {".ide", ".wpl", ".ipl"}) {
-      fs::path beside = img;
-      beside.replace_extension(ext);
-      if (fs::exists(beside, ec) && SizeOf(beside) < (4u << 20) && CopyBytes(beside, dir / beside.filename()))
-        ++copied;
-    }
+    copied += CopyImgEntries(img, key, out / flat, 3, total, 40ull << 20);
   }
   std::ofstream(out / "done.txt", std::ios::trunc) << kVersion;
   REXLOG_INFO("gta4-addons: map references exported to {} ({} map archives found, {} files from {}, {} bytes)",
               out.string(), archives.size(), copied, picked.size(), total);
+}
+
+
+// v1.7.29: the map converter's shader and collision references (gta_trees,
+// the cutouts, the fences' and windows' shaders; props' bound dictionaries)
+// and the game's own map lists. Whole small prop archives, every entry, and
+// common.rpf's gta.dat, images.txt and water.dat. Once per version.
+void ExportMapSets(const fs::path& game, const std::vector<uint8_t>& key, const fs::path& out) {
+  std::error_code ec;
+  constexpr std::string_view kVersion = "mapsets v1\n";
+  {
+    std::vector<uint8_t> marker;
+    if (ReadAll(out / "done.txt", marker) && std::string(marker.begin(), marker.end()) == kVersion)
+      return;
+  }
+  constexpr std::string_view kWanted[] = {
+      "/maps/props/vegetation/ext_veg.img", "/maps/props/vegetation/int_veg.img",
+      "/maps/props/roadside/fences.img",    "/maps/props/windows/gen_win.img",
+      "/maps/props/residential/lights.img", "/maps/props/roadside/lamppost.img",
+  };
+  fs::create_directories(out, ec);
+  std::ofstream summary(out / "sets.txt", std::ios::trunc);
+  uint64_t total = 0;
+  int copied = 0, archives = 0;
+  for (auto it = fs::recursive_directory_iterator(game, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    if (it.depth() > 8) { it.disable_recursion_pending(); continue; }
+    std::error_code fec;
+    if (!it->is_regular_file(fec))
+      continue;
+    std::string path = it->path().generic_string();
+    for (char& c : path) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (std::none_of(std::begin(kWanted), std::end(kWanted), [&](std::string_view w) { return path.ends_with(w); }))
+      continue;
+    std::string flat = RelativeTo(it->path(), game.parent_path());
+    std::replace(flat.begin(), flat.end(), '/', '_');
+    const int n = CopyImgEntries(it->path(), key, out / flat, 100000, total, 48ull << 20);
+    summary << RelativeTo(it->path(), game.parent_path()) << " " << SizeOf(it->path()) << " " << n << "\n";
+    copied += n;
+    ++archives;
+  }
+  // the map lists the converter's additions go into
+  for (const fs::path& rpf_path : {game / "common.rpf"}) {
+    const auto rpf = ReadRpf(rpf_path, key);
+    if (!rpf)
+      continue;
+    for (const char* inner : {"/data/gta.dat", "/data/images.txt", "/data/water.dat"}) {
+      const RpfFile* f = rpf->Find(inner);
+      std::vector<uint8_t> data;
+      if (f && ReadRpfData(rpf_path, *f, data)) {
+        std::ofstream(out / fs::path(inner).filename(), std::ios::binary | std::ios::trunc)
+            .write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+        ++copied;
+      }
+    }
+  }
+  std::ofstream(out / "done.txt", std::ios::trunc) << kVersion;
+  REXLOG_INFO("gta4-addons: map sets exported to {} ({} archives, {} files, {} bytes)", out.string(), archives, copied,
+              total);
 }
 
 // Niko's own model for the converter (logs/export/playerped on the console):
@@ -1986,6 +2058,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
     ExportGameIndex(game, key, app_addons.parent_path() / "logs" / "export" / "index");
     ExportPlayerPed(game, app_addons.parent_path() / "logs" / "export" / "playerped");
     ExportMapReference(game, key, app_addons.parent_path() / "logs" / "export" / "maps");
+    ExportMapSets(game, key, app_addons.parent_path() / "logs" / "export" / "mapsets");
   }
   std::vector<fs::path> files;
   for (const auto& a : addons) {
