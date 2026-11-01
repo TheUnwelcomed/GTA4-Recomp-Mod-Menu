@@ -228,6 +228,9 @@ std::array g_natives = {
     NativeEntry{"IS_THIS_MODEL_A_HELI"}, NativeEntry{"IS_THIS_MODEL_A_BOAT"},
     // The jet's targeting (the camera, to put the targets' marks on the
     // screen) and the police helicopters that come after it.
+    NativeEntry{"HAS_CAR_BEEN_DAMAGED_BY_CAR"}, NativeEntry{"HAS_CAR_BEEN_DAMAGED_BY_CHAR"},
+    NativeEntry{"SET_CAN_BURST_CAR_TYRES"}, NativeEntry{"BURST_CAR_TYRE"},
+    NativeEntry{"CLEAR_CAR_LAST_DAMAGE_ENTITY"},
     NativeEntry{"GET_CAM_FOV"}, NativeEntry{"CREATE_CHAR_INSIDE_CAR"}, NativeEntry{"CREATE_CHAR_AS_PASSENGER"}, NativeEntry{"TASK_HELI_MISSION"}, NativeEntry{"TASK_COMBAT"}, NativeEntry{"SET_HELI_BLADES_FULL_SPEED"}, NativeEntry{"SET_CHAR_WILL_DO_DRIVEBYS"}, NativeEntry{"SET_CHAR_KEEP_TASK"}, NativeEntry{"DELETE_CHAR"}, NativeEntry{"MARK_CHAR_AS_NO_LONGER_NEEDED"}, NativeEntry{"SET_CHAR_ACCURACY"}, NativeEntry{"IS_CHAR_INJURED"}, NativeEntry{"SET_CHAR_HEADING"},
 };
 std::mutex g_native_mutex;
@@ -292,6 +295,8 @@ constexpr HandleUse kHandleUses[] = {
     {"SET_CAR_HEADING", 0}, {"SET_CAR_ON_GROUND_PROPERLY", 0}, {"SET_CAR_PROOFS", 0},
     {"SET_CAR_VISIBLE", 0}, {"SET_HELI_BLADES_FULL_SPEED", 0}, {"SET_VEHICLE_QUATERNION", 0},
     {"TURN_OFF_VEHICLE_EXTRA", 0}, {"CREATE_CHAR_INSIDE_CAR", 0}, {"CREATE_CHAR_AS_PASSENGER", 0},
+    {"SET_CAN_BURST_CAR_TYRES", 0}, {"HAS_CAR_BEEN_DAMAGED_BY_CAR", 0}, {"CLEAR_CAR_LAST_DAMAGE_ENTITY", 0},
+    {"BURST_CAR_TYRE", 0},
     {"IS_CAR_DEAD", 0}, {"DELETE_CAR", 0, -1, true}, {"MARK_CAR_AS_NO_LONGER_NEEDED", 0, -1, true},
     {"ADD_ARMOUR_TO_CHAR", -1, 0}, {"CLEAR_CHAR_TASKS", -1, 0}, {"CLEAR_CHAR_TASKS_IMMEDIATELY", -1, 0},
     {"FREEZE_CHAR_POSITION", -1, 0}, {"GET_CAR_CHAR_IS_USING", -1, 0}, {"GIVE_WEAPON_TO_CHAR", -1, 0},
@@ -321,18 +326,20 @@ bool StaleHandleCall(uint8_t* base, std::string_view name, std::initializer_list
         return std::nullopt;
       return *(values.begin() + i);
     };
-    bool gone = false;
+    bool vehicle_gone = false, ped_gone = false;
     if (const auto v = arg(use.vehicle))
-      gone |= HandleGone(base, kVehiclePoolPtr, *v);
+      vehicle_gone = HandleGone(base, kVehiclePoolPtr, *v);
     if (const auto p = arg(use.ped))
-      gone |= HandleGone(base, kPedPoolPtr, *p);
-    if (gone) {
+      ped_gone = HandleGone(base, kPedPoolPtr, *p);
+    if (vehicle_gone || ped_gone) {
+      // (GET_CHAR_IN_CAR_PASSENGER_SEAT turns an empty seat into a made-up
+      // handle, which IS_CHAR_SITTING_IN_CAR is then asked about: expected)
       static std::atomic<uint32_t> logged{0};
-      if (logged.fetch_add(1, std::memory_order_relaxed) < 24)
-        REXLOG_INFO("gta4-trainer: {} not called: its {} handle is gone (cleared away by the game)", name,
-                    use.vehicle >= 0 ? "vehicle" : "ped");
+      if (logged.fetch_add(1, std::memory_order_relaxed) < 6)
+        REXLOG_INFO("gta4-trainer: {} not called: its {} handle is not one the game has", name,
+                    vehicle_gone ? "vehicle" : "ped");
     }
-    return gone;
+    return vehicle_gone || ped_gone;
   }
   return false;
 }
@@ -1196,7 +1203,7 @@ std::vector<Item> PageItems(const State& s) {
                {"Repair Current Vehicle", Action::kRepair},
                {s.warp_in ? "Warp Into Spawned Car: ON" : "Warp Into Spawned Car: OFF",
                 Action::kToggleWarpIn},
-               {s.gadgets ? "Batmobile Gadgets: ON (L1 missile, d-pad guns/boost, horn bomb)"
+               {s.gadgets ? "Batmobile Gadgets: ON (L1 missile, d-pad guns/boost, horn spikes)"
                           : "Batmobile Gadgets: OFF",
                 Action::kToggleGadgets},
                {s.jet ? "Jet Flight and Weapons (F-16, Batwing): ON" : "Jet Flight and Weapons (F-16, Batwing): OFF",
@@ -1401,6 +1408,11 @@ void TeleportTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
   const bool timed_out = NowMs() > t.until;
   if (!gz && !timed_out)
     return;
+  // (out of time: looked for once more from well above, in case the probe
+  // started inside something over the spot, a canopy or a bridge)
+  if (!gz && t.from < 900.0f)
+    if (const auto high = GroundBelow(ctx, base, t.x, t.y, t.from + 60.0f); high && *high >= t.lowest)
+      gz = high;
   if (t.car)
     Invoke(ctx, base, "FREEZE_CAR_POSITION", {t.car, 0});
   else
@@ -2737,7 +2749,8 @@ std::optional<float> GroundZ(PPCContext& ctx, uint8_t* base, float x, float y, f
 
 // The menu's weapons' blasts have no culprit in the game (ADD_EXPLOSION
 // takes none), so the police never minded the Lazar's cannon or the jets'
-// missiles. Each blast the player sets off adds heat, and the heat raises
+// missiles. Each blast the player sets off adds heat (and each car the
+// Lazar rams, a little; one it wrecks, a blast's worth), and the heat raises
 // the wanted level the way the game's own crimes do: two stars at once,
 // three after a few more blasts, four for a rampage; it cools off by one
 // every 15 seconds. Never Wanted keeps it off.
@@ -3594,12 +3607,14 @@ void RainCars(PPCContext& ctx, uint8_t* base, const GameContext& game) {
 //    red on the radar); one every 3 seconds;
 //  - d-pad left / down (hold): the twin miniguns, ahead / behind, both
 //    barrels together;
-//  - horn (L3): plant a bomb behind the car, marked by a blinking red light;
-//    the horn again sets it off;
+//  - horn (L3): drop a spike strip across the road behind the car; the
+//    tyres of any car that crosses it burst (never a Batmobile's, nor the
+//    armoured Lazar's); up to two down, each gone after 30 s or 250 m;
 //  - d-pad right (hold): the booster, the rear turbine flaming and roaring.
 // Those buttons are hidden from the game then (no drive-by on L1, no radio,
-// no horn); d-pad up stays the phone. Missiles in flight and a planted bomb
-// carry on after the player leaves the car. The canopy needs no toggle (see
+// no horn); d-pad up stays the phone. Missiles in flight and spike strips
+// carry on after the player leaves the car. The missiles, the guns and the
+// strips all draw a wanted level (AddHeat). The canopy needs no toggle (see
 // BatCanopy).
 struct BatRocket {
   bool live = false, physics = true, armed = false;
@@ -3617,10 +3632,18 @@ struct GadgetState {
   uint32_t car = 0;
   bool models_requested = false, l3_held = false, l3_chord = false, boosting = false, in_car = false;
   std::array<BatRocket, 4> rockets{};
-  bool bomb = false;
-  uint32_t bomb_object = 0;
-  float bomb_pos[3]{};
-  uint64_t bomb_at = 0;
+  // v1.7.25: the horn drops a spike strip (the bomb, v1.7.7-1.7.24, went)
+  struct Strip {
+    bool live = false;
+    float centre[3]{}, across[2]{};  // where, and its line across the road
+    std::array<uint32_t, 3> pieces{};
+    std::array<uint32_t, 24> burst{};  // the cars it has had (or let by)
+    uint8_t burst_n = 0;
+    bool laid = false;   // its pieces put down (once the model is in)
+    uint32_t owner = 0;  // the Batmobile that dropped it: never its tyres
+    uint64_t dropped = 0;
+  };
+  std::array<Strip, 2> strips{};
   uint32_t flame = 0;
   int rocket_log = 0, bomb_log = 0;
   bool guns_logged = false, boost_logged = false;
@@ -3635,8 +3658,12 @@ constexpr float kBatGunsFront[2][3] = {{-0.55f, 3.75f, -0.15f}, {0.55f, 3.75f, -
 constexpr float kBatGunsRear[2][3] = {{-0.55f, -2.85f, -0.10f}, {0.55f, -2.85f, -0.10f}};
 constexpr float kBatLauncher[3] = {0.0f, 3.30f, 0.0f};
 constexpr float kBatNozzle[3] = {0.0f, -2.45f, -0.12f};
-constexpr float kBatBomb[3] = {0.0f, -3.4f, -0.2f};
-constexpr std::string_view kBombModel = "w_grenade";
+constexpr float kBatBomb[3] = {0.0f, -4.6f, -0.2f};  // (the spike strip's middle, behind the tail)
+// The strip: three pieces of IV's scrap metal laid end to end across the
+// road (each 2.1 m), out 30 seconds, gone sooner when the Batmobile is far.
+constexpr std::string_view kBombModel = "bm_metalscraps";
+constexpr uint64_t kStripMs = 30000;
+constexpr float kStripHalf = 3.4f, kStripDepth = 1.4f;
 constexpr uint64_t kMissileReloadMs = 3000;  // one launch, then the launcher resets
 
 // One volley from both barrels of a pair, along the car's length (+1 ahead,
@@ -3644,6 +3671,7 @@ constexpr uint64_t kMissileReloadMs = 3000;  // one launch, then the launcher re
 // the barrels in turn and flashed only every other round: always the left.)
 void BatVolley(PPCContext& ctx, uint8_t* base, uint32_t car, const float (&muzzles)[2][3], float along) {
   static uint32_t seed = 0x5EED1234u;
+  AddHeat(0.08f);  // (a second's firing: two stars)
   bool fired = false, flashed = false;
   for (const auto& muzzle : muzzles) {
     const float far_point[3] = {muzzle[0], muzzle[1] + along * 300.0f, muzzle[2]};
@@ -3918,63 +3946,144 @@ void UpdateRockets(PPCContext& ctx, uint8_t* base, float dt) {
   }
 }
 
-void PlantBomb(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
-  auto p = CarPoint(ctx, base, car, kBatBomb);
-  if (!p)
-    return;
-  const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 1.5f);
-  if (gz)
-    (*p)[2] = *gz + 0.06f;
-  for (int a = 0; a < 3; ++a)
-    g_gadget.bomb_pos[a] = (*p)[a];
-  g_gadget.bomb_object = 0;
+void ClearStrip(PPCContext& ctx, uint8_t* base, GadgetState::Strip& strip) {
+  for (auto& piece : strip.pieces)
+    DeleteObject(ctx, base, piece);
+  strip = {};
+}
+
+// The strip's three pieces, end to end along its line, each on the ground
+// under it; none until the model is in (then the next frame's look).
+int LayStrip(PPCContext& ctx, uint8_t* base, GadgetState::Strip& strip) {
   const uint32_t hash = ModelHash(kBombModel);
   const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
-  if (loaded && loaded->r0()) {
-    const auto obj = Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits((*p)[0]), Bits((*p)[1]), Bits((*p)[2]), 0, 1}, 4);
-    if (obj && obj->words[0]) {
-      g_gadget.bomb_object = obj->words[0];
-      Invoke(ctx, base, "SET_OBJECT_COLLISION", {g_gadget.bomb_object, 0});
-      Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {g_gadget.bomb_object, 1});
-    }
+  if (!loaded || !loaded->r0()) {
+    Invoke(ctx, base, "REQUEST_MODEL", {hash});
+    return 0;
   }
-  g_gadget.bomb = true;
-  g_gadget.bomb_at = NowMs();
-  Toast(s, "Bomb planted: the horn (L3) again sets it off.", 2500);
+  strip.laid = true;
+  int made = 0;
+  // Each piece's length (its Y) along the strip: turned about z so.
+  const float yaw = std::atan2(-strip.across[0], strip.across[1]);
+  const Quat q = QAxis(0, 0, 1, yaw);
+  for (int k = 0; k < 3; ++k) {
+    const float off = (float(k) - 1.0f) * 2.1f;
+    float at[3] = {strip.centre[0] + strip.across[0] * off, strip.centre[1] + strip.across[1] * off, strip.centre[2]};
+    if (const auto gz = GroundZ(ctx, base, at[0], at[1], at[2] + 1.5f); gz && std::fabs(*gz - at[2]) < 1.5f)
+      at[2] = *gz;
+    const auto obj = Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits(at[0]), Bits(at[1]), Bits(at[2] + 0.02f), 0, 1}, 4);
+    if (!obj || !obj->words[0])
+      continue;
+    const uint32_t o = obj->words[0];
+    strip.pieces[size_t(k)] = o;
+    Invoke(ctx, base, "SET_OBJECT_COLLISION", {o, 0});
+    Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {o, 1});
+    Invoke(ctx, base, "SET_OBJECT_QUATERNION", {o, Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
+    ++made;
+  }
+  return made;
+}
+
+// The horn: a spike strip dropped behind the car, across the road.
+void PlantBomb(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
+  const auto p = CarPoint(ctx, base, car, kBatBomb);
+  const float side_local[3] = {1.0f, kBatBomb[1], kBatBomb[2]};
+  const auto side = CarPoint(ctx, base, car, side_local);
+  if (!p || !side)
+    return;
+  float across[2] = {(*side)[0] - (*p)[0], (*side)[1] - (*p)[1]};
+  const float len = std::sqrt(across[0] * across[0] + across[1] * across[1]);
+  if (!(len > 0.1f))
+    return;
+  across[0] /= len;
+  across[1] /= len;
+  // The oldest strip makes way.
+  auto& strip = *std::min_element(g_gadget.strips.begin(), g_gadget.strips.end(),
+                                  [](const auto& a, const auto& b) { return a.dropped < b.dropped; });
+  ClearStrip(ctx, base, strip);
+  strip.live = true;
+  strip.owner = car;
+  strip.dropped = NowMs();
+  for (int a = 0; a < 3; ++a)
+    strip.centre[a] = (*p)[a];
+  strip.across[0] = across[0];
+  strip.across[1] = across[1];
+  if (const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 1.5f))
+    strip.centre[2] = *gz;
+  const int made = LayStrip(ctx, base, strip);
+  Toast(s, "Spike strip down: tyres that cross it burst. Gone in 30 s.", 2200);
   if (g_gadget.bomb_log < 12) {
     ++g_gadget.bomb_log;
-    REXLOG_INFO("gta4-trainer: Batmobile bomb planted at {:.1f}, {:.1f}, {:.1f} (ground {}, object {:08X})",
-                (*p)[0], (*p)[1], (*p)[2], gz ? "found" : "not found", g_gadget.bomb_object);
+    REXLOG_INFO("gta4-trainer: Batmobile spike strip at {:.1f}, {:.1f}, {:.1f} ({} pieces)", strip.centre[0],
+                strip.centre[1], strip.centre[2], made);
   }
 }
 
+// Every frame while a strip is down: a car over it (not the Batmobile)
+// has its tyres burst, once; the strip goes after 30 s, or when the
+// Batmobile is 250 m off, or with the gadgets.
 void SetOffBomb(PPCContext& ctx, uint8_t* base, bool quietly) {
-  if (!g_gadget.bomb)
-    return;
-  const auto& p = g_gadget.bomb_pos;
-  if (!quietly) {
-    // A cluster: the charge, and two beside it.
-    const float left[3] = {p[0] - 1.2f, p[1] + 0.5f, p[2]}, right[3] = {p[0] + 1.2f, p[1] - 0.5f, p[2]};
-    Explode(ctx, base, p, 1.5f);
-    Explode(ctx, base, left, 1.0f);
-    Explode(ctx, base, right, 1.0f);
-    if (g_gadget.bomb_log < 12) {
-      ++g_gadget.bomb_log;
-      REXLOG_INFO("gta4-trainer: Batmobile bomb set off at {:.1f}, {:.1f}, {:.1f}", p[0], p[1], p[2]);
-    }
-  }
-  DeleteObject(ctx, base, g_gadget.bomb_object);
-  g_gadget.bomb = false;
+  (void)quietly;  // (the gadgets off: every strip taken up)
+  for (auto& strip : g_gadget.strips)
+    if (strip.live)
+      ClearStrip(ctx, base, strip);
 }
-
-// A planted bomb's blinking light (drawn every frame, like Rockstar's scripts
-// draw theirs: red, a few metres' reach).
 void BombLight(PPCContext& ctx, uint8_t* base) {
-  if (!g_gadget.bomb || ((NowMs() - g_gadget.bomb_at) / 350) % 2)
-    return;
-  const auto& p = g_gadget.bomb_pos;
-  Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
-         {Bits(p[0]), Bits(p[1]), Bits(p[2] + 0.25f), 255, 0, 0, Bits(3.0f), Bits(8.0f)});
+  const uint64_t now = NowMs();
+  for (auto& strip : g_gadget.strips) {
+    if (!strip.live)
+      continue;
+    bool far = false;
+    if (g_gadget.car && VehicleAddress(base, g_gadget.car))
+      if (const auto at = CarPosition(ctx, base, g_gadget.car)) {
+        const float dx = (*at)[0] - strip.centre[0], dy = (*at)[1] - strip.centre[1];
+        far = dx * dx + dy * dy > 250.0f * 250.0f;
+      }
+    if (now - strip.dropped > kStripMs || far) {
+      ClearStrip(ctx, base, strip);
+      continue;
+    }
+    if (!strip.laid)
+      LayStrip(ctx, base, strip);
+    ForEachVehicle(base, [&](uint32_t handle, uint32_t vehicle) {
+      // Never the Batmobile's own tyres (reversing over it, or in another).
+      if (handle == g_gadget.car || handle == strip.owner)
+        return;
+      float p[3];
+      if (!EntityPosition(base, vehicle, p))
+        return;
+      const float dx = p[0] - strip.centre[0], dy = p[1] - strip.centre[1], dz = p[2] - strip.centre[2];
+      if (std::fabs(dz) > 2.5f || dx * dx + dy * dy > 30.0f)
+        return;
+      const float along = dx * strip.across[0] + dy * strip.across[1];
+      const float through = -dx * strip.across[1] + dy * strip.across[0];
+      if (std::fabs(along) > kStripHalf || std::fabs(through) > kStripDepth)
+        return;
+      if (std::find(strip.burst.begin(), strip.burst.end(), handle) != strip.burst.end())
+        return;
+      strip.burst[strip.burst_n++ % strip.burst.size()] = handle;  // (once each)
+      // Any Batmobile goes over it unharmed, and so does the armoured Lazar;
+      // only road vehicles have tyres to burst (a bike its two: 0 and 4).
+      static const uint32_t kBatmobile = ModelHash("BATMOBILE"), kLazar = ModelHash("LAZAR3");
+      const auto m = Invoke(ctx, base, "GET_CAR_MODEL", {handle, 0}, 1);
+      if (!m || m->words[0] == kBatmobile || m->words[0] == kLazar ||
+          ModelKind(ctx, base, m->words[0]) != Kind::kRoad)
+        return;
+      const auto bike = Invoke(ctx, base, "IS_THIS_MODEL_A_BIKE", {m->words[0]});
+      if (bike && bike->r0()) {
+        for (const uint32_t tyre : {0u, 4u})
+          Invoke(ctx, base, "BURST_CAR_TYRE", {handle, tyre});
+      } else {
+        for (const uint32_t tyre : {0u, 1u, 4u, 5u})
+          Invoke(ctx, base, "BURST_CAR_TYRE", {handle, tyre});
+      }
+      AddHeat(0.5f);  // (two cars' tyres: two stars)
+      if (g_gadget.bomb_log < 12) {
+        ++g_gadget.bomb_log;
+        REXLOG_INFO("gta4-trainer: Batmobile spike strip burst the tyres of car {:08X}", handle);
+      }
+    });
+  }
 }
 
 // The booster's flame: IV's rocket flame out of the turbine.
@@ -3999,8 +4108,8 @@ void BatFlame(PPCContext& ctx, uint8_t* base, uint32_t car, bool on) {
 
 // Whether the gadgets want every frame (a missile flying, a bomb's light).
 bool GadgetsBusy() {
-  return g_gadget.bomb || std::any_of(g_gadget.rockets.begin(), g_gadget.rockets.end(),
-                                      [](const BatRocket& r) { return r.live; });
+  return std::any_of(g_gadget.strips.begin(), g_gadget.strips.end(), [](const auto& t) { return t.live; }) ||
+         std::any_of(g_gadget.rockets.begin(), g_gadget.rockets.end(), [](const BatRocket& r) { return r.live; });
 }
 
 uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons,
@@ -4026,7 +4135,7 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
     }
     g_gadget.in_car = false;
     if (!s.gadgets)
-      SetOffBomb(ctx, base, true);  // the toggle off: a planted bomb goes quietly
+      SetOffBomb(ctx, base, true);  // the toggle off: the strips taken up
     if (g_gadget.models_requested && !GadgetsBusy()) {
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kBombModel)});
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
@@ -4067,8 +4176,8 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
     g_gadget.next_rear = now + 70;
     BatVolley(ctx, base, car, kBatGunsRear, -1.0f);
   }
-  // The bomb on the horn (L3): plant, then set off. Acted on release, so
-  // L3 + R3 (the menu) never plants one.
+  // The spike strip on the horn (L3). Acted on release, so L3 + R3 (the
+  // menu) never drops one.
   const bool l3 = buttons & X_INPUT_GAMEPAD_LEFT_THUMB, r3 = buttons & X_INPUT_GAMEPAD_RIGHT_THUMB;
   if (l3 && !(previous & X_INPUT_GAMEPAD_LEFT_THUMB)) {
     g_gadget.l3_held = true;
@@ -4079,12 +4188,8 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
   const bool horn_tap = !l3 && g_gadget.l3_held && !g_gadget.l3_chord && !s.open;
   if (!l3)
     g_gadget.l3_held = false;
-  if (horn_tap) {
-    if (g_gadget.bomb)
-      SetOffBomb(ctx, base, false);
-    else
-      PlantBomb(ctx, base, car, s);
-  }
+  if (horn_tap)
+    PlantBomb(ctx, base, car, s);  // (a spike strip; a third takes up the oldest)
   // Booster: hold d-pad right; the turbine flames and roars.
   const bool boost = buttons & X_INPUT_GAMEPAD_DPAD_RIGHT;
   if (boost) {
@@ -4838,6 +4943,15 @@ struct Shell {
 };
 // The Lazar's lock-on: the jets' (JetLock, the HUD's marks), along its gun.
 JetState g_lazar_aim;
+// The cars it has rammed lately (the heat: a little a ram, a blast's worth
+// when one it rammed is wrecked within 10 s).
+struct Rammed {
+  uint32_t car = 0;
+  uint64_t at = 0;
+  bool wrecked = false;
+};
+std::array<Rammed, 12> g_rammed{};
+uint64_t g_next_ram_look = 0;
 void PublishLazarHud(bool on);
 struct LazarState {
   uint32_t car = 0, info = 0;
@@ -4886,6 +5000,10 @@ bool LazarShellsLive() {
 void PrepareLazar(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in) {
   for (const uint32_t extra : {1u, 5u, 6u})
     ShowExtra(ctx, base, car, extra, getting_in);
+  // Armoured: its run-flat tyres don't burst (they did, to a pistol). Set
+  // when it is made and again each time the player gets in.
+  if (NativeKnown("SET_CAN_BURST_CAR_TYRES"))
+    Invoke(ctx, base, "SET_CAN_BURST_CAR_TYRES", {car, 0});
 }
 
 // The turret turned by `yaw` about its ring, the gun pitched on its
@@ -4990,7 +5108,7 @@ std::optional<std::pair<float, float>> CameraAim(PPCContext& ctx, uint8_t* base,
 void ShellBurst(PPCContext& ctx, uint8_t* base, const float p[3]) {
   // type 0 (grenade): a shell's burst, smaller than the missiles'
   Invoke(ctx, base, "ADD_EXPLOSION", {Bits(p[0]), Bits(p[1]), Bits(p[2]), 0, Bits(0.9f), 1, 0, Bits(0.35f)});
-  AddHeat(0.7f);
+  AddHeat(1.0f);
 }
 
 void ApplyHeat(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
@@ -5001,9 +5119,13 @@ void ApplyHeat(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s
     return;
   g_heat += g_heat_pending;
   g_heat_pending = 0.0f;
-  if (s.never_wanted || !game.player)
+  // (v1.7.24 also bailed out on a player index of 0, which is the player's
+  // in single player: no blast ever raised the wanted level)
+  if (s.never_wanted)
     return;
-  const int stars = g_heat >= 8.0f ? 4 : g_heat >= 3.5f ? 3 : 2;
+  const int stars = g_heat >= 8.0f ? 4 : g_heat >= 3.5f ? 3 : g_heat >= 1.0f ? 2 : 0;
+  if (!stars)
+    return;
   const auto above = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, uint32_t(stars - 1)});
   if (!above || above->r0())
     return;  // (already as wanted, or more)
@@ -5288,6 +5410,51 @@ uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     }
   }
   g_lazar_aim.prev_buttons = buttons;
+  // Cars it runs into: within 9 m, damaged by it (the game keeps who last
+  // damaged a car), counted once each, a wreck again.
+  if (now >= g_next_ram_look && NativeKnown("HAS_CAR_BEEN_DAMAGED_BY_CAR")) {
+    g_next_ram_look = now + 200;
+    if (const auto at = CarPosition(ctx, base, z.car)) {
+      ForEachVehicle(base, [&](uint32_t handle, uint32_t vehicle) {
+        if (handle == z.car)
+          return;
+        float p[3];
+        if (!EntityPosition(base, vehicle, p))
+          return;
+        const float dx = p[0] - (*at)[0], dy = p[1] - (*at)[1], dz = p[2] - (*at)[2];
+        if (dx * dx + dy * dy + dz * dz > 81.0f)
+          return;
+        // (the game may put the damage down to the Lazar or to its driver)
+        const auto hit = Invoke(ctx, base, "HAS_CAR_BEEN_DAMAGED_BY_CAR", {handle, z.car});
+        bool rammed = hit && hit->r0();
+        if (!rammed && NativeKnown("HAS_CAR_BEEN_DAMAGED_BY_CHAR")) {
+          const auto by = Invoke(ctx, base, "HAS_CAR_BEEN_DAMAGED_BY_CHAR", {handle, game.ped});
+          rammed = by && by->r0();
+        }
+        if (!rammed)
+          return;
+        Invoke(ctx, base, "CLEAR_CAR_LAST_DAMAGE_ENTITY", {handle});
+        auto slot = std::find_if(g_rammed.begin(), g_rammed.end(), [&](const Rammed& r) { return r.car == handle; });
+        if (slot == g_rammed.end())
+          slot = std::min_element(g_rammed.begin(), g_rammed.end(),
+                                  [](const Rammed& a, const Rammed& b) { return a.at < b.at; });
+        if (slot->car != handle) {
+          *slot = Rammed{handle, now, false};
+          AddHeat(0.4f);
+        }
+        slot->at = now;
+      });
+      for (auto& r : g_rammed) {
+        if (!r.car || r.wrecked || now - r.at > 10000 || !VehicleAddress(base, r.car))
+          continue;  // (one the game has cleared away is not a wreck of ours)
+        const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {r.car});
+        if (dead && dead->r0()) {
+          r.wrecked = true;
+          AddHeat(1.0f);
+        }
+      }
+    }
+  }
   if ((buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) && now >= z.next_shot && !s.open) {
     z.next_shot = now + kLazarShotMs;
     FireLazar(ctx, base, z, s);
@@ -6936,7 +7103,7 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     case Action::kToggleGadgets:
       s.gadgets = !s.gadgets;
       Toast(s, s.gadgets ? "Batmobile gadgets armed: L1 lock-on missile; d-pad left guns ahead, down guns "
-                           "behind, right boost; horn (L3) plants a bomb, again to set it off."
+                           "behind, right boost; horn (L3) drops a spike strip."
                          : "Gadgets off.",
             s.gadgets ? 6000 : 2500);
       break;

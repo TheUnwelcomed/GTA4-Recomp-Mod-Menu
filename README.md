@@ -52,8 +52,9 @@ keeps going while you browse.
   itself as their own vehicles (no stock car replaced; see `addons/`):
   - **Batmobile** (JulioNIB), with its gadgets re-created: a lock-on missile
     on L1 that homes in on the car ahead, twin miniguns ahead and behind, a
-    bomb on the horn, a booster that flames and roars, and a canopy that pops
-    open as you (and your passenger) get in and out
+    spike strip on the horn (other cars' tyres burst, never the Batmobile's),
+    a booster that flames and roars, and a canopy that pops open as you (and
+    your passenger) get in and out
   - **F-16C Fighting Falcon** (SkylineGTRFreak) and **Batwing** (metalwars):
     a flight model with weight and momentum (thrust, drag and lift decide
     the speed; stalls; the air brake and wheel brakes on LT; the landing
@@ -185,6 +186,20 @@ network session.
 
 ## Changes
 
+- **v1.7.25**: **wanted levels** fixed: v1.7.24's never came, because the
+  menu read the player's index in single player (0) as no player. Blasts
+  (the Lazar's cannon, the jets' and the Batmobile's missiles) are two
+  stars, more for more. The **Lazar 3** draws heat for the cars it rams
+  (`HAS_CAR_BEEN_DAMAGED_BY_CAR`, more for a car wrecked within 10 s) and
+  its tyres can't burst (`SET_CAN_BURST_CAR_TYRES`). The **Batmobile**'s
+  bomb is replaced by a **spike strip** on the horn: three pieces of IV's
+  roadside scrap (`BM_metalscraps`, collision off) across the road behind
+  it; any road vehicle whose middle crosses it has its tyres burst once
+  (`BURST_CAR_TYRE`; a bike's two), never the Batmobile that dropped it nor
+  any other Batmobile, nor the Lazar 3; two down at most, each gone after
+  30 s, 250 m away or with the gadgets. The miniguns and the strip draw
+  heat too. A teleport whose ground never loaded looks once more from
+  60 m higher.
 - **v1.7.24**: the menu is a **glass panel switcher** (after the author's
   Ruffle5, in Liberty's colours: patina green, old gold): the sections as
   tabs (L1/R1, the panel sliding over), switches for on/off rows, values
