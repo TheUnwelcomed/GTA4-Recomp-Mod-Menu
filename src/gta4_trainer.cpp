@@ -1217,23 +1217,54 @@ constexpr uint32_t kEntitySkeleton = 0x8217DB60;  // entity -> its live crSkelet
 
 // Turns the pods' bone to `degrees` (0: down). False when the car, its
 // skeleton or the bone cannot be read safely; nothing is written then.
+// The pose last set, re-applied by the per-frame hook below (sub_82381FA0)
+// right after the game's own per-frame bone edits for that car.
+struct PopupPose {
+  uint32_t vehicle = 0, info = 0;
+  int32_t bone = -1;
+  std::array<uint32_t, 16> words{};
+};
+std::mutex g_popup_pose_mutex;
+PopupPose g_popup_pose;
+std::atomic<uint32_t> g_popup_pose_vehicle{0};
+
+// Whether a CVehicle is (still) an instance of the model whose info is given.
+bool VehicleIsModel(uint8_t* base, uint32_t vehicle, uint32_t info) {
+  if (!vehicle || !info || !Span(base, vehicle + 0x2E, 2))
+    return false;
+  const int32_t index = int16_t(Read16(base, vehicle + 0x2E));
+  return index >= 0 && index < int32_t(kModelInfoCount) &&
+         Span(base, kModelInfoTable + 4 * uint32_t(index), 4) &&
+         Read(base, kModelInfoTable + 4 * uint32_t(index)) == info;
+}
+
+// The bone's local matrix slot in the vehicle's live skeleton, or 0.
+uint32_t PopupLocalSlot(PPCContext& ctx, uint8_t* base, uint32_t vehicle, int32_t bone) {
+  const auto skeleton = CallGuest(ctx, base, kEntitySkeleton, vehicle);
+  if (bone < 0 || !skeleton || !*skeleton || !Span(base, *skeleton, 0x18))
+    return 0;
+  const uint32_t locals = Read(base, *skeleton + 0x0C), count = Read(base, *skeleton + 0x10);
+  if (uint32_t(bone) >= count || !Span(base, locals + 80 * uint32_t(bone), 64, true))
+    return 0;
+  return locals + 80 * uint32_t(bone);
+}
+
 bool PosePopupBone(PPCContext& ctx, uint8_t* base, uint32_t handle, float degrees) {
   static const uint32_t kDeimos = ModelHash("DEIMOS");
   const uint32_t vehicle = VehicleAddress(base, handle);
   const uint32_t info = vehicle ? FindModelInfo(base, kDeimos) : 0;
-  if (!info || !Span(base, info + 196, 4))
+  if (!info || !VehicleIsModel(base, vehicle, info) || !Span(base, info + 196, 4))
     return false;
   const uint32_t structure = Read(base, info + 196);
   if (!Span(base, structure + 4 * kPopupComponent, 4))
     return false;
   const int32_t bone = int32_t(Read(base, structure + 4 * kPopupComponent));
-  const auto skeleton = CallGuest(ctx, base, kEntitySkeleton, vehicle);
-  if (bone < 0 || !skeleton || !*skeleton || !Span(base, *skeleton, 0x18))
+  const uint32_t local = PopupLocalSlot(ctx, base, vehicle, bone);
+  const auto skeleton = local ? CallGuest(ctx, base, kEntitySkeleton, vehicle) : std::nullopt;
+  if (!local || !skeleton)
     return false;
-  const uint32_t data = Read(base, *skeleton + 4), locals = Read(base, *skeleton + 0x0C),
-                 count = Read(base, *skeleton + 0x10);
-  if (uint32_t(bone) >= count || !Span(base, data, 24) ||
-      !Span(base, locals + 80 * uint32_t(bone), 64, true))
+  const uint32_t data = Read(base, *skeleton + 4);
+  if (!Span(base, data, 24))
     return false;
   // The bone's rest local matrix (skeleton data +16: rotation rows, then the
   // translation row: the hinge), turned about its own X axis.
@@ -1242,19 +1273,45 @@ bool PosePopupBone(PPCContext& ctx, uint8_t* base, uint32_t handle, float degree
     return false;
   const float rad = degrees * 3.14159265f / 180.0f, c = std::cos(rad), s = std::sin(rad);
   const float turn[3][3] = {{1, 0, 0}, {0, c, s}, {0, -s, c}};
-  const uint32_t local = locals + 80 * uint32_t(bone);
+  std::array<uint32_t, 16> words{};
   for (uint32_t row = 0; row < 3; ++row) {
     for (uint32_t col = 0; col < 3; ++col) {
       float v = 0;
       for (uint32_t k = 0; k < 3; ++k)
         v += turn[row][k] * ReadFloat(base, rest + 16 * k + 4 * col);
-      Write(base, local + 16 * row + 4 * col, Bits(v));
+      words[4 * row + col] = Bits(v);
     }
-    Write(base, local + 16 * row + 12, Read(base, rest + 16 * row + 12));
+    words[4 * row + 3] = Read(base, rest + 16 * row + 12);
   }
   for (uint32_t w = 0; w < 4; ++w)  // the hinge stays put
-    Write(base, local + 48 + 4 * w, Read(base, rest + 48 + 4 * w));
+    words[12 + w] = Read(base, rest + 48 + 4 * w);
+  for (uint32_t w = 0; w < 16; ++w)
+    Write(base, local + 4 * w, words[w]);
+  {
+    std::lock_guard lock(g_popup_pose_mutex);
+    g_popup_pose = PopupPose{vehicle, info, bone, words};
+  }
+  g_popup_pose_vehicle.store(vehicle, std::memory_order_relaxed);
   return true;
+}
+
+// From the hook: the pods' pose again, after the game's own per-frame bone
+// edits for this car (whatever reset its skeleton earlier in the frame).
+void ReapplyPopupPose(PPCContext& ctx, uint8_t* base, uint32_t vehicle) {
+  if (!vehicle || g_popup_pose_vehicle.load(std::memory_order_relaxed) != vehicle)
+    return;
+  PopupPose pose;
+  {
+    std::lock_guard lock(g_popup_pose_mutex);
+    pose = g_popup_pose;
+  }
+  if (pose.vehicle != vehicle || !VehicleIsModel(base, vehicle, pose.info)) {
+    g_popup_pose_vehicle.store(0, std::memory_order_relaxed);  // gone, or not ours any more
+    return;
+  }
+  if (const uint32_t local = PopupLocalSlot(ctx, base, vehicle, pose.bone))
+    for (uint32_t w = 0; w < 16; ++w)
+      Write(base, local + 4 * w, pose.words[w]);
 }
 
 void SetPopupLights(PPCContext& ctx, uint8_t* base, uint32_t car, bool up, bool automatic) {
@@ -2547,6 +2604,16 @@ extern "C" void sub_82844200(PPCContext& ctx, uint8_t* base) {
 // vehicles.ide loader adds every car to it with no capacity check
 // (sub_821CA5F0), so each add-on car needs a free entry: like the PC game's
 // limit adjusters, make room for more (64 more entries, about 61 KB).
+// Each frame, per vehicle drawn, the game writes its hidden extras into the
+// skeleton (sub_82381FA0). The Deimos's pop-up pose is written right after,
+// so it holds whatever the frame did to the skeleton before.
+extern "C" void sub_82381FA0(PPCContext& ctx, uint8_t* base) {
+  const uint32_t vehicle = ctx.r3.u32;
+  __imp__sub_82381FA0(ctx, base);
+  if (REXCVAR_GET(gta4_trainer))
+    gta4::trainer::ReapplyPopupPose(ctx, base, vehicle);
+}
+
 extern "C" void sub_821C83C0(PPCContext& ctx, uint8_t* base) {
   using namespace gta4::trainer;
   static bool s_raised = false;

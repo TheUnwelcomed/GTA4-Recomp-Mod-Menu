@@ -104,10 +104,99 @@ def encode_flags(template_flags, vsize, psize):
 VIRTUAL_PAGE = 4096
 
 
+# The physical (GPU) segment is loaded in chunks, not as one block: the
+# resource map (sub_8285C790) cuts each segment into as many 16-page chunks as
+# it holds, then the rest into power-of-two chunks, largest first, and each
+# chunk goes wherever the allocator finds room. Pointers are translated chunk
+# by chunk, so a buffer running past its chunk's end reads whatever lies after
+# that chunk in memory: v1.7.5's huge stretched polygons, vertex data whose
+# tail was another allocation (the PS5 log's "changed without an unlock"
+# buffers each crossed exactly such an edge). Rockstar's packer keeps every
+# buffer and texture inside one chunk (15 stock cars: none crosses); so does
+# pack_physical.
+def load_chunks(count, page):
+    """(start, end) of each chunk a segment of `count` pages is loaded in."""
+    total, big = count * page, 16 * page
+    out, off = [], 0
+    for _ in range(total // big):
+        out.append((off, off + big))
+        off += big
+    rest = total - off
+    while rest:
+        size = 1 << (rest.bit_length() - 1)
+        out.append((off, off + size))
+        off += size
+        rest -= size
+    return out
+
+
+def segment_chunks(flags, physical=True):
+    shift = (flags >> 26) & 0xF if physical else (flags >> 11) & 0xF
+    count = (flags >> 15) & 0x7FF if physical else flags & 0x7FF
+    return load_chunks(count, 256 << shift)
+
+
+def pack_physical(objects, fixed_end=0, fixed_pieces=(), max_count=0x3F):
+    """Offsets for `objects` [(size, alignment)] so that each lies inside one
+    load chunk, in the smallest segment found (6-bit page counts, as the stock
+    tools emit). `fixed_end`: bytes [0, fixed_end) already taken (a template's
+    data kept in place), made of `fixed_pieces` [(start, end)] that must each
+    stay inside one chunk too. Returns (offsets, count, shift, total)."""
+    best = None
+    order = sorted(range(len(objects)), key=lambda i: (-objects[i][0], i))
+    need = fixed_end + sum(s for s, _ in objects)
+    biggest = max([s for s, _ in objects] + [e - s for s, e in fixed_pieces] + [1])
+    for shift in range(4, 16):
+        page = 256 << shift
+        if 16 * page < biggest:
+            continue
+        for count in range(max(1, -(-need // page)), max_count + 1):
+            chunks = load_chunks(count, page)
+            if any(not any(cs <= s and e <= ce for cs, ce in chunks) for s, e in fixed_pieces):
+                continue
+            fill = [max(cs, min(ce, fixed_end)) for cs, ce in chunks]
+            offs = [None] * len(objects)
+            for i in order:
+                size, a = objects[i]
+                for k, (cs, ce) in enumerate(chunks):
+                    o = align(fill[k], a)
+                    if o + size <= ce:
+                        offs[i] = o
+                        fill[k] = o + size
+                        break
+                else:
+                    break
+            else:
+                if best is None or count * page < best[3]:
+                    best = (offs, count, shift, count * page)
+                break
+    assert best, 'no physical layout keeps every buffer inside one load chunk'
+    return best
+
+
+def place_physical(objects, fixed=b'', fixed_pieces=()):
+    """Pack `objects` [(bytes, alignment)] after `fixed`; returns (segment
+    bytes, offsets, count, shift)."""
+    offs, count, shift, total = pack_physical([(len(b), a) for b, a in objects], len(fixed), fixed_pieces)
+    buf = bytearray(total)
+    buf[:len(fixed)] = fixed
+    for (b, _), o in zip(objects, offs):
+        buf[o:o + len(b)] = b
+    return bytes(buf), offs, count, shift
+
+
+def make_flags(template_flags, vsize, pcount, pshift):
+    """RSC5 flags: the virtual size as encode_flags packs it, the physical
+    page count and shift as pack_physical chose them."""
+    flags, vtot, _ = encode_flags(template_flags, vsize, 4096)
+    flags = (flags & ~((0x7FF << 15) | (0xF << 26))) | (pcount << 15) | (pshift << 26)
+    return flags, vtot, pcount * (256 << pshift)
+
+
 class Seg:
     def __init__(self, data=b'', page=0):
         self.buf = bytearray(data)
-        self.page = page  # 0: no paging rule (the physical segment is contiguous)
+        self.page = page  # 0: no paging rule (physical data is laid out by pack_physical)
 
     def alloc(self, size, alignment=16, phase=0):
         """`phase`: the offset must equal this modulo `alignment`."""
@@ -773,13 +862,35 @@ class Converter:
         isrc = d.phys[g['ib_data'][1]:g['ib_data'][1] + 2 * n]
         idata = struct.pack('>%dH' % n, *struct.unpack('<%dH' % n, isrc))
         assert max(struct.unpack('<%dH' % n, isrc)) < vcount
-        vo = self.p.put(vdata, 0x100)
-        io = self.p.put(idata, 0x100)
         tb = [self.bone_map[b] for b in table]
         decl_src = d.vptr(g['vb_off'] + 16)
+        # vo/io: set by place_buffers once every geometry is converted
         return dict(usage=usage, stride=stride, vcount=vcount, icount=n,
-                    vo=vo, vbytes=len(vdata), io=io, ibytes=len(idata), bones=tb,
+                    vdata=vdata, vbytes=len(vdata), idata=idata, ibytes=len(idata), bones=tb,
                     decl_src=decl_src)
+
+    def place_buffers(self, *lod_sets):
+        """Lay every converted geometry's vertex and index data out in the
+        physical segment, each buffer inside one load chunk."""
+        geoms, seen = [], set()
+        for lods in lod_sets:
+            for lod in lods:
+                for gs, _ in (lod or []):
+                    for c in gs:
+                        if id(c) not in seen:
+                            seen.add(id(c))
+                            geoms.append(c)
+        objs = []
+        for c in geoms:
+            objs += [(c['vdata'], 0x100), (c['idata'], 0x100)]
+        phys, offs, count, shift = place_physical(objs)
+        for k, c in enumerate(geoms):
+            c['vo'], c['io'] = offs[2 * k], offs[2 * k + 1]
+        self.p = Seg(phys)
+        self.p_count, self.p_shift = count, shift
+        chunks = load_chunks(count, 256 << shift)
+        self.log('physical: %d buffers in %d chunks of up to %d KiB (%d x %d KiB pages)'
+                 % (len(objs), len(chunks), max(e - s for s, e in chunks) >> 10, count, (256 << shift) >> 10))
 
     def emit_geometry(self, c):
         v = self.v
@@ -895,6 +1006,7 @@ class Converter:
         wheel = self.convert_drawable_lods(wheel_d) if wheel_d else []
         self.check_shader_inputs(main)
         self.check_shader_inputs(wheel)
+        self.place_buffers(main, wheel)
 
         # main: template slots 0-2 used; donor has fewer -> repeat its last LOD
         tslots = [c is not None for c in lod_collections(t, tdraw)]
@@ -926,10 +1038,10 @@ class Converter:
         # fragment bounding sphere (+16..+31), same layout on both (checked by caller)
         self.v.buf[16:32] = swap_words(self.d.virt[16:32])
 
-        flags, vtot, ptot = encode_flags(t.flags, len(self.v.buf), len(self.p.buf))
+        flags, vtot, ptot = make_flags(t.flags, len(self.v.buf), self.p_count, self.p_shift)
+        assert ptot == len(self.p.buf)
         virt = bytes(self.v.buf) + b'\0' * (vtot - len(self.v.buf))
-        phys = bytes(self.p.buf) + b'\0' * (ptot - len(self.p.buf))
-        return flags, virt + phys
+        return flags, virt + bytes(self.p.buf)
 
 
 # ---------------------------------------------------------------- textures
@@ -985,7 +1097,8 @@ def build_xtd(tmpl, sources, wanted, log=print):
     t = tmpl
     v = Seg(t.virt[:align(max(o for o in range(t.vsize) if t.virt[o] not in (0, 0xCD)) + 1, 16)],
             VIRTUAL_PAGE)
-    p = Seg(t.phys)
+    p_objs = []   # new texture data, placed by place_physical once all are known
+    patches = []  # (texture header, its fetch constant words, index in p_objs)
     tl, n = t.vptr(24), t.u16(20)
     ht = t.vptr(16)
     entries = []  # (hash, info offset)
@@ -1012,7 +1125,6 @@ def build_xtd(tmpl, sources, wanted, log=print):
         if label:
             src = dict(src, fmt=label)
         tiled = xenos.tile_level(xenos.swap16(lin), bw, bh, bpp)
-        base = p.put(tiled, 0x1000)
         info = v.put(t_info)
         d3d = v.put(t_d3d)
         nm = v.cstr('pack:/%s.dds' % name)
@@ -1024,11 +1136,12 @@ def build_xtd(tmpl, sources, wanted, log=print):
         f = list(struct.unpack_from('>6I', t_d3d, 28))
         pitch = (align(bw, 32) * 4) >> 5
         f[0] = (f[0] & ~(0x1FF << 22)) | (pitch << 22)
-        f[1] = fmt | (1 << 6) | (f[1] & 0xF00) | ((PP | base) & 0xFFFFF000)
+        f[1] = fmt | (1 << 6) | (f[1] & 0xF00)  # base address: once placed
         f[2] = (f[2] & ~0x03FFFFFF) | (w - 1) | ((h - 1) << 13)
         f[4] = f[4] & ~(0xFF << 2)                      # mip min = max = 0
         f[5] = (f[5] & ~0xFFFFF800) | (1 << 9) & 0x600  # 2D, no packed mips, no mip address
-        struct.pack_into('>6I', v.buf, d3d + 28, *f)
+        patches.append((d3d, f, len(p_objs)))
+        p_objs.append((tiled, 0x1000))
         entries.append((joaat(name), info))
         added.append('%s %dx%d %s' % (name, w, h, src['fmt']))
         have.add(name)
@@ -1041,7 +1154,6 @@ def build_xtd(tmpl, sources, wanted, log=print):
         lin = dxt.encode_dxt5(bytes([0, 0, 0, 255]) * 16 * 16, 16, 16)
         fmt, bpp = xenos.FORMATS['DXT5']
         tiled = xenos.tile_level(xenos.swap16(lin), 4, 4, bpp)
-        base = p.put(tiled, 0x1000)
         info = v.put(t_info)
         d3d = v.put(t_d3d)
         nm = v.cstr('pack:/%s.dds' % name)
@@ -1052,11 +1164,12 @@ def build_xtd(tmpl, sources, wanted, log=print):
         v.w32(info + 32, 1)
         f = list(struct.unpack_from('>6I', t_d3d, 28))
         f[0] = (f[0] & ~(0x1FF << 22)) | (((32 * 4) >> 5) << 22)
-        f[1] = fmt | (1 << 6) | (f[1] & 0xF00) | ((PP | base) & 0xFFFFF000)
+        f[1] = fmt | (1 << 6) | (f[1] & 0xF00)
         f[2] = (f[2] & ~0x03FFFFFF) | 15 | (15 << 13)
         f[4] = f[4] & ~(0xFF << 2)
         f[5] = (f[5] & ~0xFFFFF800) | (1 << 9) & 0x600
-        struct.pack_into('>6I', v.buf, d3d + 28, *f)
+        patches.append((d3d, f, len(p_objs)))
+        p_objs.append((tiled, 0x1000))
         entries.append((joaat(name), info))
         added.append('%s 16x16 black stand-in' % name)
         have.add(name)
@@ -1076,5 +1189,12 @@ def build_xtd(tmpl, sources, wanted, log=print):
     missing = sorted(set(wanted) - have)
     log('textures: %d added (%s); template kept %d; resolved elsewhere (vehicle shared pack): %s'
         % (len(added), ', '.join(added), n, ', '.join(missing)))
-    flags, vtot, ptot = encode_flags(t.flags, len(v.buf), len(p.buf))
-    return flags, bytes(v.buf) + b'\0' * (vtot - len(v.buf)) + bytes(p.buf) + b'\0' * (ptot - len(p.buf))
+    # The template's texture data stays where it is: each of its own load
+    # chunks must still fall inside one chunk of the new layout.
+    pieces = [(cs, min(ce, len(t.phys))) for cs, ce in segment_chunks(t.flags) if cs < len(t.phys)]
+    phys, offs, pcount, pshift = place_physical(p_objs, t.phys, pieces)
+    for d3d, f, k in patches:
+        f[1] |= (PP | offs[k]) & 0xFFFFF000
+        struct.pack_into('>6I', v.buf, d3d + 28, *f)
+    flags, vtot, _ = make_flags(t.flags, len(v.buf), pcount, pshift)
+    return flags, bytes(v.buf) + b'\0' * (vtot - len(v.buf)) + phys

@@ -104,6 +104,20 @@ its vehicle structure null. The allocator now starts any object that would
 cross on the next page, and `validate_vehicle.py` checks every pointed
 object (records, arrays, strings, texture headers) against the rule.
 
+The **physical (GPU) segment is loaded in chunks**, each allocated on its own:
+the game's resource map (`sub_8285C790`) cuts a segment of N pages into as
+many 16-page chunks as it holds, then the remainder into power-of-two chunks,
+largest first. A vertex buffer, index buffer or texture level that runs past
+its chunk's end is read from whatever memory follows that chunk. Up to v1.7.5
+the converter packed the physical segment as one block, and on the PS5 the
+add-on cars grew huge stretched planes and spikes that changed as you drove
+(the port's log flagged each straddling buffer as "changed without an
+unlock", at the exact offset of the chunk edge). Rockstar's packer never lets
+a buffer cross (15 stock cars, 30 files: none does). `pack_physical` now
+picks the page size and count and places every buffer and texture inside one
+chunk, keeping a template dictionary's own chunks whole; `chunkcheck.py`
+checks a file against the rule, and `validate_vehicle.py` runs it.
+
 ### What the converter handles (beyond a like-for-like car)
 
 - **Donor bones the template lacks** (`misc_*`, `steeringwheel`, ...), and
@@ -164,6 +178,7 @@ python3 identity_test.py <export_dir> <stock PC fbi dir> work         # prove th
 python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [pivot]   # template: fbi
 python3 validate_vehicle.py out mycar car.wft car.wtd [pivot]         # structural checks, rest pose included
 python3 restpose.py out/mycar.xft out/mycar.xft.bin [pivot bone]      # the rest-pose check alone
+python3 chunkcheck.py out/mycar.xft out/mycar.xft.bin out/mycar.xtd out/mycar.xtd.bin   # GPU buffers vs load chunks
 ./xlzx rsc 112 <flags> out/mycar.xft.bin mycar.xft   # flags from out/flags.txt
 ./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd
 ```

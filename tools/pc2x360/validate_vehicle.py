@@ -342,5 +342,14 @@ for label, res, objs in (('model', x, pointed_objects_xft(x)), ('textures', t, p
     check('%s: %d pointed objects, none straddles a %d-byte page' % (label, len(objs), page),
           not crossing, ', '.join(kinds))
 
+# The physical segment loads in separate chunks (batconv.load_chunks): every
+# vertex buffer, index buffer and texture level must lie inside one, or its
+# tail is read from another allocation (v1.7.5's stretched polygons).
+import chunkcheck  # noqa: E402
+for label, res, objs in (('model', x, chunkcheck.buffers_xft(x)), ('textures', t, chunkcheck.buffers_xtd(t))):
+    chunks, bad = chunkcheck.crossings(res, objs)
+    check('%s: %d GPU buffers, each inside one of its %d load chunks' % (label, len(objs), len(chunks)),
+          not bad, '; '.join(bad[:4]))
+
 print('FAILURES: %d' % fails)
 sys.exit(1 if fails else 0)
