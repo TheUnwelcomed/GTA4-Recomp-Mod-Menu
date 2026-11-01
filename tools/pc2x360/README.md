@@ -47,7 +47,7 @@ every donor texture untiles back to its source.
 | car | template | result |
 |---|---|---|
 | Batmobile | FBI | 22/22 checks: canopy on a pivot, 262,043 vertices skinned at rest, 0.00000 m off |
-| F-16C (airtug slot on PC) | Cavalcade | 22/22 checks: paint2/paint3 from the airtug, landing gear on three pivots (12,872 vertex influences split by position), 74,436 vertices exact |
+| F-16C (airtug slot on PC) | Cavalcade | 22/22 checks: paint2/paint3 from the airtug, landing gear on three pivots (12,872 vertex influences split by position), the canopy on a fourth (`interiorlight`, hinged at its rear edge), 74,436 vertices exact |
 | Grotti Deimos GTS | Banshee | 22/22 checks: doors on the Deimos's hinges, lamp pods on a pivot, 119,139 vertices exact |
 | Vapid Dominator 645 | Banshee | 22/22 checks: doors on the Dominator's hinges, 91 geometries, 293,238 vertices exact |
 
@@ -173,12 +173,16 @@ packer stays under 100.
   texcoord set the part lacks, it is filled from set 0.
 - **Per-car shaders go first.** Stock cars keep the shaders the game drives
   per car (paint, lamps on and off, glass, tyres) in the first 12 slots of
-  the shader group (paint at 0, or at 10-11 on the police car and taxi). The
-  Dominator 645 had its paint at slot 14 and stayed white, while the Deimos's
-  at slot 7 took its colour. When one of them would sit past slot 11, the
-  converter moves them to the front (paint, lamps, glass, tyres, then the
-  rest in the donor's order) and remaps every geometry's shader index; the
-  log says `shaders: per-car shaders moved to the front`.
+  the shader group (paint at 0, or at 10-11 on the police car and taxi).
+  When one of them would sit past slot 11, the converter moves them to the
+  front (paint, lamps, glass, tyres, then the rest in the donor's order) and
+  remaps every geometry's shader index; the log says `shaders: per-car
+  shaders moved to the front`. (v1.7.9 did this hoping it was why the
+  Dominator 645 stayed grey; it wasn't. Its colour list was: see
+  `addons/dom645t/README.md`.)
+- **A donor drawn with paint2/paint3 takes paint1's colour**: the shader
+  that stands in for them reads a combination's first colour, so a mod whose
+  `carcols` puts its body colours second or third needs them moved first.
 - **Physics wheels** take the donor's radii. A wheel's collision part is a
   curved geometry (a disc swept by the bound's margin); the template's curved
   edges, box and bounding sphere are resized to the donor's wheel (its box,
@@ -203,7 +207,8 @@ packer stays under 100.
   Cavalcade's `extra_1`, `extra_5` and `extra_6`; the Batmobile's canopy
   (the mod's parked `door_pside_f` and `windscreen`) on the FBI's
   `interiorlight`, which has no extras, hinged at its rear edge (the trainer
-  finds that bone by name). (v1.7.1-v1.7.4 emitted
+  finds that bone by name); the F-16's bubble canopy (the mod's `windscreen`)
+  on the Cavalcade's `interiorlight` at (0, 2.3, 1.22), its rear tip. (v1.7.1-v1.7.4 emitted
   posed copies on three extras instead; hiding an extra drew their shared
   triangles to the world's origin.) The template needs the skeleton's
   rotation arrays (+8, +12): of the stock cars only the Banshee, Cavalcade,

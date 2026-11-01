@@ -11,6 +11,8 @@ console exports and the mods' own files.
 | `inspect/palettes.py` | Which bones each geometry is skinned to, and its shader. |
 | `re/ppc_asm.py` | A game function's PowerPC assembly, from the comments the recompiler leaves in `generated/gta4_recomp.*.cpp`; `--find` lists the functions using an instruction pattern. |
 | `jet/render_preview.cpp` | Renders the F-16's synthesized engine (`src/gta4_jet_engine.h`) to a WAV through a scripted flight (start-up, throttle, afterburner, cannon, missile, shutdown), to hear changes without a console. |
+| `jet/flight_model_sim.py` | The F-16's flight model (the trainer's equations) run through takeoff, an idle glide, banks, a pulled turn, a stall, the afterburner and the rudder; prints speed, climb, bank, heading and height. |
+| `bat/render_preview.cpp` | Renders the Batmobile's synthesized engine (`src/gta4_bat_engine.h`) through a scripted drive (start-up, idle, blips, four gears, cruise, booster, lift-off, the canopy, shut down). |
 | `unarc.py` | Unpacks `.rar` / `.7z` / `.zip` mod archives with the system's libarchive (no unrar needed): `python3 -I unarc.py mod.rar outdir`. |
 
 ## Game addresses the trainer relies on (360 build)
@@ -26,4 +28,4 @@ Found with `re/ppc_asm.py`:
 | hidden extras mask | `CVehicle +0xDC0`, set by `sub_8237A280`, applied each frame by `sub_82381FA0` | |
 | vehicles.ide cars line | `sub_8256DC70`: game name → model info +96, frequency +148, max +152 | |
 | resource load map | `sub_8285C790`: each segment in 16-page chunks, then power-of-two chunks, largest first; its callers keep the map (u16 counts, 12-byte chunk entries) on the stack, room for 128 chunks | why no GPU buffer may cross a chunk edge (`pc2x360/chunkcheck.py`), and why the add-ons are packed in stock-sized chunks |
-| bone of a car by name | the live skeleton's data (+0x04): bone records at +0, 0xE0 bytes each, the name first; the count at +20 | the Batmobile's canopy pivot (`interiorlight`) |
+| bone of a car by name | the live skeleton's data (+0x04): bone records at +0, 0xE0 bytes each, the name first; the count at +20 | the Batmobile's and the F-16's canopy pivots (`interiorlight`) |

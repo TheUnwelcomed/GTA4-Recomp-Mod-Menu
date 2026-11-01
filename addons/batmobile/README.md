@@ -27,7 +27,7 @@ stock FBI lines back by itself.
 | Parts it has no mesh for (rear doors, sirens) | not drawn |
 | Canopy | pops open when you get in or out (see below); it rides the FBI's `interiorlight` bone, hinged at its rear edge |
 | Its doors, bonnet, boot | fixed to the body (the mod parks its door bones 13 m under the car; v1.7.4 drew the parts there, the long black shapes) |
-| Engine sound | the Sabre GT's (IV picks sounds by the name a car shows) |
+| Engine sound | its own, synthesized (`src/gta4_bat_engine.h`; see below). Its game name is `BATMOBILE`, which has no engine sound in IV; up to v1.7.10 it was `SABREGT` and drove with the Sabre GT's |
 | Gadget script (ScriptHookDotNet `.net.dll`s) | cannot run on the port. The trainer re-creates its missiles, miniguns, bombs and booster: see below |
 | Physics wheels | the mod's own sizes (0.35 m front, 0.39 m rear); on the FBI's 0.40 m wheels it sat high |
 | Body shader | the template's `interior2`, as the mod's `interior` maps to: v1.7.5-v1.7.6 borrowed the police car's `interior` and the body came out chrome |
@@ -41,17 +41,37 @@ skeleton, as it turns the Deimos's lamp pods, and moves the player with
 `WARP_CHAR_INTO_CAR` / `WARP_CHAR_FROM_CAR_TO_COORD`. The cockpit under the
 canopy (seats, dash, wheel) is the mod's own.
 
+Setting the player down (since v1.7.11): tasks cleared, then warped out of
+the seat (or placed, if already out) on the ground beside the cockpit, the
+ground looked for from above the car's roof, falling back to the ground under
+the car when the answer is implausible. For four seconds the trainer
+watches: dropping through the world, the player is held still on the spot
+(`FREEZE_CHAR_POSITION`, collision on) and let go 0.35 s later, up to four
+times, then put back in the seat. Each step is logged.
+
+## Engine sound
+
+An original voice in the spirit of the 1989/1992 film car, synthesized from
+scratch (nothing from the films): a cross-plane V8's firing pulses (rpm / 15
+Hz, a lopey idle) through a low exhaust resonance and a growl that grows with
+load, a turbine's whine over it, an intake rasp, pops on lift-off, and a deep
+roar with crackles on the booster. The trainer works the revs out of the road
+speed through five simulated gears (the throttle revs it standing still);
+getting in cranks the starter and it catches; getting out it winds down. The
+canopy's hiss and clunk come from the same voice (the F-16's canopy too).
+`tools/bat/render_preview.cpp` renders a scripted drive to a WAV.
+
 ## Gadgets
 
 *Vehicle Options → Batmobile Gadgets*, then in the car:
 
 | | |
 |---|---|
-| **L1** | a missile out of the nose (hold: one every 0.6 s) |
+| **L1** | a missile out of the round intake in the nose, locking on the car ahead (3 s reload) |
 | **d-pad left** (hold) | the front miniguns, both barrels together |
 | **d-pad down** (hold) | the rear miniguns, both barrels together |
 | **horn (L3)** | plant a bomb behind the car (a blinking red light marks it); again to set it off |
-| **d-pad right** (hold) | booster: the rear turbine flames (`weap_rocket`) and roars (the trainer's jet synth) |
+| **d-pad right** (hold) | booster: the rear turbine flames (`weap_rocket`) and roars (the engine's own booster roar) |
 
 As in JulioNIB's script (its modes *Minigun*, *Rocket*, *Bomb*), redone
 through natives:

@@ -12,7 +12,9 @@
 //  - roar: jet noise, low-passed noise that opens up and grows with power.
 //  - rumble: the low end, mostly the afterburner's.
 //  - crackle: the afterburner's popping at full throttle.
-//  - the cannon's rounds and a missile launch's whoosh.
+//  - the cannon's rounds and a missile launch's whoosh, at their own level
+//    (the volume set with the engine scales the engine only);
+//  - the lock-on tone: two short beeps.
 //
 // Plain C++ with no platform code: the game thread sets targets (atomics),
 // the mixer's thread renders. A PC test renders it to a file
@@ -41,6 +43,7 @@ class EngineSynth {
   }
   void Shot() { shots_.fetch_add(1, std::memory_order_relaxed); }
   void Launch() { launches_.fetch_add(1, std::memory_order_relaxed); }
+  void Beep() { beeps_.fetch_add(1, std::memory_order_relaxed); }
   // Spooled down, silent and nothing left ringing: the voice can stop.
   bool Quiet() const { return quiet_.load(std::memory_order_relaxed); }
   float Rpm() const { return rpm_out_.load(std::memory_order_relaxed); }
@@ -52,6 +55,7 @@ class EngineSynth {
     const float vol_target = target_volume_.load(std::memory_order_relaxed);
     for (uint32_t n = shots_.exchange(0, std::memory_order_relaxed); n; --n) shot_ = 1.0f, thump_ = 1.0f;
     for (uint32_t n = launches_.exchange(0, std::memory_order_relaxed); n; --n) launch_ = 1.0f;
+    for (uint32_t n = beeps_.exchange(0, std::memory_order_relaxed); n; --n) beep_t_ = 0.0f;
 
     constexpr float dt = 1.0f / kRate;
     for (size_t i = 0; i < frames; ++i) {
@@ -121,16 +125,25 @@ class EngineSynth {
         launch_ *= 0.99993f;  // (~0.3 s)
       }
 
-      const float shared = whine + rumble + crack + gun + whoosh;
-      float l = (shared + roar_l * roar_amp + hiss) * vol_ * 1.6f;
-      float r = (shared + roar_r * roar_amp + hiss) * vol_ * 1.6f;
-      l = std::tanh(l * 1.2f) * 0.85f;
-      r = std::tanh(r * 1.2f) * 0.85f;
+      // ---- lock-on tone: two 70 ms beeps at 1.25 kHz
+      float beep = 0.0f;
+      if (beep_t_ < 0.2f) {
+        beep_ph_ = Wrap(beep_ph_ + 1250.0f * dt);
+        const bool on = beep_t_ < 0.07f || (beep_t_ > 0.11f && beep_t_ < 0.18f);
+        beep = on ? Sin(beep_ph_) * 0.10f : 0.0f;
+        beep_t_ += dt;
+      }
+      const float engine = whine + rumble + crack;
+      float l = ((engine + roar_l * roar_amp + hiss) * vol_ + gun + whoosh) * 1.6f;
+      float r = ((engine + roar_r * roar_amp + hiss) * vol_ + gun + whoosh) * 1.6f;
+      l = std::tanh(l * 1.2f) * 0.85f + beep;
+      r = std::tanh(r * 1.2f) * 0.85f + beep;
       lr[2 * i] = l;
       lr[2 * i + 1] = r;
     }
     rpm_out_.store(rpm_, std::memory_order_relaxed);
-    quiet_.store(target <= 0.0f && rpm_ < 0.01f && ab_ < 0.01f && launch_ < 1e-3f && shot_ < 1e-3f,
+    quiet_.store(target <= 0.0f && rpm_ < 0.01f && ab_ < 0.01f && launch_ < 1e-3f && shot_ < 1e-3f &&
+                     beep_t_ >= 0.2f,
                  std::memory_order_relaxed);
   }
 
@@ -164,14 +177,14 @@ class EngineSynth {
   float Noise() { return Uniform() * 2.0f - 1.0f; }
 
   std::atomic<float> target_spool_{0}, target_ab_{0}, target_volume_{0};
-  std::atomic<uint32_t> shots_{0}, launches_{0};
+  std::atomic<uint32_t> shots_{0}, launches_{0}, beeps_{0};
   std::atomic<bool> quiet_{true};
   std::atomic<float> rpm_out_{0};
   // (the mixer thread's own)
   float rpm_ = 0, ab_ = 0, vol_ = 0, wander_ = 0;
   float ph1_ = 0, ph1b_ = 0.37f, ph2_ = 0, ph3_ = 0, phf_ = 0, thump_ph_ = 0;
   float brown_ = 0, rumble_ = 0, pulse_ = 1, pulse_target_ = 1, crack_ = 0, hiss_lp_ = 0;
-  float shot_ = 0, thump_ = 0, launch_ = 0;
+  float shot_ = 0, thump_ = 0, launch_ = 0, beep_t_ = 1.0f, beep_ph_ = 0;
   uint32_t seed_ = 0x9E3779B9u;
   Svf roar_l_, roar_r_, crack_l_, gun_lp_, launch_lp_;
 };

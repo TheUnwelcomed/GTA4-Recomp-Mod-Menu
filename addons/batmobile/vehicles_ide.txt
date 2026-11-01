@@ -1,1 +1,1 @@
-batmobile, batmobile, car, BATMOBILE, SABREGT, VEH@STD, VEH@STD_LO4_LO4, 0, 999, 0.2622, 0.2622, 0, 5, 1.0, 0, truckfirefx+sports+ext_conv+ext_strong
+batmobile, batmobile, car, BATMOBILE, BATMOBILE, VEH@STD, VEH@STD_LO4_LO4, 0, 999, 0.2622, 0.2622, 0, 5, 1.0, 0, truckfirefx+sports+ext_conv+ext_strong

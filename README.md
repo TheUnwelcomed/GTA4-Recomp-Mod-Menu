@@ -42,23 +42,30 @@ keeps going while you browse.
     on L1 that homes in on the car ahead, twin miniguns ahead and behind, a
     bomb on the horn, a booster that flames and roars, and a canopy that pops
     open as you get in and out
-  - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a cannon and
-    missiles (the PC mod's Air Combat IV script, re-done in the trainer), a
-    synthesized jet engine that spools with the throttle, landing gear on R3
-    and an afterburner flame
+  - **F-16C Fighting Falcon** (SkylineGTRFreak): flies the way GTA V's jets
+    do (speed from the engine, stalls, rudder on LB/RB), with a cannon on
+    both sides and missiles that lock on a car ahead (the PC mod's Air
+    Combat IV script, re-done in the trainer), a canopy that rises as you
+    get in and out, a synthesized jet engine that spools with the throttle,
+    landing gear on R3 and an afterburner flame
   - **Grotti Deimos GTS** (harithd / Milcin), with pop-up headlights the
     trainer swings on their hinge and opening doors
   - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin), with
     opening doors
   - All kept out of traffic: nobody else drives them
-- **Teleporting** — to the map waypoint, save/restore a position, landmark presets
+- **Teleporting** — to the map waypoint, save/restore a position, landmark presets.
+  The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
+  if it isn't ready yet you wait there, held still, until it is. Driving, the
+  car comes along
 - **Time & Weather** — set the clock, force or release any weather
 - **Weapons** — full loadout with ammo, or strip all weapons
 - **Chaos**: raining cars (random cars dropped around you), gravity on/off
-- **Headlights on D-pad Left**: switch any car's lights on and off
+- **Headlights on D-pad Left** (on by default, the one option that is):
+  switch any car's lights on and off; getting out switches them off
 - **Trainer Status** — shows which game natives resolved, for debugging
 
-Every option starts off: the menu changes nothing until you ask it to.
+Every option but the headlight switch starts off: the menu changes nothing
+else until you ask it to.
 
 The menu is **single-player only**: it closes itself and refuses to act inside a
 network session.
@@ -129,6 +136,15 @@ network session.
 
 ## Changes
 
+- **v1.7.11**: the F-16 gets a canopy that rises as you get in and out, flies
+  the way GTA V's jets do (speed from the engine, stalls, LB/RB rudder),
+  locks its missiles and cannon on a car ahead, fires from both sides and is
+  quieter; the Batmobile gets its own synthesized engine (turbine over a V8)
+  and canopy sounds; teleports load the destination before putting you on
+  its ground; the Batmobile's set-down holds and retries instead of losing
+  you under the map; the Dominator 645 takes the mod's coloured set; the
+  headlight switch is on by default and switches the lamps off when you get
+  out, and the Deimos's pop-ups flip up getting in and down getting out.
 - **v1.7.10**: the Batmobile missile locks on the car ahead and homes in,
   leaves from the round intake with a launch flash, and reloads in 3
   seconds; the Deimos door no longer slams shut as Niko sits down (the
@@ -155,6 +171,7 @@ network session.
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
 | `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
+| `src/gta4_bat_engine.h` | the Batmobile's synthesized engine and canopy sounds (the same way; `tools/bat/` renders it) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
@@ -169,7 +186,7 @@ describes:
 ```
 git clone https://github.com/elripalda/gta4-ps5 && cd gta4-ps5 && ./setup.sh
 git apply /path/to/patches/liberty-trainer.patch
-cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* /path/to/src/gta4_jet_engine.h glue/rexglue-sdk-main/gta4-recomp/src/
+cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* /path/to/src/gta4_jet_engine.h /path/to/src/gta4_bat_engine.h glue/rexglue-sdk-main/gta4-recomp/src/
 # then the cmake + ninja commands from ps5/BUILD.md
 # (glslangValidator must be built with ENABLE_OPT=ON: the shader overrides use -Os)
 ```
