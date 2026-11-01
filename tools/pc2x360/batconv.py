@@ -1721,8 +1721,9 @@ def parse_options(text):
     points=wheel_lr=-1.37:-1.49:-1.35;... puts template bones (and the physics
     parts on them) at those points instead of the donor's; radii=wheel_lr:0.24;...
     gives physics wheels those radii; shift=wheel_lf:0:0:0.15 moves the donor
-    geometry bound to a bone (the Batwing's: its physics wheels under the
-    wheels it draws, the nose wheel up so it stands level)."""
+    geometry bound to a bone at conversion; gear=wheel_lr:x:top:r;... and
+    move=bone:dx:dy:dz;... patch the donor first (gearpatch.py: legs for bare
+    wheels, the Batwing's main wheels down so it stands level)."""
     out = {}
     for item in filter(None, (text or '').split(',')):
         key, value = item.split('=', 1)
@@ -1735,11 +1736,14 @@ def parse_options(text):
                         for b, at in (item.split('=') for item in value.split(';') if item)}
         elif key == 'radii':  # wheel_xx:r;... : the physics wheels' radii
             out[key] = {b: float(r) for b, r in (item.split(':') for item in value.split(';') if item)}
-        elif key == 'shift':  # donor_bone:dx:dy:dz;... : the geometry bound to it moved
+        elif key in ('shift', 'move'):  # donor_bone:dx:dy:dz;... : the geometry bound to it moved
             out[key] = {}
             for item in filter(None, value.split(';')):
                 b, *d = item.split(':')
                 out[key][b] = tuple(float(v) for v in d)
+        elif key == 'gear':  # wheel_bone:strut_x:top_z:radius;... : legs (gearpatch.py)
+            import gearpatch
+            out[key] = gearpatch.parse(value)
         else:
             out[key] = int(value)
     return out

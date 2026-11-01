@@ -186,6 +186,17 @@ network session.
 
 ## Changes
 
+- **v1.7.26**: the **Batwing** is stood back on its wheels when it lies on
+  its body with its wheels under the road (its collision is the Cavalcade's,
+  a metre above its wheels: a flip or a hard landing left it there, the
+  wheels' probes starting under the road) or stops on its side or back;
+  the F-16 too. **Landing gear** for its bare wheels (`tools/pc2x360/gearpatch.py`,
+  applied to the PC donor before conversion and by the validator): a strut
+  up into the body and an axle per leg, the wheels' faces and treads mapped
+  onto a painted wheel texture (`gear_texture.py`), the main wheels 15 cm
+  down so it stands level with the nose wheel back where the mod had it,
+  the hinges at the legs' tops so the gear folds into the body. The jets'
+  cannons draw heat.
 - **v1.7.25**: **wanted levels** fixed: v1.7.24's never came, because the
   menu read the player's index in single player (0) as no player. Blasts
   (the Lazar's cannon, the jets' and the Batmobile's missiles) are two

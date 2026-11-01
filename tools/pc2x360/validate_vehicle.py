@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import batconv  # noqa: E402
 import dxt  # noqa: E402
 import rsc5  # noqa: E402
+import gearpatch  # noqa: E402
 import restpose  # noqa: E402
 import xenos  # noqa: E402
 
@@ -35,6 +36,7 @@ flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
 x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
 t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
 d = rsc5.Resource.pc(wft)
+gearpatch.apply(d, OPTIONS)  # (the donor as converted: legs added, wheels moved)
 def _wtd(path):
     raw = open(path, 'rb').read()
     _, rt, rf = struct.unpack_from('<III', raw, 0)

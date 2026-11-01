@@ -2574,6 +2574,10 @@ struct JetState {
   bool rest_known = false;
   int roll_logs = 0;
   uint64_t next_roll_log = 0;
+  // v1.7.26: since when it has lain on its body with its wheels under the
+  // road, or on its side or back (then it is stood back on its wheels)
+  uint64_t stuck_since = 0;
+  int stuck_logs = 0;
 };
 JetState g_jet;
 // Flight, after GTA V's jets: the engine's thrust (the throttle, the
@@ -2631,12 +2635,13 @@ struct JetSpec {
   std::array<GearLeg, 3> legs;
   int slot;      // where the pose of its gear (and canopy) is kept
   int voice;     // its engine's voicing (gta4_jet_engine.h)
+  float stand;   // its origin's height over the ground standing on its wheels (m)
 };
 constexpr JetSpec kF16Jet{"F16", "F-16",
                           {{0.74f, 3.29f, 0.55f}, {-0.74f, 3.29f, 0.55f}},  // both sides, as asked
                           {{-2.5f, -3.0f, -0.3f}, {2.5f, -3.0f, -0.3f}},
                           {{0.0f, -5.45f, 0.40f}, {0.0f, 0.0f, 0.0f}}, 1, true, 1.0f, &gta4::flight::kF16,
-                          {{{1, 0, -95.0f}, {5, 1, -95.0f}, {6, 1, 95.0f}}}, kPoseF16, 0};
+                          {{{1, 0, -95.0f}, {5, 1, -95.0f}, {6, 1, 95.0f}}}, kPoseF16, 0, 1.05f};
 // The Batwing's: guns at the tips of its nose prongs, missiles under the
 // wing roots, its two engines' nozzles at the tail (the mod's exhaust
 // points, a little aft).
@@ -2645,7 +2650,7 @@ constexpr JetSpec kBatwingJet{"BATWING", "Batwing",
                               {{-2.4f, -1.6f, -0.95f}, {2.4f, -1.6f, -0.95f}},
                               {{1.2f, -4.25f, -0.26f}, {-1.2f, -4.25f, -0.26f}}, 2, true, 0.85f,
                               &gta4::flight::kBatwing,
-                              {{{1, 0, -95.0f}, {5, 0, -95.0f}, {6, 0, -95.0f}}}, kPoseBatwing, 1};
+                              {{{1, 0, -95.0f}, {5, 0, -95.0f}, {6, 0, -95.0f}}}, kPoseBatwing, 1, 1.65f};
 const JetSpec* g_jet_spec = &kF16Jet;
 const JetSpec* JetSpecOf(uint32_t model) {
   static const uint32_t f16 = ModelHash("F16"), batwing = ModelHash("BATWING");
@@ -3430,6 +3435,7 @@ void LaunchMissile(PPCContext& ctx, uint8_t* base, JetState& j, const float fwd[
 // of the nose, both aim at it.
 void FireCannon(PPCContext& ctx, uint8_t* base, JetState& j, const float fwd[3]) {
   static uint32_t seed = 0x1234567u;
+  AddHeat(0.07f);  // (a second's burst: two stars, as the Batmobile's guns)
   auto scatter = [](float spread) {
     seed = seed * 1664525u + 1013904223u;
     return (float((seed >> 8) & 0xFFFF) / 65535.0f - 0.5f) * spread;
@@ -6618,6 +6624,7 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     j.next_pull_log = j.next_flight_log = j.next_roll_log = 0;
     j.rest_known = false;
     j.roll_v = 0.0f;
+    j.stuck_since = 0;
     REXLOG_INFO("gta4-trainer: {}: player in the aircraft; flight and weapons {}", std::string(spec->label),
                 s.jet ? "on" : "off (the menu)");
   }
@@ -6657,9 +6664,10 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     if (const auto below = GroundZ(ctx, base, (*at)[0], (*at)[1], (*at)[2] + 0.5f))
       clearance = (*at)[2] - *below;
   // Its speed along its nose on the ground, from how far it moved (reversing: negative).
-  float forward_speed = ground_speed;
+  float forward_speed = ground_speed, up_z = 1.0f;
   if (at && j.have_last_pos && dt > 0.0f) {
     if (const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {*car, 0, 0, 0, 0}, 1, 0, 4)) {
+      up_z = fl::Rot(fl::Norm({q->f(0), q->f(1), q->f(2), q->f(3)}), {0, 0, 1}).z;
       const fl::V3 f = fl::Rot(fl::Norm({q->f(0), q->f(1), q->f(2), q->f(3)}), {0, 1, 0});
       const float moved = ((*at)[0] - j.last_pos[0]) * f.x + ((*at)[1] - j.last_pos[1]) * f.y +
                           ((*at)[2] - j.last_pos[2]) * f.z;
@@ -6702,6 +6710,37 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     }
     const float rpm = g_jet_synth.Rpm();
     if (!j.flying) {
+      // ---- Down on its body with its wheels under the road, or on its side
+      // or back: stood back on its wheels. (Its collision is the stock car's
+      // it was built on: a metre above the Batwing's wheels. A flip or a
+      // hard landing could leave it lying on that, its wheels' probes
+      // starting under the road, and it never came up again: v1.7.25.)
+      const bool sunk = clearance < g_jet_spec->stand - 0.45f;
+      const bool tipped = up_z < 0.35f;
+      if ((sunk && ground_speed < 60.0f) || (tipped && ground_speed < 3.0f)) {
+        if (!j.stuck_since)
+          j.stuck_since = now;
+      } else {
+        j.stuck_since = 0;
+      }
+      if (j.stuck_since && now - j.stuck_since > (tipped ? 1500u : 500u)) {
+        j.stuck_since = 0;
+        Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {*car});
+        j.rest_known = false;
+        j.roll_v = 0.0f;
+        if (!tipped && forward_speed > 2.0f) {  // (rolling: it carries on rolling)
+          Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {*car, Bits(forward_speed)});
+          j.roll_v = forward_speed;
+        }
+        Toast(s, label + (tipped ? ": set back on its wheels." : ": back up on its wheels."), 1500);
+        if (j.stuck_logs < 8) {
+          ++j.stuck_logs;
+          REXLOG_INFO("gta4-trainer: {} {}: {:.2f} m over the ground (on its wheels {:.2f}), up {:.2f}, "
+                      "{:.1f} m/s: set on its wheels",
+                      label, tipped ? "on its side or back" : "down on its body", clearance, g_jet_spec->stand,
+                      up_z, ground_speed);
+        }
+      }
       // ---- On its wheels: its own thrust and brakes move it (the game's
       // handling only at walking pace and in reverse), and it leaves the
       // ground pulled back at its rotate speed.
@@ -6709,13 +6748,14 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       const bool pulled = ly < -0.35f;
       // Its height standing on its wheels (the touchdown's and these
       // checks'): taken standing still, and never above what rolling shows.
+      const float lowest = std::max(0.3f, g_jet_spec->stand - 0.45f);  // (lower: down on its body)
       if (!j.rest_known || (ground_speed < 0.5f && clearance < 4.0f)) {
-        if (clearance < 4.0f) {
-          j.rest_clearance = std::clamp(clearance, 0.3f, 3.0f);
+        if (clearance < 4.0f && clearance >= lowest) {
+          j.rest_clearance = std::min(clearance, 3.0f);
           j.rest_known = true;
         }
-      } else if (clearance < j.rest_clearance) {
-        j.rest_clearance = std::max(clearance, 0.3f);
+      } else if (clearance < j.rest_clearance && clearance >= lowest) {
+        j.rest_clearance = clearance;
       }
       const bool grounded = clearance < j.rest_clearance + 0.35f;
       // The roll's own speed. Read back from the game each frame, the game's

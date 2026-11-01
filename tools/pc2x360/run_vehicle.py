@@ -34,6 +34,7 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import batconv  # noqa: E402
+import gearpatch  # noqa: E402
 import rsc5  # noqa: E402
 
 
@@ -65,6 +66,11 @@ def main():
     sources = [rsc5.Resource.x360(os.path.join(export, s + '.xft'), os.path.join(work, s + '.xft.bin'))
                for s in source_names if s != template]
     dft = rsc5.Resource.pc(wft)
+    gear = gearpatch.apply(dft, options)
+    if gear:
+        print('gear: %d vertices moved, %d wheel vertices given wheel texture coordinates' % (gear['moved'], gear['uv']))
+        for leg in gear['legs']:
+            print('gear: leg ' + leg)
     dtds = [load_pc_wtd(w) for w in wtd.split(',') if w]
 
     conv = batconv.Converter(tx, dft, pivots=pivots, shader_sources=sources, options=options)
