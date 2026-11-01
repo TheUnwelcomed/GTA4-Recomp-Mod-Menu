@@ -18,7 +18,10 @@ fails=0
 #  v1.7.23's sat on 0.435 m wheels 20 cm below them, nose high, and floated off its takeoff roll.
 #  v1.7.26: its main wheels 15 cm down so it stands level (v1.7.24 raised the nose wheel into the
 #  nose instead), legs up into the body and wheels with faces and treads: move/gear, gearpatch.py;
-#  the gear hinges at the legs' tops, in the body, so the wheels fold up inside it)
+#  the gear hinges at the legs' tops, in the body, so the wheels fold up inside it; its two front
+#  physics wheels 1.4 m apart under the nose (they were on one point: it stood on a tricycle and
+#  tipped at half a g; the ones drawn are the mod's, on the gear leg), and in handling.txt its
+#  centre of mass a metre down)
 #   [texture dictionaries, under sources_dir, the car's own first: when it shares a parent's]
 #   [options: batconv.parse_options, e.g. lods=0:0:2,tex=512,detail=256 for a heavy model]
 while read -r model template pivot shaders wtds options; do
@@ -59,6 +62,6 @@ delone     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delor
 deltwo     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delorean.wtd,bttf/vehshare_bttf.wtd  lods=0:0:2,tex=512,detail=256
 delthr     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delorean.wtd,bttf/vehshare_bttf.wtd  lods=0:0:2,tex=512,detail=256
 delhov     banshee  overheat=door_dside_f;overheat_2=door_pside_f  -  bttf/delorean.wtd,bttf/vehshare_bttf.wtd  lods=0:0:2,tex=512,detail=256
-batwing    cavalcade  interiorlight@0,-1.05,0.47=bodyshell:faces:y+0.62z>-0.75&z>-0.05&x>-0.8&x<0.8&y<0.88;extra_1@0,1.48,-1.05=wheel_lf;extra_5@-1.37,-1.49,-0.62=wheel_lr;extra_6@1.37,-1.49,-0.62=wheel_rr  airtug,fbi  -  textures=@batwing/remaster,colour=batwing_d,bump=batwing_n,spec=batwing_s,points=wheel_lf=0:1.48:-1.525;wheel_rf=0:1.48:-1.525;wheel_lr=-1.37:-1.49:-1.50;wheel_rr=1.37:-1.49:-1.50,radii=wheel_lf:0.215;wheel_rf:0.215;wheel_lr:0.24;wheel_rr:0.24,move=wheel_lr:0:0:-0.15;wheel_rr:0:0:-0.15,gear=wheel_lr:-1.235:-0.62:0.045;wheel_rr:1.235:-0.62:0.045;wheel_lf:0:-1.05:0.04
+batwing    cavalcade  interiorlight@0,-1.05,0.47=bodyshell:faces:y+0.62z>-0.75&z>-0.05&x>-0.8&x<0.8&y<0.88;extra_1@0,1.48,-1.05=wheel_lf;extra_5@-1.37,-1.49,-0.62=wheel_lr;extra_6@1.37,-1.49,-0.62=wheel_rr  airtug,fbi  -  textures=@batwing/remaster,colour=batwing_d,bump=batwing_n,spec=batwing_s,points=wheel_lf=-0.70:1.48:-1.525;wheel_rf=0.70:1.48:-1.525;wheel_lr=-1.37:-1.49:-1.50;wheel_rr=1.37:-1.49:-1.50,radii=wheel_lf:0.215;wheel_rf:0.215;wheel_lr:0.24;wheel_rr:0.24,move=wheel_lr:0:0:-0.15;wheel_rr:0:0:-0.15,gear=wheel_lr:-1.235:-0.62:0.045;wheel_rr:1.235:-0.62:0.045;wheel_lf:0:-1.05:0.04
 CARS
 exit $fails

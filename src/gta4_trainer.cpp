@@ -1200,7 +1200,7 @@ std::vector<Item> PageItems(const State& s) {
     case Page::kVehicle:
       items = {{s.vehicle_god ? "Vehicle God Mode: ON" : "Vehicle God Mode: OFF",
                 Action::kToggleVehicleGod},
-               {"Repair Current Vehicle", Action::kRepair},
+               {"Repair Current Vehicle (and back on its wheels)", Action::kRepair},
                {s.warp_in ? "Warp Into Spawned Car: ON" : "Warp Into Spawned Car: OFF",
                 Action::kToggleWarpIn},
                {s.gadgets ? "Batmobile Gadgets: ON (L1 missile, d-pad guns/boost, horn spikes)"
@@ -6568,6 +6568,32 @@ void PoliceAirTick(PPCContext& ctx, uint8_t* base, const GameContext& game, cons
   }
 }
 
+// Puts a vehicle down level, its origin `stand` m over the ground under it
+// (its height standing on its wheels). For the jets: SET_CAR_ON_GROUND_PROPERLY
+// measures from the wheels, and with them under the road (the Batwing lying
+// on its collision, a metre above its wheels) it left it sunk (v1.7.26).
+bool StandOnWheels(PPCContext& ctx, uint8_t* base, uint32_t car, float stand) {
+  namespace fl = gta4::flight;
+  const auto at = CarPosition(ctx, base, car);
+  if (!at)
+    return false;
+  float yaw = 0.0f;
+  if (const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {car, 0, 0, 0, 0}, 1, 0, 4)) {
+    const fl::Q qq = fl::Norm({q->f(0), q->f(1), q->f(2), q->f(3)});
+    const fl::V3 f = fl::Rot(qq, {0, 1, 0}), r = fl::Rot(qq, {1, 0, 0});
+    yaw = std::hypot(f.x, f.y) > 0.3f ? std::atan2(-f.x, f.y) : std::atan2(r.y, r.x);
+  }
+  const auto gz = GroundZ(ctx, base, (*at)[0], (*at)[1], (*at)[2] + 1.0f);
+  if (!gz) {
+    Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {car});
+    return false;
+  }
+  PlaceCar(ctx, base, car, (*at)[0], (*at)[1], *gz + stand + 0.08f);
+  const Quat level = QAxis(0, 0, 1, yaw);
+  Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {car, Bits(level.x), Bits(level.y), Bits(level.z), Bits(level.w)});
+  return true;
+}
+
 uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, const DrivePad& pad) {
   auto& j = g_jet;
   const uint64_t now = NowMs();
@@ -6725,7 +6751,7 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       }
       if (j.stuck_since && now - j.stuck_since > (tipped ? 1500u : 500u)) {
         j.stuck_since = 0;
-        Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {*car});
+        const bool placed = StandOnWheels(ctx, base, *car, g_jet_spec->stand);
         j.rest_known = false;
         j.roll_v = 0.0f;
         if (!tipped && forward_speed > 2.0f) {  // (rolling: it carries on rolling)
@@ -6736,9 +6762,9 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         if (j.stuck_logs < 8) {
           ++j.stuck_logs;
           REXLOG_INFO("gta4-trainer: {} {}: {:.2f} m over the ground (on its wheels {:.2f}), up {:.2f}, "
-                      "{:.1f} m/s: set on its wheels",
+                      "{:.1f} m/s: set on its wheels ({})",
                       label, tipped ? "on its side or back" : "down on its body", clearance, g_jet_spec->stand,
-                      up_z, ground_speed);
+                      up_z, ground_speed, placed ? "put down level over the ground" : "no ground found");
         }
       }
       // ---- On its wheels: its own thrust and brakes move it (the game's
@@ -7132,7 +7158,13 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     case Action::kRepair:
       if (const auto car = CurrentVehicle(ctx, base, game)) {
         Invoke(ctx, base, "FIX_CAR", {*car});
-        Toast(s, "Vehicle repaired.");
+        // and back on its wheels (a jet: level over the ground; a car: the game's way)
+        const auto model = Invoke(ctx, base, "GET_CAR_MODEL", {*car, 0}, 1);
+        if (const JetSpec* jet = model ? JetSpecOf(model->words[0]) : nullptr)
+          StandOnWheels(ctx, base, *car, jet->stand);
+        else
+          Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {*car});
+        Toast(s, "Vehicle repaired and back on its wheels.");
       } else {
         Toast(s, "Not in a vehicle.");
       }

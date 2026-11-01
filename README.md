@@ -186,6 +186,18 @@ network session.
 
 ## Changes
 
+- **v1.7.27**: the **Batwing** sunk or tipped is put down by the menu itself,
+  level at its standing height over the ground below it (v1.7.26 asked
+  `SET_CAR_ON_GROUND_PROPERLY`, which measures from the wheels: under the
+  road, it left it sunk). It stood on a tricycle (both front physics wheels
+  on one point under the nose) with its centre of mass 1.5 m up and tipped
+  at half a g: the front physics wheels are now 1.4 m apart and its centre
+  of mass a metre lower. Repair Current Vehicle also puts the vehicle back
+  on its wheels. The Batman Beyond Batmobile's synthesized sound
+  (`src/gta4_beyond_engine.h`, previewed with `tools/beyond/render_preview.cpp`;
+  not in the game yet): a twin-turbine whine with a ringing third partial,
+  a pulsing hover thrum, air rush, boost, Doppler from outside, the floor
+  hatch, the beam and the cloak.
 - **v1.7.26**: the **Batwing** is stood back on its wheels when it lies on
   its body with its wheels under the road (its collision is the Cavalcade's,
   a metre above its wheels: a flip or a hard landing left it there, the
