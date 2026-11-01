@@ -171,6 +171,14 @@ packer stays under 100.
   add-on, and the Dominator's borrowed `paint3` stayed white while the
   Batmobile's borrowed `interior` came out chrome. When the 360 shader reads a
   texcoord set the part lacks, it is filled from set 0.
+- **Per-car shaders go first.** Stock cars keep the shaders the game drives
+  per car (paint, lamps on and off, glass, tyres) in the first 12 slots of
+  the shader group (paint at 0, or at 10-11 on the police car and taxi). The
+  Dominator 645 had its paint at slot 14 and stayed white, while the Deimos's
+  at slot 7 took its colour. When one of them would sit past slot 11, the
+  converter moves them to the front (paint, lamps, glass, tyres, then the
+  rest in the donor's order) and remaps every geometry's shader index; the
+  log says `shaders: per-car shaders moved to the front`.
 - **Physics wheels** take the donor's radii. A wheel's collision part is a
   curved geometry (a disc swept by the bound's margin); the template's curved
   edges, box and bounding sphere are resized to the donor's wheel (its box,

@@ -38,9 +38,10 @@ keeps going while you browse.
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
   itself as their own vehicles (no stock car replaced; see `addons/`):
-  - **Batmobile** (JulioNIB), with its gadgets re-created: missiles on L1,
-    twin miniguns ahead and behind, a bomb on the horn, a booster that flames
-    and roars, and a canopy that pops open as you get in and out
+  - **Batmobile** (JulioNIB), with its gadgets re-created: a lock-on missile
+    on L1 that homes in on the car ahead, twin miniguns ahead and behind, a
+    bomb on the horn, a booster that flames and roars, and a canopy that pops
+    open as you get in and out
   - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a cannon and
     missiles (the PC mod's Air Combat IV script, re-done in the trainer), a
     synthesized jet engine that spools with the throttle, landing gear on R3
@@ -115,10 +116,31 @@ network session.
   `extra_1`, placed on their hinge; the trainer turns that bone's local
   matrix in the car's live skeleton (`sub_8217DB60` gives the skeleton, the
   same place `sub_822832E8` hands the game when it hides an extra), eased,
-  and keeps the extra shown. D-pad left is kept from the radio in the car.
+  and keeps the extra shown, turning it on only when the game reports it
+  off (`IS_VEHICLE_EXTRA_TURNED_ON`): turning it on while the player sat in
+  the car snapped the open door shut. D-pad left is kept from the radio in
+  the car.
+- **Batmobile missile**: an RPG rocket object (`cj_rpg_rocket`) flown by the
+  physics engine, its velocity set every frame as TBOGT's `tony8` flies its
+  rockets. At launch it locks on the nearest car along the nose's line
+  (`GET_CLOSEST_CAR` sampled out to 160 m, wrecks skipped), shown with a red
+  radar blip; in flight its line turns towards that car at up to 3 rad/s and
+  its nose follows (`SET_OBJECT_QUATERNION`). One every 3 seconds.
 
 ## Changes
 
+- **v1.7.10**: the Batmobile missile locks on the car ahead and homes in,
+  leaves from the round intake with a launch flash, and reloads in 3
+  seconds; the Deimos door no longer slams shut as Niko sits down (the
+  pop-up extra was turned on again at every entry).
+- **v1.7.9**: getting out of the Batmobile sets you down at street level
+  (`CLEAR_CHAR_TASKS_IMMEDIATELY`, then `WARP_CHAR_FROM_CAR_TO_COORD` onto
+  the ground, as Rockstar's missions do), with a catch if you start to
+  fall; per-car shaders moved to the front of the shader group (the white
+  Dominator 645).
+- **v1.7.8**: opening doors on the Deimos and Dominator 645 (each on its
+  own hinge), the Batmobile canopy and gadget rework, add-ons packed in
+  stock-sized load chunks (the failed respawns).
 - **v1.7.5**: the long black lines on the add-on cars are gone (the
   converter moved bones in only one of the three places the file keeps a
   pose: see `tools/pc2x360/README.md`); Batmobile front wheels at its own

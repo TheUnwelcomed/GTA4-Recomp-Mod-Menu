@@ -176,10 +176,13 @@ std::array g_natives = {
     NativeEntry{"SET_OBJECT_INVINCIBLE"}, NativeEntry{"DRAW_LIGHT_WITH_RANGE"},
     NativeEntry{"IS_CHAR_GETTING_IN_TO_A_CAR"}, NativeEntry{"CLEAR_CHAR_TASKS_IMMEDIATELY"},
     NativeEntry{"WARP_CHAR_FROM_CAR_TO_COORD"}, NativeEntry{"IS_CAR_DEAD"},
+    // Batmobile missile lock: the target's mark on the radar.
+    NativeEntry{"ADD_BLIP_FOR_CAR"}, NativeEntry{"CHANGE_BLIP_COLOUR"}, NativeEntry{"REMOVE_BLIP"},
     // Chaos: raining cars, gravity.
     NativeEntry{"SET_CAR_HEADING"}, NativeEntry{"SET_GRAVITY_OFF"},
     // Grotti Deimos pop-up headlights (the pods' extra, the lamps).
-    NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"GET_TIME_OF_DAY"},
+    NativeEntry{"TURN_OFF_VEHICLE_EXTRA"}, NativeEntry{"IS_VEHICLE_EXTRA_TURNED_ON"},
+    NativeEntry{"GET_TIME_OF_DAY"},
     NativeEntry{"GET_CURRENT_WEATHER"}, NativeEntry{"FORCE_CAR_LIGHTS"},
     // Bring Your Own Ride: the checks it answers and the vehicle kinds.
     NativeEntry{"IS_CHAR_IN_MODEL"}, NativeEntry{"IS_CAR_MODEL"},
@@ -1435,11 +1438,21 @@ bool HeadlightsWanted(PPCContext& ctx, uint8_t* base) {
   return false;
 }
 
-// A Deimos just made (or first met): its pods' extra shown (the game picks
-// extras at random, and a hidden one is sent to the world's origin), pods
-// down.
-void PreparePopups(PPCContext& ctx, uint8_t* base, uint32_t car) {
-  Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, kPopupExtra, 0u});
+// Shows a car's extra when the game has it off (it picks extras at random,
+// and a hidden one's parts are sent to the world's origin). Only then:
+// turning an extra on while the player sat in the Deimos snapped its open
+// door shut as he reached for it (v1.7.9), so on getting in nothing is
+// turned on unless the game says it is off.
+void ShowExtra(PPCContext& ctx, uint8_t* base, uint32_t car, uint32_t extra, bool getting_in) {
+  const auto on = Invoke(ctx, base, "IS_VEHICLE_EXTRA_TURNED_ON", {car, extra});
+  if (on ? on->r0() != 0 : getting_in)
+    return;
+  Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, extra, 0u});
+}
+
+// A Deimos just made (or first met): its pods' extra shown, pods down.
+void PreparePopups(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in = false) {
+  ShowExtra(ctx, base, car, kPopupExtra, getting_in);
   g_popup.car = car;
   g_popup.up = false;
   g_popup.angle = 0.0f;
@@ -1469,9 +1482,9 @@ bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
     const uint32_t car = *vehicle.car;
     if (!g_popup.in_car || g_popup.car != car) {
       if (g_popup.car != car)
-        PreparePopups(ctx, base, car);
+        PreparePopups(ctx, base, car, true);
       else  // back in the same car: make sure the pods' extra is still shown
-        Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, kPopupExtra, 0u});
+        ShowExtra(ctx, base, car, kPopupExtra, true);
       g_popup.prev_buttons = buttons;  // no edge from a button held while getting in
       g_popup.last_ms = now;
       SetPopupLights(ctx, base, car, g_popup.up, s.popup_auto);
@@ -1552,7 +1565,7 @@ bool CarLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const St
   return true;
 }
 
-void PrepareJet(PPCContext& ctx, uint8_t* base, uint32_t car);
+void PrepareJet(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in = false);
 
 void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s) {
   if (s.pending_model < 0)
@@ -2020,9 +2033,9 @@ void PoseGear(PPCContext& ctx, uint8_t* base, uint32_t car, float t) {
 
 // An F-16 just made or first met: its gear's extras shown (the game picks
 // extras at random, and a hidden one is sent to the world's origin), down.
-void PrepareJet(PPCContext& ctx, uint8_t* base, uint32_t car) {
+void PrepareJet(PPCContext& ctx, uint8_t* base, uint32_t car, bool getting_in) {
   for (const auto& leg : kGearLegs)
-    Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {car, leg.extra, 0u});
+    ShowExtra(ctx, base, car, leg.extra, getting_in);
   g_jet.gear = 0.0f;
   g_jet.gear_up = false;
   g_jet.next_gear_write = 0;
@@ -2098,10 +2111,12 @@ void RainCars(PPCContext& ctx, uint8_t* base, const GameContext& game) {
 
 // JulioNIB's Batmobile gadgets, redone through natives (the PC script's .NET
 // plugin cannot run here). With the toggle on, driving the Batmobile:
-//  - L1: a missile out of the nose: the RPG's rocket with its smoke trail,
-//    flown by the physics engine (its velocity set every frame, so it meets
-//    walls, cars and the ground for real, as Rockstar's own scripted rockets
-//    do in TBOGT's tony8) and set off where it hits;
+//  - L1: a missile out of the round intake in the nose: the RPG's rocket
+//    with its smoke trail, flown by the physics engine (its velocity set
+//    every frame, so it meets walls, cars and the ground for real, as
+//    Rockstar's own scripted rockets do in TBOGT's tony8) and set off where
+//    it hits. It locks on the nearest car ahead and homes in on it (marked
+//    red on the radar); one every 3 seconds;
 //  - d-pad left / down (hold): the twin miniguns, ahead / behind, both
 //    barrels together;
 //  - horn (L3): plant a bomb behind the car, marked by a blinking red light;
@@ -2114,13 +2129,16 @@ void RainCars(PPCContext& ctx, uint8_t* base, const GameContext& game) {
 struct BatRocket {
   bool live = false, physics = true, armed = false;
   uint32_t object = 0, trail = 0;
-  float start[3]{}, dir[3]{}, pos[3]{};
+  uint32_t target = 0, blip = 0;  // the car it homes on (0: straight ahead), its radar mark
+  float origin[3]{};  // where it left the car
+  float start[3]{}, dir[3]{}, pos[3]{};  // its line (re-drawn from where it is while it homes)
   float speed = 0, travelled = 0;
   uint64_t launched = 0;
   int frames = 0;
 };
 struct GadgetState {
-  uint64_t next_front = 0, next_rear = 0, next_rocket = 0, last_ms = 0;
+  uint64_t next_front = 0, next_rear = 0, rocket_ready = 0, last_ms = 0;
+  bool rocket_reloading = false;
   uint32_t car = 0;
   bool models_requested = false, l3_held = false, l3_chord = false, boosting = false, in_car = false;
   std::array<BatRocket, 4> rockets{};
@@ -2134,13 +2152,17 @@ struct GadgetState {
 };
 GadgetState g_gadget;
 // From the mod's own body (car space): its nose at y 3.7, its tail at -2.7,
-// the turbine's nozzle under the rear fairing.
+// the round turbine intake in the middle of the nose (its mouth at y 3.0-3.4,
+// 0.5 m across, centred at z 0), the turbine's nozzle under the rear fairing.
+// The missile leaves from the intake (the FBI template's collision ends at
+// y 2.5, so it starts clear of the car).
 constexpr float kBatGunsFront[2][3] = {{-0.55f, 3.75f, -0.15f}, {0.55f, 3.75f, -0.15f}};
 constexpr float kBatGunsRear[2][3] = {{-0.55f, -2.85f, -0.10f}, {0.55f, -2.85f, -0.10f}};
-constexpr float kBatLauncher[3] = {0.0f, 4.6f, 0.05f};
+constexpr float kBatLauncher[3] = {0.0f, 3.30f, 0.0f};
 constexpr float kBatNozzle[3] = {0.0f, -2.45f, -0.12f};
 constexpr float kBatBomb[3] = {0.0f, -3.4f, -0.2f};
 constexpr std::string_view kBombModel = "w_grenade";
+constexpr uint64_t kMissileReloadMs = 3000;  // one launch, then the launcher resets
 
 // One volley from both barrels of a pair, along the car's length (+1 ahead,
 // -1 behind), each barrel with IV's machine-gun muzzle flash. (v1.7.7 fired
@@ -2172,7 +2194,18 @@ void BatVolley(PPCContext& ctx, uint8_t* base, uint32_t car, const float (&muzzl
   }
 }
 
+void DropTarget(PPCContext& ctx, uint8_t* base, BatRocket& r) {
+  if (r.blip) {
+    const auto exists = Invoke(ctx, base, "DOES_BLIP_EXIST", {r.blip});
+    if (exists && exists->r0())
+      Invoke(ctx, base, "REMOVE_BLIP", {r.blip});
+  }
+  r.blip = 0;
+  r.target = 0;
+}
+
 void EndRocket(PPCContext& ctx, uint8_t* base, BatRocket& r) {
+  DropTarget(ctx, base, r);
   if (r.trail)
     Invoke(ctx, base, "STOP_PTFX", {r.trail});
   r.trail = 0;
@@ -2190,6 +2223,44 @@ void SteerRocket(PPCContext& ctx, uint8_t* base, const BatRocket& r) {
   for (int a = 0; a < 3; ++a)
     v[a] = r.dir[a] * r.speed + (r.start[a] + r.dir[a] * along - r.pos[a]) * 6.0f;
   Invoke(ctx, base, "SET_OBJECT_INITIAL_VELOCITY", {r.object, Bits(v[0]), Bits(v[1]), Bits(v[2])});
+}
+
+// The car a missile locks on: the nearest working one in front, looked for
+// along the nose's line out to 160 m (the search widening with distance).
+uint32_t FindLockTarget(PPCContext& ctx, uint8_t* base, uint32_t car) {
+  for (const float ahead : {12.0f, 25.0f, 40.0f, 60.0f, 85.0f, 120.0f, 160.0f}) {
+    const float at_local[3] = {0.0f, kBatLauncher[1] + ahead, 0.0f};
+    const auto at = CarPoint(ctx, base, car, at_local);
+    if (!at)
+      return 0;
+    const auto near = Invoke(ctx, base, "GET_CLOSEST_CAR",
+                             {Bits((*at)[0]), Bits((*at)[1]), Bits((*at)[2]), Bits(4.0f + ahead * 0.12f), 0, 70});
+    if (!near || !near->r0() || near->r0() == car || !VehicleAddress(base, near->r0()))
+      continue;
+    const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {near->r0()});
+    if (dead && dead->r0())
+      continue;  // a wreck: look further on
+    return near->r0();
+  }
+  return 0;
+}
+
+// The rocket's nose (its +Y) along a direction, level (no roll).
+void PointRocket(PPCContext& ctx, uint8_t* base, const BatRocket& r) {
+  const float heading = std::atan2(-r.dir[0], r.dir[1]), pitch = std::asin(std::clamp(r.dir[2], -1.0f, 1.0f));
+  const Quat q = QNormalize(QMul(QAxis(0, 0, 1, heading), QAxis(1, 0, 0, pitch)));
+  Invoke(ctx, base, "SET_OBJECT_QUATERNION", {r.object, Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
+}
+
+// Where a car is, or nothing (gone).
+std::optional<std::array<float, 3>> CarPosition(PPCContext& ctx, uint8_t* base, uint32_t car) {
+  const auto r = Invoke(ctx, base, "GET_CAR_COORDINATES", {car, 0, 0, 0}, 1, 0, 3);
+  if (!r)
+    return std::nullopt;
+  const std::array<float, 3> p{r->f(0), r->f(1), r->f(2)};
+  if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2]) || (p[0] == 0 && p[1] == 0))
+    return std::nullopt;
+  return p;
 }
 
 bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
@@ -2219,7 +2290,7 @@ bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
   for (int a = 0; a < 3; ++a) {
     r.dir[a] = (*ahead)[a] - (*start)[a];
     len += r.dir[a] * r.dir[a];
-    r.start[a] = r.pos[a] = (*start)[a];
+    r.origin[a] = r.start[a] = r.pos[a] = (*start)[a];
   }
   len = std::sqrt(len);
   if (!(len > 1.0f))
@@ -2230,6 +2301,7 @@ bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
   if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {car, 0}, 1))
     car_speed = std::max(v->f(0), 0.0f);
   r.speed = car_speed + 30.0f;  // out of the launcher, then it speeds up
+  r.target = FindLockTarget(ctx, base, car);
   const auto obj = Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits(r.pos[0]), Bits(r.pos[1]), Bits(r.pos[2]), 0, 1}, 4);
   if (!obj || !obj->words[0])
     return false;
@@ -2242,14 +2314,24 @@ bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
   Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {r.object, 1});
   Invoke(ctx, base, "SET_OBJECT_COLLISION", {r.object, 1});
   SteerRocket(ctx, base, r);
+  // Locked: the target shows red on the radar until the missile is done.
+  if (r.target)
+    if (const auto b = Invoke(ctx, base, "ADD_BLIP_FOR_CAR", {r.target, 0}, 1); b && b->r0()) {
+      r.blip = b->r0();
+      Invoke(ctx, base, "CHANGE_BLIP_COLOUR", {r.blip, 1});
+    }
   if (const auto trail = Invoke(ctx, base, "START_PTFX_ON_OBJ", {0, r.object, 0, 0, 0, 0, 0, 0, Bits(1.0f)}, -1, 0,
                                 1, 0, "weap_rocket"))
     r.trail = trail->r0();
+  // The launch flash out of the intake.
+  const float mouth[3] = {kBatLauncher[0], kBatLauncher[1] + 0.3f, kBatLauncher[2]};
+  CarEffect(ctx, base, car, "muz_machine", mouth, 2.5f);
   LaunchSound();
+  Toast(s, r.target ? "Missile locked on the car ahead." : "Missile away (nothing to lock on).", 1100);
   if (g_gadget.rocket_log < 12) {
     ++g_gadget.rocket_log;
-    REXLOG_INFO("gta4-trainer: Batmobile missile away at {:.0f} m/s (object {:08X}, trail {:08X})", r.speed,
-                r.object, r.trail);
+    REXLOG_INFO("gta4-trainer: Batmobile missile away at {:.0f} m/s (object {:08X}, trail {:08X}, target {:08X})",
+                r.speed, r.object, r.trail, r.target);
   }
   return true;
 }
@@ -2261,14 +2343,56 @@ void UpdateRockets(PPCContext& ctx, uint8_t* base, float dt) {
     if (!r.live)
       continue;
     ++r.frames;
-    r.speed = std::min(r.speed + 140.0f * dt, 95.0f);
+    r.speed = std::min(r.speed + 140.0f * dt, r.target ? 75.0f : 95.0f);
+    // Homing, once it is out of the launcher: the line turns towards the locked
+    // car (3 rad/s at most) from where the missile is, its nose with it; a red
+    // light hangs over the target.
+    std::optional<std::array<float, 3>> aim;
+    if (r.target && r.frames > 3) {
+      if (VehicleAddress(base, r.target))
+        aim = CarPosition(ctx, base, r.target);
+      if (!aim) {
+        DropTarget(ctx, base, r);  // gone: on straight
+      } else {
+        (*aim)[2] += 0.3f;
+        float want[3], len = 0;
+        for (int a = 0; a < 3; ++a) {
+          want[a] = (*aim)[a] - r.pos[a];
+          len += want[a] * want[a];
+        }
+        len = std::sqrt(len);
+        if (len > 0.5f) {
+          float dot = 0;
+          for (int a = 0; a < 3; ++a) {
+            want[a] /= len;
+            dot += want[a] * r.dir[a];
+          }
+          const float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
+          const float step = std::min(1.0f, 3.0f * dt / std::max(angle, 1e-4f));
+          float n = 0;
+          for (int a = 0; a < 3; ++a) {
+            r.dir[a] += (want[a] - r.dir[a]) * step;
+            n += r.dir[a] * r.dir[a];
+          }
+          n = std::sqrt(n);
+          if (n > 1e-4f)
+            for (int a = 0; a < 3; ++a) {
+              r.dir[a] /= n;
+              r.start[a] = r.pos[a];  // the line now runs from here
+            }
+          PointRocket(ctx, base, r);
+        }
+        Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
+               {Bits((*aim)[0]), Bits((*aim)[1]), Bits((*aim)[2] + 1.3f), 255, 0, 0, Bits(4.0f), Bits(6.0f)});
+      }
+    }
     if (r.physics) {
       if (const auto at = Invoke(ctx, base, "GET_OBJECT_COORDINATES", {r.object, 0, 0, 0}, 1, 0, 3))
         for (int a = 0; a < 3; ++a)
           r.pos[a] = at->f(a);
       float moved = 0;
       for (int a = 0; a < 3; ++a)
-        moved += (r.pos[a] - r.start[a]) * (r.pos[a] - r.start[a]);
+        moved += (r.pos[a] - r.origin[a]) * (r.pos[a] - r.origin[a]);
       // The physics did not take it (frozen, asleep): flown by hand from here,
       // still meeting the ground and cars, not walls.
       if (r.frames == 6 && moved < 4.0f) {
@@ -2287,14 +2411,21 @@ void UpdateRockets(PPCContext& ctx, uint8_t* base, float dt) {
     }
     float d2 = 0;
     for (int a = 0; a < 3; ++a)
-      d2 += (r.pos[a] - r.start[a]) * (r.pos[a] - r.start[a]);
+      d2 += (r.pos[a] - r.origin[a]) * (r.pos[a] - r.origin[a]);
     r.travelled = std::sqrt(d2);
     const char* hit = nullptr;
-    if (r.physics && !r.armed && r.travelled > 3.0f) {
+    if (aim) {
+      float t2 = 0;
+      for (int a = 0; a < 3; ++a)
+        t2 += (r.pos[a] - (*aim)[a]) * (r.pos[a] - (*aim)[a]);
+      if (t2 < 2.6f * 2.6f)
+        hit = "its target";
+    }
+    if (!hit && r.physics && !r.armed && r.travelled > 3.0f) {
       // Collisions are recorded once it is clear of the car.
       Invoke(ctx, base, "SET_OBJECT_RECORDS_COLLISIONS", {r.object, 1});
       r.armed = true;
-    } else if (r.physics && r.armed) {
+    } else if (!hit && r.physics && r.armed) {
       const auto c = Invoke(ctx, base, "HAS_OBJECT_COLLIDED_WITH_ANYTHING", {r.object});
       if (c && c->r0())
         hit = "something";
@@ -2314,12 +2445,14 @@ void UpdateRockets(PPCContext& ctx, uint8_t* base, float dt) {
       hit = "the end of its range";
     if (!hit)
       continue;
+    // A target hit goes off on the car itself.
+    const bool on_target = aim && hit == std::string_view("its target");
     if (std::isfinite(r.pos[2]))
-      Explode(ctx, base, r.pos, 1.5f);
+      Explode(ctx, base, on_target ? aim->data() : r.pos, on_target ? 2.0f : 1.5f);
     if (g_gadget.rocket_log < 12) {
       ++g_gadget.rocket_log;
-      REXLOG_INFO("gta4-trainer: Batmobile missile hit {} after {:.0f} m ({})", hit, r.travelled,
-                  r.physics ? "physics" : "by hand");
+      REXLOG_INFO("gta4-trainer: Batmobile missile hit {} after {:.0f} m ({}{})", hit, r.travelled,
+                  r.physics ? "physics" : "by hand", r.target ? ", homing" : "");
     }
     EndRocket(ctx, base, r);
   }
@@ -2452,11 +2585,18 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
     Invoke(ctx, base, "REQUEST_MODEL", {ModelHash(kRocketModel)});
     g_gadget.models_requested = true;
   }
-  // Missile: L1 (held: another every 0.6 s).
-  if ((buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) &&
-      (!(previous & X_INPUT_GAMEPAD_LEFT_SHOULDER) || now >= g_gadget.next_rocket)) {
-    g_gadget.next_rocket = now + 600;
-    LaunchRocket(ctx, base, car, s);
+  // Missile: L1, one per press; the launcher then resets for 3 s.
+  if ((buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) && !(previous & X_INPUT_GAMEPAD_LEFT_SHOULDER)) {
+    if (now < g_gadget.rocket_ready) {
+      Toast(s, "Missile reloading: " + std::to_string((g_gadget.rocket_ready - now + 999) / 1000) + " s", 900);
+    } else if (LaunchRocket(ctx, base, car, s)) {
+      g_gadget.rocket_ready = now + kMissileReloadMs;
+      g_gadget.rocket_reloading = true;
+    }
+  }
+  if (g_gadget.rocket_reloading && now >= g_gadget.rocket_ready) {
+    g_gadget.rocket_reloading = false;
+    Toast(s, "Missile ready.", 900);
   }
   // Miniguns: hold d-pad left (ahead) or down (behind).
   if ((buttons & X_INPUT_GAMEPAD_DPAD_LEFT) && now >= g_gadget.next_front) {
@@ -2522,6 +2662,11 @@ struct CanopyState {
   uint32_t info = 0;  // the model whose pivot bone is known
   int32_t bone = -1;
   int log = 0;
+  // Where the player was set down, watched for a few seconds: a fall
+  // through the world puts them back there.
+  float exit[3]{};
+  uint64_t exit_at = 0;
+  int catches = 0;
 };
 CanopyState g_canopy;
 constexpr std::string_view kCanopyBone = "interiorlight";
@@ -2547,8 +2692,11 @@ bool PoseCanopy(PPCContext& ctx, uint8_t* base, uint32_t car, float open) {
                   kCanopyDegrees * t * t * (3.0f - 2.0f * t), 1.0f);
 }
 
-// Whether the canopy wants every frame (moving, or the player in a Batmobile).
-bool CanopyBusy() { return g_canopy.phase != CanopyState::kShut || g_canopy.in_car; }
+// Whether the canopy wants every frame (moving, the player in a Batmobile,
+// or just set down beside one).
+bool CanopyBusy() {
+  return g_canopy.phase != CanopyState::kShut || g_canopy.in_car || g_canopy.exit_at != 0;
+}
 
 // Returns the buttons it keeps from the game: Y while the player is in a
 // Batmobile (its way out is the canopy's).
@@ -2561,6 +2709,20 @@ uint32_t BatCanopy(PPCContext& ctx, uint8_t* base, const GameContext& game, Stat
   c.prev_buttons = buttons;
   static const uint32_t kBat = ModelHash("BATMOBILE");
   const uint32_t keep = c.in_car ? uint32_t(X_INPUT_GAMEPAD_Y) : 0u;
+  // Just set down: if the player drops through the world, back beside the car.
+  if (c.exit_at) {
+    if (now - c.exit_at > 3000 || c.in_car) {
+      c.exit_at = 0;
+    } else if (game.position[2] < c.exit[2] - 2.5f && c.catches < 3) {
+      ++c.catches;
+      Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {game.ped});
+      Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits(c.exit[0]), Bits(c.exit[1]), Bits(c.exit[2] + 1.0f)});
+      REXLOG_WARN("gta4-trainer: Batmobile: player fell through the world after getting out (z {:.1f}, ground "
+                  "{:.1f}); set back beside the car",
+                  game.position[2], c.exit[2]);
+      c.exit_at = now;
+    }
+  }
   switch (c.phase) {
     case CanopyState::kOpeningIn:
     case CanopyState::kOpeningOut: {
@@ -2579,10 +2741,22 @@ uint32_t BatCanopy(PPCContext& ctx, uint8_t* base, const GameContext& game, Stat
         Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, c.car});
         c.in_car = true;
       } else {
+        // As Rockstar's own scripts do it (dating_kate): the player's tasks
+        // cleared first, then set down at the ground's height. v1.7.8 kept
+        // the driving task and gave a height a metre up: the player fell
+        // through the world.
+        Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {game.ped});
         if (auto p = CarPoint(ctx, base, c.car, kCanopyExit)) {
-          if (const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 2.0f))
-            (*p)[2] = *gz + 1.0f;
-          Invoke(ctx, base, "WARP_CHAR_FROM_CAR_TO_COORD", {game.ped, Bits((*p)[0]), Bits((*p)[1]), Bits((*p)[2])});
+          const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*p)[2] + 1.0f);  // (below awnings)
+          const float z = gz ? *gz : (*p)[2] - 0.6f;  // (the car's origin rides ~0.6 m up)
+          Invoke(ctx, base, "WARP_CHAR_FROM_CAR_TO_COORD", {game.ped, Bits((*p)[0]), Bits((*p)[1]), Bits(z)});
+          c.exit[0] = (*p)[0];
+          c.exit[1] = (*p)[1];
+          c.exit[2] = z;
+          c.exit_at = now;
+          c.catches = 0;
+          REXLOG_INFO("gta4-trainer: Batmobile: player set down at {:.1f}, {:.1f}, {:.1f} (ground {})", (*p)[0],
+                      (*p)[1], z, gz ? "found" : "not found");
         }
         c.in_car = false;
       }
@@ -2686,10 +2860,10 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   if (!j.in_jet || j.car != *car) {
     j.flying = false;
     if (j.car != *car)
-      PrepareJet(ctx, base, *car);
+      PrepareJet(ctx, base, *car, true);
     else  // back in the same jet: make sure the gear's extras still show
       for (const auto& leg : kGearLegs)
-        Invoke(ctx, base, "TURN_OFF_VEHICLE_EXTRA", {*car, leg.extra, 0u});
+        ShowExtra(ctx, base, *car, leg.extra, true);
     j.car = *car;
     j.prev_buttons = pad.buttons;  // no edge from a button held while getting in
     j.r3_held = false;
@@ -2872,8 +3046,8 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       break;
     case Action::kToggleGadgets:
       s.gadgets = !s.gadgets;
-      Toast(s, s.gadgets ? "Batmobile gadgets armed: L1 missile; d-pad left guns ahead, down guns behind, "
-                           "right boost; horn (L3) plants a bomb, again to set it off."
+      Toast(s, s.gadgets ? "Batmobile gadgets armed: L1 lock-on missile; d-pad left guns ahead, down guns "
+                           "behind, right boost; horn (L3) plants a bomb, again to set it off."
                          : "Gadgets off.",
             s.gadgets ? 6000 : 2500);
       break;

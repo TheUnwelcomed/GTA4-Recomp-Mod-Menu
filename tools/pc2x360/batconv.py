@@ -40,6 +40,15 @@ SPS_FALLBACK = {
     'gta_vehicle_generic.sps': 'gta_vehicle_mesh.sps',
 }
 BONE_ALIAS = {'chasiss': 'chassis'}  # a typo in the Batmobile's skeleton
+# Shaders the game drives per car (the body colours, lights on and off, the
+# glass, the tyres), in the order they are moved to the front of the shader
+# group when one would sit past slot 11. Stock cars keep them in the first 12
+# slots (paint at 0, or at 10-11 on the police car and taxi); the game left
+# the Dominator 645's paint white at slot 14 while the Deimos's at slot 7
+# took its colour.
+EFFECT_SHADERS = ('gta_vehicle_paint', 'gta_vehicle_lightsemissive', 'gta_vehicle_lights',
+                  'gta_vehicle_vehglass', 'gta_vehicle_tire')
+STOCK_SHADER_SLOTS = 12
 # A donor bone the template has no bone for is drawn rigidly on the chassis
 # (vertices are stored in model space, so a part keeps its place; it only
 # loses its own motion).
@@ -999,7 +1008,7 @@ class Converter:
         d = self.d
         dsg = self.df['drawable']['shader_group']
         n = len(dsg['shaders'])
-        new_shaders, usages, extras = [], [], []
+        new_shaders, usages, extras, kinds = [], [], [], []
         self.shader_report = []
         for s in dsg['shaders']:
             sps = shader_sps(d, s['off'])
@@ -1009,8 +1018,26 @@ class Converter:
             new_shaders.append(self._clone_shader(ts, s['off']))
             usages.append(ts['usage'])
             extras.append(ts['extra'])
+            kinds.append(tsps)
             self.shader_report.append((sps, tsps if ts['res'] is self.t else '%s (from %s)'
                                        % (tsps, ts['res'].name.split('/')[-1])))
+        # The shaders the game drives per car to the front when one would sit
+        # past the stock slots; geometries' shader maps follow (emit_lod).
+        # shader_usage stays in the donor's order, as the donor maps read it.
+        def rank(i):
+            return next((k for k, prefix in enumerate(EFFECT_SHADERS) if kinds[i].startswith(prefix)),
+                        len(EFFECT_SHADERS))
+        order = list(range(n))
+        if any(rank(i) < len(EFFECT_SHADERS) and i >= STOCK_SHADER_SLOTS for i in order):
+            order.sort(key=lambda i: (rank(i), i))
+            self.log('shaders: per-car shaders moved to the front (%s)' % ', '.join(
+                '%s %d->%d' % (kinds[i].replace('gta_vehicle_', '').replace('.sps', ''), i, k)
+                for k, i in enumerate(order) if rank(i) < len(EFFECT_SHADERS)))
+        self.shader_slot = {old: new for new, old in enumerate(order)}
+        self.shader_usage = list(usages)
+        new_shaders = [new_shaders[i] for i in order]
+        usages = [usages[i] for i in order]
+        extras = [extras[i] for i in order]
         v = self.v
         sg = v.put(self.t_sg)
         arr = v.alloc(4 * n)
@@ -1026,7 +1053,6 @@ class Converter:
             v.w32(sg + k, VP | a)
             v.w16(sg + k + 4, n)
             v.w16(sg + k + 6, n)
-        self.shader_usage = usages
         return sg
 
     def _clone_shader(self, ts_info, ds):
@@ -1256,7 +1282,7 @@ class Converter:
                 v.w32(garr + 4 * k, VP | g)
             sm = v.alloc(2 * len(smap), 16)
             for k, s in enumerate(smap):
-                v.w16(sm + 2 * k, s)
+                v.w16(sm + 2 * k, self.shader_slot.get(s, s))
             m = v.put(model_template)
             v.w32(m + 4, VP | garr)
             v.w16(m + 8, len(gofs))
