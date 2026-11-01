@@ -183,6 +183,12 @@ std::array g_natives = {
     NativeEntry{"SET_CHAR_COLLISION"}, NativeEntry{"FREEZE_CHAR_POSITION"}, NativeEntry{"LOAD_SCENE"},
     NativeEntry{"TASK_LEAVE_CAR_IMMEDIATELY"}, NativeEntry{"SET_CHAR_VISIBLE"}, NativeEntry{"CLEAR_CHAR_TASKS"},
     NativeEntry{"SET_CAR_COORDINATES"}, NativeEntry{"FREEZE_CAR_POSITION"},
+    // Passengers through the Batmobile's canopy: who is getting in (the
+    // player's group, whoever is at the passenger side), the seat, the warp.
+    NativeEntry{"GET_PLAYER_GROUP"}, NativeEntry{"GET_GROUP_SIZE"}, NativeEntry{"GET_GROUP_MEMBER"},
+    NativeEntry{"GET_CLOSEST_CHAR"}, NativeEntry{"IS_CAR_PASSENGER_SEAT_FREE"},
+    NativeEntry{"GET_CHAR_IN_CAR_PASSENGER_SEAT"}, NativeEntry{"WARP_CHAR_INTO_CAR_AS_PASSENGER"},
+    NativeEntry{"IS_CHAR_SITTING_IN_CAR"}, NativeEntry{"IS_CHAR_DEAD"},
     // Batmobile missile lock: the target's mark on the radar.
     NativeEntry{"ADD_BLIP_FOR_CAR"}, NativeEntry{"CHANGE_BLIP_COLOUR"}, NativeEntry{"REMOVE_BLIP"},
     // Chaos: raining cars, gravity.
@@ -223,7 +229,7 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
                                    std::initializer_list<uint32_t> values = {},
                                    int output_argument = -1, uint32_t result_seed = 0,
                                    int output_count = 1, int text_argument = -1,
-                                   std::string_view text = {}) {
+                                   std::string_view text = {}, int output_word = 0) {
   const uint32_t address = NativeAddress(name);
   auto* runtime = rex::Runtime::instance();
   auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
@@ -255,10 +261,11 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
   // `output_argument`, each aimed at its own word of the result slot (a
   // native returning x, y, z through three pointers fills words 0-2).
   for (const auto value : values) {
+    // (output_word: the first output's word, past a returned value's)
     const int k = int(i) - output_argument;
-    const bool out = output_argument >= 0 && k >= 0 && k < std::min(output_count, 4);
+    const bool out = output_argument >= 0 && k >= 0 && k < std::min(output_count, 4 - output_word);
     Write(base, arguments + uint32_t(i) * 4,
-          int(i) == text_argument ? text_at : (out ? result + uint32_t(k) * 4 : value));
+          int(i) == text_argument ? text_at : (out ? result + uint32_t(k + output_word) * 4 : value));
     ++i;
   }
   PPCContext call = parent;
@@ -3188,7 +3195,9 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
 // Y is the game's: the player jumps out). No toggle. The cockpits under them
 // (seats, dash, the jet's ejection seat and panel) are the mods' own.
 struct CanopyState {
-  enum Phase : int { kShut, kOpeningIn, kClosingIn, kOpeningOut, kLeaving, kClosingOut };
+  // kOpeningRider: up for someone else getting in, the player in his seat
+  // (or with him: kOpeningIn); kRiderOut: up while a passenger climbs out.
+  enum Phase : int { kShut, kOpeningIn, kClosingIn, kOpeningOut, kLeaving, kClosingOut, kOpeningRider, kRiderOut };
   Phase phase = kShut;
   uint32_t car = 0;   // the vehicle being got into or out of
   float open = 0.0f;  // 0 shut .. 1 open
@@ -3206,6 +3215,12 @@ struct CanopyState {
   float exit[3]{};
   uint64_t exit_at = 0, unfreeze_at = 0;
   int catches = 0, watch_log = 0, exits = 0;
+  // Passengers (the Batmobile's): one stopped on his way in, put in the
+  // passenger seat once the canopy is up; the one last seen sitting there;
+  // one climbing out, hidden until he is out and set down beside.
+  uint32_t rider = 0, seated = 0, leaver = 0;
+  uint64_t leaver_since = 0, next_rider_look = 0;
+  int rider_log = 0;
 };
 struct CanopySpec {
   std::string_view model, label, bone;
@@ -3214,11 +3229,12 @@ struct CanopySpec {
   float exit[3];  // where the player is set down, in the vehicle's own space
   int slot, entry;  // where the trainer keeps the pose (PoseBone)
   bool ground_only;  // opens only standing still on the ground
+  bool riders;       // a passenger seat: others get in and out through it too
 };
 constexpr CanopySpec kBatCanopy{"BATMOBILE", "Batmobile", "interiorlight", 60.0f, 0.45f, 0.7f,
-                                {-2.1f, 0.2f, 0.0f}, kPoseBatmobile, 0, true};
+                                {-2.1f, 0.2f, 0.0f}, kPoseBatmobile, 0, true, true};
 constexpr CanopySpec kJetCanopy{"F16", "F-16", "interiorlight", 38.0f, 0.9f, 1.2f,
-                                {-2.3f, 4.3f, 0.0f}, kPoseF16, 3, true};
+                                {-2.3f, 4.3f, 0.0f}, kPoseF16, 3, true, false};
 CanopyState g_canopy, g_jet_canopy;
 
 void CanopySound(bool opening);  // (the Batmobile's sound section, below)
@@ -3242,7 +3258,7 @@ bool PoseCanopy(PPCContext& ctx, uint8_t* base, const CanopySpec& spec, CanopySt
 }
 
 bool CanopyBusy(const CanopyState& c) {
-  return c.phase != CanopyState::kShut || c.in_car || c.exit_at != 0;
+  return c.phase != CanopyState::kShut || c.in_car || c.exit_at != 0 || c.leaver != 0;
 }
 
 // The player, out of the seat and on his feet (the game's own exit took him
@@ -3279,6 +3295,139 @@ void PlaceBeside(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
   REXLOG_INFO("gta4-trainer: {}: player out of the seat after {} ms; {} ({:.1f}, {:.1f}, ground {:.2f})", label,
               now - c.leaving_since, p && gz ? "put beside the cockpit" : "left where the game set him down",
               c.exit[0], c.exit[1], c.exit[2]);
+}
+
+// Passengers through a canopy (the Batmobile's). The game would walk them
+// to a door that isn't there and play its animation through the body; here
+// one on his way in is stopped there, the canopy rises and he is put in the
+// passenger seat, as the player is put in his; one getting out is hidden
+// while he climbs out, the canopy up, and set down beside the passenger side
+// once he is out.
+bool GettingInto(PPCContext& ctx, uint8_t* base, uint32_t ped, uint32_t car) {
+  if (!ped)
+    return false;
+  const auto getting = Invoke(ctx, base, "IS_CHAR_GETTING_IN_TO_A_CAR", {ped});
+  if (!getting || !getting->r0())
+    return false;
+  const auto target = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {ped, 0}, 1);
+  return target && target->words[0] == car;
+}
+
+// Someone other than the player on his way into the car: the player's group
+// first (a friend, a mission's buddy following Niko), then whoever is
+// nearest the passenger side (a mission's passenger sent to get in). 0: no one.
+uint32_t FindRider(PPCContext& ctx, uint8_t* base, const GameContext& game, uint32_t car) {
+  if (const auto g = Invoke(ctx, base, "GET_PLAYER_GROUP", {game.player, 0}, 1); g && g->words[0]) {
+    const uint32_t group = g->words[0];
+    if (const auto size = Invoke(ctx, base, "GET_GROUP_SIZE", {group, 0, 0}, 1, 0, 2)) {
+      const uint32_t count = std::min<uint32_t>(size->words[1], 8);
+      for (uint32_t i = 0; i < count; ++i) {
+        const auto m = Invoke(ctx, base, "GET_GROUP_MEMBER", {group, i, 0}, 2);
+        if (m && m->words[0] && m->words[0] != game.ped && GettingInto(ctx, base, m->words[0], car))
+          return m->words[0];
+      }
+    }
+  }
+  // (Not while wanted: a policeman reaching for the driver is not a passenger.)
+  if (const auto wanted = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, 0}); !wanted || wanted->r0())
+    return 0;
+  const float side[3] = {2.0f, 0.0f, 0.0f};
+  if (const auto at = CarPoint(ctx, base, car, side)) {
+    // (it returns whether it found one: the ped goes in the next word)
+    const auto near = Invoke(ctx, base, "GET_CLOSEST_CHAR",
+                             {Bits((*at)[0]), Bits((*at)[1]), Bits((*at)[2]), Bits(4.0f), 1, 1, 0}, 6, 0, 1, -1, {},
+                             1);
+    if (near && near->words[0] && near->words[1] && near->words[1] != game.ped &&
+        GettingInto(ctx, base, near->words[1], car))
+      return near->words[1];
+  }
+  return 0;
+}
+
+bool SeatFree(PPCContext& ctx, uint8_t* base, uint32_t car, uint32_t seat) {
+  const auto free = Invoke(ctx, base, "IS_CAR_PASSENGER_SEAT_FREE", {car, seat});
+  return free && free->r0();
+}
+
+// The rider into the passenger seat, now that the canopy is up.
+void SeatRider(PPCContext& ctx, uint8_t* base, const CanopySpec& spec, CanopyState& c) {
+  const uint32_t rider = c.rider;
+  c.rider = 0;
+  if (!rider)
+    return;
+  const auto dead = Invoke(ctx, base, "IS_CHAR_DEAD", {rider});
+  if ((dead && dead->r0()) || !SeatFree(ctx, base, c.car, 0) || !NativeKnown("WARP_CHAR_INTO_CAR_AS_PASSENGER"))
+    return;
+  Invoke(ctx, base, "WARP_CHAR_INTO_CAR_AS_PASSENGER", {rider, c.car, 0});
+  if (c.rider_log < 12) {
+    ++c.rider_log;
+    REXLOG_INFO("gta4-trainer: {}: passenger {:08X} in through the canopy", std::string(spec.label), rider);
+  }
+}
+
+// One climbing out: once out, set down beside the passenger side (the
+// player's spot mirrored), shown again.
+void SetDownLeaver(PPCContext& ctx, uint8_t* base, const CanopySpec& spec, CanopyState& c, bool out) {
+  const uint32_t ped = c.leaver;
+  c.leaver = 0;
+  if (out) {
+    const float side[3] = {-spec.exit[0], spec.exit[1], 0.0f};
+    const auto p = CarPoint(ctx, base, c.car, side);
+    const auto at = CarPosition(ctx, base, c.car);
+    if (p && at)
+      if (const auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*at)[2] + 1.5f);
+          gz && *gz <= (*at)[2] + 0.8f && *gz >= (*at)[2] - 3.0f)
+        Invoke(ctx, base, "SET_CHAR_COORDINATES", {ped, Bits((*p)[0]), Bits((*p)[1]), Bits(*gz + 1.0f)});
+  }
+  Invoke(ctx, base, "SET_CHAR_VISIBLE", {ped, 1});
+  if (c.rider_log < 12) {
+    ++c.rider_log;
+    REXLOG_INFO("gta4-trainer: {}: passenger {:08X} {}", std::string(spec.label), ped,
+                out ? "out through the canopy, set down beside" : "did not get out in 4 s: shown again");
+  }
+}
+
+// Every frame the canopy is watched: the passenger seat (his getting out,
+// seen at once), the one climbing out.
+void Passengers(PPCContext& ctx, uint8_t* base, const CanopySpec& spec, CanopyState& c, uint64_t now) {
+  if (c.leaver) {
+    const auto in_car = Invoke(ctx, base, "IS_CHAR_IN_ANY_CAR", {c.leaver});
+    const bool out = in_car && !in_car->r0();
+    if (out || now - c.leaver_since > 4000)
+      SetDownLeaver(ctx, base, spec, c, out);
+  }
+  if (!c.car || c.leaver || !(c.in_car || c.phase != CanopyState::kShut))
+    return;
+  const auto p = Invoke(ctx, base, "GET_CHAR_IN_CAR_PASSENGER_SEAT", {c.car, 0, 0}, 2);
+  const uint32_t ped = p ? p->words[0] : 0;
+  if (!ped) {
+    c.seated = 0;
+    return;
+  }
+  const auto sitting = Invoke(ctx, base, "IS_CHAR_SITTING_IN_CAR", {ped, c.car});
+  if (sitting && sitting->r0()) {
+    c.seated = ped;
+    return;
+  }
+  if (ped != c.seated)
+    return;  // (on his way in)
+  // He sat there and is on his way out (cars only let passengers out at a
+  // standstill: anything else is not a getting out).
+  float speed = 0.0f;
+  if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {c.car, 0}, 1))
+    speed = std::fabs(v->f(0));
+  if (speed > 2.5f)
+    return;
+  Invoke(ctx, base, "SET_CHAR_VISIBLE", {ped, 0});
+  c.leaver = ped;
+  c.leaver_since = now;
+  c.seated = 0;
+  if (c.phase == CanopyState::kShut) {
+    c.phase = CanopyState::kRiderOut;
+    c.open = c.hold = 0.0f;
+    c.started = now;
+    c.sounded = false;
+  }
 }
 
 // Returns the buttons it keeps from the game: Y while the player is in the
@@ -3334,14 +3483,59 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       }
     }
   }
+  if (spec.riders)
+    Passengers(ctx, base, spec, c, now);
+  // Someone following the player in (his group joins him), or in after him
+  // while the canopy is still up or coming down: stopped where he is and put
+  // in the passenger seat with the canopy up.
+  if (spec.riders && !c.rider && c.car && now >= c.next_rider_look &&
+      (c.phase == CanopyState::kOpeningIn || c.phase == CanopyState::kClosingIn)) {
+    c.next_rider_look = now + 250;
+    if (const uint32_t rider = FindRider(ctx, base, game, c.car); rider && SeatFree(ctx, base, c.car, 0)) {
+      Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {rider});
+      c.rider = rider;
+      if (c.phase == CanopyState::kClosingIn) {
+        c.phase = CanopyState::kOpeningRider;
+        c.hold = 0.0f;
+        c.started = now;
+        c.sounded = c.open > 0.5f;  // (back up from part way: no second hiss)
+      }
+    }
+  }
+  // (and held there while the canopy rises: his group would walk him on)
+  if (c.rider && GettingInto(ctx, base, c.rider, c.car))
+    Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {c.rider});
   switch (c.phase) {
+    case CanopyState::kRiderOut: {
+      // Up while a passenger climbs out (hidden), then down again.
+      const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {c.car});
+      if (!dead || dead->r0() || now - c.started > 6000) {
+        c.phase = CanopyState::kShut;
+        c.open = 0.0f;
+        return keep;
+      }
+      if (!c.sounded) {
+        c.sounded = true;
+        CanopySound(true);
+      }
+      c.open = std::min(1.0f, c.open + dt / spec.open_seconds);
+      PoseCanopy(ctx, base, spec, c, c.car, c.open);
+      if (c.open < 1.0f || c.leaver)
+        return keep;
+      c.phase = c.in_car ? CanopyState::kClosingIn : CanopyState::kClosingOut;
+      c.hold = 0.0f;
+      c.sounded = false;
+      return keep;
+    }
     case CanopyState::kOpeningIn:
-    case CanopyState::kOpeningOut: {
+    case CanopyState::kOpeningOut:
+    case CanopyState::kOpeningRider: {
       // (A vehicle that is gone or wrecked meanwhile ends it.)
       const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {c.car});
       if (!dead || dead->r0() || now - c.started > 6000) {
         c.phase = CanopyState::kShut;
         c.open = 0.0f;
+        c.rider = 0;  // (let go: the game's own way in again)
         return 0;
       }
       if (!c.sounded) {
@@ -3352,9 +3546,17 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       PoseCanopy(ctx, base, spec, c, c.car, c.open);
       if (c.open < 1.0f || (c.hold += dt) < 0.15f)
         return keep;
+      if (c.phase == CanopyState::kOpeningRider) {
+        SeatRider(ctx, base, spec, c);
+        c.phase = CanopyState::kClosingIn;
+        c.hold = 0.0f;
+        c.sounded = false;
+        return keep;
+      }
       if (c.phase == CanopyState::kOpeningIn) {
         Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, c.car});
         c.in_car = true;
+        SeatRider(ctx, base, spec, c);  // (and anyone who followed him)
       } else {
         // Out the game's own way, as Rockstar's brucie_heli takes the player
         // out of a car (CLEAR_CHAR_TASKS, TASK_LEAVE_CAR_IMMEDIATELY), hidden
@@ -3455,6 +3657,20 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       c.open = c.hold = 0.0f;
       c.started = now;
       c.sounded = false;
+      return X_INPUT_GAMEPAD_Y;
+    }
+    // Someone else getting in while the player sits there: the canopy rises
+    // for him.
+    if (spec.riders && now >= c.next_rider_look) {
+      c.next_rider_look = now + 250;
+      if (const uint32_t rider = FindRider(ctx, base, game, c.car); rider && SeatFree(ctx, base, c.car, 0)) {
+        Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {rider});
+        c.rider = rider;
+        c.phase = CanopyState::kOpeningRider;
+        c.open = c.hold = 0.0f;
+        c.started = now;
+        c.sounded = false;
+      }
     }
     return X_INPUT_GAMEPAD_Y;
   }

@@ -42,7 +42,7 @@ keeps going while you browse.
   - **Batmobile** (JulioNIB), with its gadgets re-created: a lock-on missile
     on L1 that homes in on the car ahead, twin miniguns ahead and behind, a
     bomb on the horn, a booster that flames and roars, and a canopy that pops
-    open as you get in and out
+    open as you (and your passenger) get in and out
   - **F-16C Fighting Falcon** (SkylineGTRFreak): flies the way GTA V's jets
     do (speed from the engine, stalls, rudder on LB/RB), with a cannon on
     both sides and missiles that lock on a car ahead (the PC mod's Air
@@ -150,6 +150,15 @@ network session.
 
 ## Changes
 
+- **v1.7.19**: Batmobile passengers through the canopy: someone getting in
+  (the player's group following him in, or anyone at the passenger side
+  while he sits there, not while he is wanted) is stopped before the game's
+  door animation, the canopy rises and he is warped into the front
+  passenger seat (`WARP_CHAR_INTO_CAR_AS_PASSENGER`); a passenger getting
+  out (no longer `IS_CHAR_SITTING_IN_CAR`, at a standstill) is hidden while
+  he climbs out, the canopy up, and set down beside the passenger side.
+  `Invoke` can put an output past a native's return value
+  (`GET_CLOSEST_CHAR`).
 - **v1.7.18**: the Deimos's, the Nexus's, the Arbiter X's and the Dominator
   645's engines move to a physically informed model (v1.7.17's sounded
   synthetic): each cylinder fires at its own crank angle in the real firing
