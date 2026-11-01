@@ -104,14 +104,17 @@ def walk(blob, base, prefix, out, stats, depth=0):
             return
         _, name, fsize, foff, sysf, gfxf = entries[index]
         start = base + foff * 512
-        if fsize == 0xFFFFFF:  # the real size is in the stored header
+        version = ((sysf >> 28) & 0xF) << 4 | ((gfxf >> 28) & 0xF)
+        big = fsize == 0xFFFFFF
+        if big:  # (16 MB and over: the size is spread through the stored header's bytes instead)
             h = blob[start:start + 16]
             fsize = (h[7] << 0) | (h[14] << 8) | (h[5] << 16) | (h[2] << 24)
         stored = blob[start:start + fsize]
-        if stored[:4] != b'RSC7':
+        if stored[:4] != b'RSC7' and not big:
             stats['problems'].append('%s: no RSC7 header' % full)
             return
-        version = ((sysf >> 28) & 0xF) << 4 | ((gfxf >> 28) & 0xF)
+        if big:  # a proper header for the copy on disk
+            stored = b'RSC7' + struct.pack('<III', version, sysf, gfxf) + stored[16:]
         want = page_size(sysf) + page_size(gfxf)
         data, ok = inflate(stored[16:])
         if not ok or len(data) != want:

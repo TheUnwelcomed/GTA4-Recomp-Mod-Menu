@@ -6,23 +6,22 @@
 // turns, stalls and landings (tools/jet/flight_test.cpp in the menu's
 // repository).
 //
-// What it is meant to feel like (v1.7.22; before, the jet turned at once and
-// held 25 m/s at idle, so it could not be slowed down to land):
-//  - weight: the engines take seconds to change the speed (5 m/s^2 at full
-//    dry power, 8.5 with the afterburner, at most), the stick asks for a
-//    load factor that the jet takes half a second to reach, the roll builds
-//    up over a third of a second; pulling g bleeds speed (induced drag);
-//  - the wing: it lifts 1 g at its stall speed (42 m/s clean, 36 with the
-//    gear and flaps down) and the square of the speed over that, up to 7 g:
-//    slow, it cannot hold itself up and sinks, nose first;
-//  - hands off, the fly-by-wire holds the flight path: level, it flies
-//    level; banked up to 60 degrees it turns level; past that it sinks;
-//  - the gear: down, it drags (70% more) and lowers the stall speed; the air
-//    brake doubles the drag; on the wheels, the brakes stop it in about
-//    7 seconds from landing speed;
-//  - the autopilot: hold (heading, height, speed), land straight ahead (a
-//    3.5 degree approach to the ground in front, a flare, the brakes) and
-//    fly to a runway and land on it (a fix 3.2 km out on its line first).
+// v1.7.24: arcade flight, the way Ace Combat and GTA V do it (v1.7.22's
+// load-factor model asked for a 40 m/s takeoff roll the game's physics
+// hardly reached, and turned slowly):
+//  - a short takeoff roll: full power gets it to its rotate speed (120 km/h
+//    for the F-16) in about five seconds; pulled back from there, it flies;
+//  - the stick turns it at once: up to 60 degrees a second in pitch and 150
+//    in roll, the rates easing in over a tenth of a second, softer slow;
+//  - the flight path is the nose: it goes where it points, climbing costs
+//    speed and diving gains it, the throttle sets the speed it settles at;
+//  - Standard controls (Ace Combat's): left and right bank it, up to 70
+//    degrees, and the bank turns it, holding its height; let go and the
+//    wings level. Expert: the stick rolls and pulls it like GTA V's jets
+//    (banked hands off, it slowly falls off into the turn; loops and rolls);
+//  - below its stall speed the controls go soft and the nose drops until
+//    the speed comes back (a "STALL" warning); nothing else takes control;
+//  - the gear and the air brake add drag; on the wheels, the brakes stop it.
 #pragma once
 
 #include <algorithm>
@@ -104,48 +103,53 @@ struct Params {
   float idle, dry, burner;              // thrust over mass, m/s^2 (the burner's on top of full dry)
   float cd0, gear_drag, brake_drag;     // drag over mass per (m/s)^2; the gear's and the air brake's share
   float brake_flat;                     // the air brake's own, m/s^2
-  float k_induced;                      // drag from lift: k (n g)^2 / v^2
-  float stall_clean, stall_gear;        // 1 g stall speeds, m/s
-  float max_g, min_g;
-  float roll_rate, yaw_rate;            // rad/s at full authority
-  float roll_tau, g_tau;                // how long the roll and the load factor take to answer, s
+  float stall_clean, stall_gear;        // below these (m/s) the controls go soft and the nose drops
+  float pitch_rate, roll_rate, yaw_rate;  // rad/s at full authority
+  float rate_tau;                       // how long the rates take to follow the stick, s
+  float max_bank;                       // Standard controls: the bank full stick asks for, rad
   float max_speed;
   float rolling, wheel_brake;           // on the wheels, m/s^2
+  float rotate;                         // m/s: pulled back from here on the wheels, it flies
 };
-// The F-16 (GTA's scale: tops out at 80 m/s on full dry power, 104 with the
-// afterburner; lands at about 40).
-inline constexpr Params kF16{0.6f,  5.0f,  3.5f,  0.00078f, 0.7f, 1.0f, 1.0f,  10.0f, 42.0f,
-                             36.0f, 7.0f, -2.5f, 2.0f,     0.30f, 0.35f, 0.5f, 110.0f, 0.25f, 6.0f};
-// The Batwing: more engine, a bigger wing (slower stall), a quicker roll.
-inline constexpr Params kBatwing{0.7f,  5.8f,  4.0f,  0.00082f, 0.6f, 1.1f, 1.0f,  9.0f, 38.0f,
-                                 33.0f, 7.5f, -2.5f, 2.4f,     0.32f, 0.30f, 0.45f, 115.0f, 0.25f, 6.5f};
+// The F-16 (GTA's scale: settles at about 75 m/s on full dry power and 95
+// with the afterburner; flies from 120 km/h; stalls below 90).
+inline constexpr Params kF16{1.6f,  7.0f,  5.0f,  0.00125f, 0.6f, 1.2f, 4.0f,  25.0f, 22.0f,
+                             1.05f, 2.6f,  0.45f, 0.10f,    1.22f, 110.0f, 0.3f, 7.0f, 33.0f};
+// The Batwing: more engine, a bigger wing (slower), a quicker roll.
+inline constexpr Params kBatwing{1.7f,  7.6f,  5.0f,  0.00130f, 0.5f, 1.2f, 4.0f,  23.0f, 20.0f,
+                                 1.10f, 2.9f,  0.50f, 0.09f,    1.22f, 112.0f, 0.3f, 7.0f, 30.0f};
 
 inline float StallSpeed(const Params& p, bool gear_down) { return gear_down ? p.stall_gear : p.stall_clean; }
-// The speed it may leave the ground at (pulling back): 10% over the stall.
-inline float RotateSpeed(const Params& p, bool gear_down) { return 1.1f * StallSpeed(p, gear_down); }
+// The speed it may leave the ground at (pulling back).
+inline float RotateSpeed(const Params& p, bool gear_down) {
+  (void)gear_down;
+  return p.rotate;
+}
 
 struct Input {
   float pitch = 0, roll = 0, yaw = 0;  // the stick (pull back +), the rudder (right +); -1..1
   float throttle = 0, airbrake = 0;    // 0..1
   bool burner = false, gear_down = true;
-  // The autopilot flies a climb angle (rad) instead of the stick's pitch.
+  // Standard controls: `roll` asks for a bank (of max_bank), and the bank
+  // turns the jet holding its height; centred, the wings level.
+  bool assist = false;
+  // The autopilot flies a climb angle (rad) instead of the stick's pitch
+  // (its turns coordinated as Standard's).
   bool path = false;
   float gamma = 0;
 };
 struct State {
   Q q;
   float speed = 0;
-  float n = 1, p = 0, r = 0;  // load factor (g), roll and yaw rates (rad/s)
+  float n = 1, p = 0, r = 0, pq = 0;  // load factor (g, for the HUD); roll, yaw and pitch rates (rad/s)
   bool stalled = false;
 };
 
-// The load factor that keeps the flight path where it is, hands off.
-inline float TrimG(const Attitude& a) {
-  const float cg = std::cos(a.gamma);
-  const float cb = std::cos(a.bank);
-  if (cb <= 0.0f)
-    return 0.0f;  // upside down: no help
-  return cg / std::max(cb, 0.5f);
+// How much of the controls' rates it has at speed `v`: a fifth at a crawl,
+// all of it from a little over the stall.
+inline float Authority(const Params& P, float v, bool gear_down) {
+  const float vs = StallSpeed(P, gear_down);
+  return Clamp((v - 0.4f * vs) / (0.8f * vs), 0.2f, 1.0f);
 }
 
 // One step in the air.
@@ -155,43 +159,68 @@ inline void Fly(const Params& P, State& s, const Input& in, float dt) {
   const Attitude a = Look(s.q);
   const float v = std::max(s.speed, 1.0f);
   const float vs = StallSpeed(P, in.gear_down);
-  const float lift = (v * v) / (vs * vs);  // g the wing gives at full angle of attack
-  const float n_max = std::min(P.max_g, lift), n_min = std::max(P.min_g, -0.6f * lift);
-  const float trim = Clamp(TrimG(a), n_min, n_max);
-  float want;
-  if (in.path)
-    want = trim + Clamp(1.4f * (in.gamma - a.gamma) * v / kG, -1.2f, 2.0f);
-  else if (in.pitch >= 0.0f)
-    want = trim + in.pitch * (n_max - trim);
-  else
-    want = trim + in.pitch * (trim - n_min);
-  want = Clamp(want, n_min, n_max);
+  const float auth = Authority(P, v, in.gear_down);
+  const float lift = std::min(1.0f, (v * v) / (vs * vs));  // 1: the wing holds it up
   s.stalled = v < vs * 0.98f;
-  s.n += (want - s.n) * (1.0f - std::exp(-dt / P.g_tau));
-  s.n = Clamp(s.n, n_min, n_max);
-  // Roll and rudder: authority grows with the speed up to just over the stall.
-  const float authority = Clamp((v - 12.0f) / (P.stall_clean * 1.1f - 12.0f), 0.25f, 1.0f);
-  const float follow = 1.0f - std::exp(-dt / P.roll_tau);
-  s.p += (Clamp(in.roll, -1.0f, 1.0f) * P.roll_rate * authority - s.p) * follow;
-  s.r += (Clamp(in.yaw, -1.0f, 1.0f) * P.yaw_rate * authority - s.r) * follow;
+  const bool coordinated = in.assist || in.path;
+  // The turn a bank makes, level (the autopilot's and Standard's): g tan(bank) / v.
+  float turn_q = 0.0f, turn_r = 0.0f;
+  if (coordinated && std::fabs(a.bank) < 1.45f) {
+    const float w = kG * std::tan(a.bank) / std::max(v, 15.0f) * lift;
+    turn_q = w * std::sin(a.bank);
+    turn_r = w * std::cos(a.bank);
+  }
+  float want_p, want_q, want_r;
+  if (in.path) {
+    // The autopilot: the stick's roll as a rate, the climb angle held.
+    want_p = Clamp(in.roll, -1.0f, 1.0f) * P.roll_rate * auth;
+    const float gamma_rate = Clamp(1.5f * (in.gamma - a.gamma), -0.25f, 0.25f);
+    want_q = gamma_rate / std::max(std::cos(a.bank), 0.3f) + turn_q;
+    want_r = Clamp(in.yaw, -1.0f, 1.0f) * P.yaw_rate * auth + turn_r;
+  } else if (in.assist) {
+    // Standard: the stick asks for a bank; centred, the wings level.
+    const float want_bank = Clamp(in.roll, -1.0f, 1.0f) * P.max_bank;
+    want_p = Clamp(3.5f * Wrap(want_bank - a.bank), -P.roll_rate, P.roll_rate) * auth;
+    want_q = Clamp(in.pitch, -1.0f, 1.0f) * P.pitch_rate * auth + turn_q;
+    want_r = Clamp(in.yaw, -1.0f, 1.0f) * P.yaw_rate * auth + turn_r;
+  } else {
+    // Expert: the stick rolls and pulls.
+    want_p = Clamp(in.roll, -1.0f, 1.0f) * P.roll_rate * auth;
+    want_q = Clamp(in.pitch, -1.0f, 1.0f) * P.pitch_rate * auth;
+    want_r = Clamp(in.yaw, -1.0f, 1.0f) * P.yaw_rate * auth;
+  }
+  // Stalled, pulling back does less and less (the nose drops, pulled or not).
+  if (want_q > 0.0f)
+    want_q *= lift;
+  const float follow = 1.0f - std::exp(-dt / P.rate_tau);
+  s.p += (want_p - s.p) * follow;
+  s.pq += (want_q - s.pq) * follow;
+  s.r += (want_r - s.r) * follow;
   s.q = Mul(s.q, Axis({0, 1, 0}, s.p * dt));    // right: the right wing down
+  s.q = Mul(s.q, Axis({1, 0, 0}, s.pq * dt));   // back: the nose up
   s.q = Mul(s.q, Axis({0, 0, 1}, -s.r * dt));   // right rudder: the nose right
-  // The path bends with what pulls across it: the wing's lift (n g, along
-  // its up axis) and gravity.
-  const V3 pull = a.u * (s.n * kG) + V3{0, 0, -kG};
-  const V3 across = pull - a.f * Dot(pull, a.f);
-  const V3 axis = Cross(a.f, across);
-  const float m = Len(axis);
-  if (m > 1e-5f)
-    s.q = Mul(Axis(axis * (1.0f / m), m / v * dt), s.q);
-  // Speed: thrust against drag (the airframe's, the gear's, the air brake's,
-  // the lift's) and gravity along the path.
+  // Gravity: what the wing doesn't hold up pulls the nose towards the ground
+  // (slow: the stall; Expert, banked steeply: falling off into the turn).
+  const float held = coordinated ? lift : lift * std::fabs(std::cos(a.bank));
+  const float fall = (kG / std::max(v, 8.0f)) * std::cos(a.gamma) * (1.0f - held);
+  if (fall > 1e-5f) {
+    const Attitude b = Look(s.q);
+    const V3 down{0, 0, -1};
+    V3 axis = Cross(b.f, down);
+    const float m = Len(axis);
+    if (m > 1e-4f)
+      s.q = Mul(Axis(axis * (1.0f / m), std::min(fall * dt, 0.05f)), s.q);
+  }
+  // Speed: thrust against drag (the airframe's, the gear's, the air
+  // brake's) and gravity along the path.
   const float thrust = P.idle + (P.dry - P.idle) * Clamp(in.throttle, 0.0f, 1.0f) + (in.burner ? P.burner : 0.0f);
   const float cd = P.cd0 * (1.0f + (in.gear_down ? P.gear_drag : 0.0f) + in.airbrake * P.brake_drag);
-  const float ng = s.n * kG;
-  const float drag = cd * v * v + in.airbrake * P.brake_flat + P.k_induced * ng * ng / std::max(v * v, 400.0f);
-  s.speed = Clamp(s.speed + (thrust - drag - kG * a.f.z) * dt, 0.0f, P.max_speed);
+  const float drag = cd * v * v + in.airbrake * P.brake_flat;
+  const float climb = Look(s.q).f.z;
+  s.speed = Clamp(s.speed + (thrust - drag - kG * climb) * dt, 0.0f, P.max_speed);
   s.q = Norm(s.q);
+  // The load factor the HUD shows: the pull's and gravity's.
+  s.n = Clamp(v * s.pq / kG + std::cos(a.gamma) * std::cos(a.bank), -4.0f, 9.0f);
 }
 
 // On the wheels: the speed after `dt` (the engines against rolling
@@ -211,7 +240,7 @@ enum class Phase { kHold, kToFix, kIntercept, kFinal, kFlare, kRollout, kStopped
 
 constexpr float kGlide = 0.0611f;  // 3.5 degrees
 constexpr float kFixOut = 3200.0f;  // the route's fix, metres before the touchdown point
-constexpr float kApproachSpeed = 48.0f, kCruiseSpeed = 72.0f;
+constexpr float kApproachSpeed = 42.0f, kCruiseSpeed = 70.0f;
 
 struct Runway {
   V3 aim;          // the touchdown point (its z the ground there)

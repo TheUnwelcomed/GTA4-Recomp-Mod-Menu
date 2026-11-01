@@ -349,6 +349,17 @@ for xg, dg, vm in pairs:
             else:
                 a = dec(i, bytes(x.phys[xa + xo:xa + xo + 4]))
             b = dec_pc(i, bytes(d.phys[da + do:da + do + batconv.SIZE_PC[i]]))
+            if i == 0 and OPTIONS.get('shift') and dtab:
+                # (the shift option moved what is bound to a bone: by the same float32 sum)
+                dat = dict(dl)
+                if 2 in dat:
+                    wts = list(d.phys[da + dat[1]:da + dat[1] + 4]) if 1 in dat else [255, 0, 0, 0]
+                    ix = d.phys[da + dat[2]:da + dat[2] + 4]
+                    k = max(range(4), key=lambda q: wts[q])
+                    dbn = dbones[dtab[ix[k]]] if ix[k] < len(dtab) else None
+                    sh = OPTIONS['shift'].get(batconv.BONE_ALIAS.get(dbn, dbn))
+                    if sh:
+                        b = list(struct.unpack('<3f', struct.pack('<3f', *(b[a] + sh[a] for a in range(3)))))
             if i == 2 and (SPLIT_RULES or FACE_RULES) and dtab:
                 # each influence: the 360 bone must be the PC bone's own mapping,
                 # or the pivot a conditional source gives this vertex's position

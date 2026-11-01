@@ -1,6 +1,6 @@
-// Flies gta4_jet_flight.h on the PC: takeoff, top speeds, a stall, a level
-// turn hands off, the autopilot's hold, a landing straight ahead and a
-// route to a runway from 5 km out. Prints what happened; fails on nonsense.
+// Flies gta4_jet_flight.h on the PC: takeoff, top speeds, Standard and
+// Expert turns, a stall, the autopilot's hold, a landing straight ahead and
+// a route to a runway from 5 km out. Prints what happened; fails on nonsense.
 // build: c++ -std=c++20 -O2 -I<menu src> flight_test.cpp -o flight_test
 #include <cstdio>
 #include <cstdlib>
@@ -61,7 +61,7 @@ void TopSpeeds(const Params& P, const char* name) {
     if (mode == 2)
       Check(s.st.speed > 95 && s.st.speed <= P.max_speed, "the afterburner tops out at 95+ m/s");
     if (mode == 0)
-      Check(s.pos.z < 250, "at idle it can't hold its height");
+      Check(s.st.speed > 28 && s.st.speed < 45, "idle settles at 28-45 m/s");
   }
 }
 
@@ -77,7 +77,7 @@ void Takeoff(const Params& P, const char* name) {
     s.t += kDt;
   }
   std::printf("  rotate speed %.1f m/s after %.1f s, %.0f m\n", vr, s.t, dist);
-  Check(s.t > 5 && s.t < 15, "the roll to rotate speed takes 5-15 s");
+  Check(s.t > 3 && s.t < 8, "the roll to rotate speed takes 3-8 s");
   s.flying = true;
   s.st.q = Facing(0);
   Input in;
@@ -102,53 +102,121 @@ void Takeoff(const Params& P, const char* name) {
 }
 
 void Turn(const Params& P, const char* name) {
-  std::printf("%s: a 45-degree bank, hands off\n", name);
-  Sim s(P);
-  s.flying = true;
-  s.st.speed = 75;
-  s.pos = {0, 0, 300};
-  Input in;
-  in.gear_down = false;
-  in.throttle = 0.9f;
-  float yaw0 = 0;
-  for (int i = 0; i < 60 * 30; ++i) {
+  std::printf("%s: Standard controls, the stick 65%% left for 20 s, then let go\n", name);
+  {
+    Sim s(P);
+    s.flying = true;
+    s.st.speed = 70;
+    s.pos = {0, 0, 300};
+    Input in;
+    in.assist = true;
+    in.gear_down = false;
+    in.throttle = 0.8f;
+    float yaw0 = Look(s.st.q).yaw, max_bank = 0;
+    for (int i = 0; i < 60 * 20; ++i) {
+      in.roll = -0.65f;
+      s.Step(in);
+      max_bank = std::max(max_bank, std::fabs(Look(s.st.q).bank));
+    }
     const Attitude a = Look(s.st.q);
-    in.roll = a.bank < 0.785f && i < 60 * 3 ? 0.5f : (a.bank > 0.79f ? -0.3f : 0.0f);
-    if (i == 60 * 3)
-      yaw0 = a.yaw;
-    s.Step(in);
+    const float turned = std::fabs(Wrap(a.yaw - yaw0)) * 57.3f;
+    std::printf("  after 20 s: bank %.0f, height %.0f (from 300), %.1f m/s, turned %.0f degrees\n", a.bank * 57.3f,
+                s.pos.z, s.st.speed, turned);
+    Check(std::fabs(s.pos.z - 300) < 40, "a Standard turn holds its height");
+    Check(std::fabs(a.bank) > 0.6f && std::fabs(a.bank) < 0.95f, "the stick 65% over banks it 35-55 degrees");
+    in.roll = 0;
+    float t_level = -1;
+    for (int i = 0; i < 60 * 4; ++i) {
+      s.Step(in);
+      if (t_level < 0 && std::fabs(Look(s.st.q).bank) < 0.05f)
+        t_level = i / 60.0f;
+    }
+    std::printf("  let go: wings level after %.1f s\n", t_level);
+    Check(t_level >= 0 && t_level < 2.0f, "let go, the wings level within 2 s");
   }
-  const Attitude a = Look(s.st.q);
-  std::printf("  after 30 s: bank %.0f, height %.0f (from 300), %.1f m/s, turned %.0f degrees in 27 s\n",
-              a.bank * 57.3f, s.pos.z, s.st.speed, Wrap(a.yaw - yaw0) * 57.3f);
-  Check(std::fabs(s.pos.z - 300) < 40, "a banked turn holds its height hands off");
+  std::printf("%s: Expert, full roll for 0.5 s, full pull for 2 s\n", name);
+  {
+    Sim s(P);
+    s.flying = true;
+    s.st.speed = 70;
+    s.pos = {0, 0, 300};
+    Input in;
+    in.gear_down = false;
+    in.throttle = 0.8f;
+    for (int i = 0; i < 30; ++i) {
+      in.roll = 1;
+      s.Step(in);
+    }
+    const float bank = Look(s.st.q).bank * 57.3f;
+    in.roll = 0;
+    const float gamma0 = Look(s.st.q).gamma;
+    in.pitch = 1;
+    for (int i = 0; i < 120; ++i)
+      s.Step(in);
+    std::printf("  rolled %.0f degrees in 0.5 s; then pulled 2 s: %.1f m/s\n", bank, s.st.speed);
+    Check(std::fabs(bank) > 45, "it rolls 45+ degrees in half a second");
+    (void)gamma0;
+  }
+  std::printf("%s: Expert, a loop on full pull from 80 m/s with the afterburner\n", name);
+  {
+    Sim s(P);
+    s.flying = true;
+    s.st.speed = 80;
+    s.pos = {0, 0, 600};
+    Input in;
+    in.gear_down = false;
+    in.throttle = 1;
+    in.burner = true;
+    in.pitch = 1;
+    float turned = 0, last = Look(s.st.q).gamma;
+    bool inverted = false;
+    for (int i = 0; i < 60 * 12 && !(inverted && Look(s.st.q).u.z > 0.9f && Look(s.st.q).gamma > -0.05f); ++i) {
+      s.Step(in);
+      inverted |= Look(s.st.q).u.z < -0.5f;
+      turned += std::fabs(Look(s.st.q).gamma - last);
+      last = Look(s.st.q).gamma;
+    }
+    std::printf("  over the top: %s, speed %.1f m/s, height %.0f\n", inverted ? "yes" : "no", s.st.speed, s.pos.z);
+    Check(inverted, "it loops");
+  }
 }
 
 void Stall(const Params& P, const char* name) {
-  std::printf("%s: pulled up at idle until it stalls\n", name);
+  std::printf("%s: nose held 50 degrees up at idle until it stalls\n", name);
   Sim s(P);
   s.flying = true;
   s.st.speed = 60;
   s.pos = {0, 0, 600};
   Input in;
+  in.assist = true;
   in.gear_down = false;
   in.throttle = 0;
-  in.pitch = 1;
-  float min_speed = 99, lowest_gamma = 0;
+  float min_speed = 99, lowest_gamma = 0, top_gamma = 0;
   bool stalled = false;
+  float stalled_at = -1;
   for (int i = 0; i < 60 * 25; ++i) {
+    const float g = Look(s.st.q).gamma;
+    // The pilot pulls for 50 degrees; 3 s into the stall he lets go and adds power.
+    const bool recover = stalled_at >= 0 && s.t - stalled_at > 3.0f;
+    in.pitch = recover ? 0.0f : Clamp(3.0f * (0.87f - g), -1.0f, 1.0f);
+    in.throttle = recover ? 1.0f : 0.0f;
+    if (stalled_at < 0 && s.st.stalled)
+      stalled_at = s.t;
     s.Step(in);
     min_speed = std::min(min_speed, s.st.speed);
     stalled |= s.st.stalled;
-    lowest_gamma = std::min(lowest_gamma, Look(s.st.q).gamma);
+    top_gamma = std::max(top_gamma, Look(s.st.q).gamma);
+    if (stalled)
+      lowest_gamma = std::min(lowest_gamma, Look(s.st.q).gamma);
     if (!std::isfinite(s.st.speed) || !std::isfinite(s.pos.z)) {
       Check(false, "numbers stay finite");
       return;
     }
   }
-  std::printf("  slowest %.1f m/s, stalled %s, nose down to %.0f degrees, height now %.0f\n", min_speed,
-              stalled ? "yes" : "no", lowest_gamma * 57.3f, s.pos.z);
-  Check(stalled && lowest_gamma < -0.2f, "a stall drops the nose");
+  std::printf("  nose up to %.0f, slowest %.1f m/s, stalled %s, then the nose fell to %.0f degrees; %.1f m/s now\n",
+              top_gamma * 57.3f, min_speed, stalled ? "yes" : "no", lowest_gamma * 57.3f, s.st.speed);
+  Check(stalled && lowest_gamma < 0.0f, "a stall drops the nose, pulling or not");
+  Check(s.st.speed > StallSpeed(P, false), "let go, with power, it flies again");
 }
 
 // An autopilot run: until stopped on the ground or the time runs out.

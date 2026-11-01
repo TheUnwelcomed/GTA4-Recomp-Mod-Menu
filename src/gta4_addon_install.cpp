@@ -18,11 +18,13 @@
 #include "gta4_addon_install.h"
 
 #include <algorithm>
+#include <map>
 #include <atomic>
 #include <cctype>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <ostream>
@@ -957,7 +959,7 @@ bool ListImg(const fs::path& img, const std::vector<uint8_t>& key, std::ostream&
 bool IsTextData(std::string ext) {
   for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
   return ext == ".dat" || ext == ".ide" || ext == ".csv" || ext == ".txt" || ext == ".xml" ||
-         ext == ".ipl" || ext == ".ini";
+         ext == ".ipl" || ext == ".ini" || ext == ".zon";
 }
 
 uint32_t Le32(const uint8_t* p) {
@@ -1178,6 +1180,158 @@ void ExportGameIndex(const fs::path& game, const std::vector<uint8_t>& key, cons
   std::ofstream(out / "done.txt", std::ios::trunc) << kVersion;
   REXLOG_INFO("gta4-addons: game index exported to {} ({} archives listed, {} data files)",
               out.string(), archives, copied);
+}
+
+// Map references for the map converter (logs/export/maps on the console):
+// from a few of the game's own map archives (the smallest, a middle one and
+// the largest of those under a maps folder), a few entries of every kind
+// they hold (drawables, drawable dictionaries, texture dictionaries, bounds,
+// bound dictionaries, stream placements, navmeshes...), the smallest of each
+// kind first, with each archive's full table of contents, and the .ide and
+// .wpl files beside them. What the PC map formats are converted against, as
+// the cars were against the stock cars. Once per version of this list; at
+// most 40 MB.
+void ExportMapReference(const fs::path& game, const std::vector<uint8_t>& key, const fs::path& out) {
+  std::error_code ec;
+  constexpr std::string_view kVersion = "maps v2\n";
+  {
+    std::vector<uint8_t> marker;
+    if (ReadAll(out / "done.txt", marker) && std::string(marker.begin(), marker.end()) == kVersion)
+      return;
+  }
+  std::vector<std::pair<uint64_t, fs::path>> archives;
+  std::vector<fs::path> extras;
+  for (auto it = fs::recursive_directory_iterator(game, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    if (it.depth() > 8) { it.disable_recursion_pending(); continue; }
+    std::error_code fec;
+    if (!it->is_regular_file(fec))
+      continue;
+    std::string path = it->path().generic_string(), ext = it->path().extension().string();
+    for (char& c : path) c = char(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (ext == ".img" && path.find("/maps/") != std::string::npos)
+      archives.emplace_back(SizeOf(it->path()), it->path());
+    else if (ext == ".img" && (path.ends_with("/paths.img") || path.ends_with("/navmeshes.img")))
+      extras.push_back(it->path());  // (the traffic's nodes and the pedestrians' navmeshes)
+  }
+  fs::create_directories(out, ec);
+  std::ofstream summary(out / "maps.txt", std::ios::trunc);
+  summary << "# map archives under the install: " << archives.size() << "\n";
+  std::sort(archives.begin(), archives.end());
+  for (const auto& [size, path] : archives)
+    summary << RelativeTo(path, game.parent_path()) << " " << size << "\n";
+  std::vector<fs::path> picked;
+  if (!archives.empty()) {
+    for (const size_t i : {size_t(0), archives.size() / 2, archives.size() - 1})
+      if (std::find(picked.begin(), picked.end(), archives[i].second) == picked.end())
+        picked.push_back(archives[i].second);
+  }
+  for (const auto& extra : extras) {
+    summary << RelativeTo(extra, game.parent_path()) << " " << SizeOf(extra) << "\n";
+    if (std::find(picked.begin(), picked.end(), extra) == picked.end())
+      picked.push_back(extra);
+  }
+  uint64_t total = 0;
+  int copied = 0;
+  for (const auto& img : picked) {
+    std::string flat = RelativeTo(img, game.parent_path());
+    std::replace(flat.begin(), flat.end(), '/', '_');
+    const fs::path dir = out / flat;
+    fs::create_directories(dir, ec);
+    {
+      std::ofstream listing(dir / "toc.txt", std::ios::trunc);
+      ListImg(img, key, listing);
+    }
+    // the table again, read here to pick and copy entries
+    std::ifstream in(img, std::ios::binary);
+    std::array<uint8_t, 0x14> header{};
+    if (!in || !in.read(reinterpret_cast<char*>(header.data()), header.size()))
+      continue;
+    Endian e{};
+    bool encrypted = false;
+    auto match = [&](const uint8_t* p) {
+      uint32_t magic;
+      std::memcpy(&magic, p, 4);
+      if (magic == kImgMagic) { e.big = false; return true; }
+      if (Swap32(magic) == kImgMagic) { e.big = true; return true; }
+      return false;
+    };
+    if (!match(header.data())) {
+      std::array<uint8_t, 0x14> trial = header;
+      CryptBlocks(trial.data(), 16, key, false);
+      if (key.empty() || !match(trial.data()))
+        continue;
+      encrypted = true;
+      header = trial;
+    }
+    const uint32_t count = e.R32(header.data() + 8), toc_size = e.R32(header.data() + 12);
+    if (count == 0 || count > 200000 || toc_size <= count * 16 || toc_size > (64u << 20))
+      continue;
+    std::vector<uint8_t> toc(toc_size);
+    if (!in.read(reinterpret_cast<char*>(toc.data()), std::streamsize(toc.size())))
+      continue;
+    if (encrypted)
+      CryptBlocks(toc.data(), toc.size(), key, false);
+    struct Entry {
+      std::string name, ext;
+      uint64_t offset = 0, size = 0;
+      uint32_t word0 = 0, type = 0;
+      uint16_t flags = 0;
+    };
+    std::vector<Entry> entries;
+    const char* names = reinterpret_cast<const char*>(toc.data()) + count * 16;
+    size_t names_len = toc_size - count * 16, cursor = 0;
+    for (uint32_t i = 0; i < count && cursor < names_len; ++i) {
+      const uint8_t* p = toc.data() + i * 16;
+      const size_t len = strnlen(names + cursor, names_len - cursor);
+      Entry entry;
+      entry.name.assign(names + cursor, len);
+      cursor += len + 1;
+      entry.word0 = e.R32(p);
+      entry.type = e.R32(p + 4);
+      entry.offset = uint64_t(e.R32(p + 8)) * kBlock;
+      entry.flags = e.R16(p + 14);
+      entry.size = uint64_t(e.R16(p + 12)) * kBlock - (entry.flags & 0x7FF);
+      const auto dot = entry.name.rfind('.');
+      entry.ext = dot == std::string::npos ? std::string() : entry.name.substr(dot + 1);
+      for (char& c : entry.ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (entry.name.find('/') == std::string::npos && entry.name.find('\\') == std::string::npos &&
+          entry.name.find("..") == std::string::npos && !entry.name.empty())
+        entries.push_back(std::move(entry));
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry& a, const Entry& b) { return a.ext != b.ext ? a.ext < b.ext : a.size < b.size; });
+    std::map<std::string, int> per_kind;
+    for (const auto& entry : entries) {
+      if (per_kind[entry.ext] >= 3 || entry.size > (6u << 20) || total + entry.size > (40ull << 20))
+        continue;
+      std::vector<uint8_t> data(entry.size);
+      in.clear();
+      in.seekg(std::streamoff(entry.offset));
+      if (!in.read(reinterpret_cast<char*>(data.data()), std::streamsize(data.size())))
+        continue;
+      std::ofstream file(dir / entry.name, std::ios::binary | std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+      char line[160];
+      std::snprintf(line, sizeof(line), "word0=%08X type=%08X flags=%04X size=%llu\n", entry.word0, entry.type,
+                    unsigned(entry.flags), (unsigned long long)entry.size);
+      std::ofstream(dir / (entry.name + ".toc"), std::ios::trunc) << line;
+      ++per_kind[entry.ext];
+      total += entry.size;
+      ++copied;
+    }
+    // the placements and definitions beside the archive
+    for (const char* ext : {".ide", ".wpl", ".ipl"}) {
+      fs::path beside = img;
+      beside.replace_extension(ext);
+      if (fs::exists(beside, ec) && SizeOf(beside) < (4u << 20) && CopyBytes(beside, dir / beside.filename()))
+        ++copied;
+    }
+  }
+  std::ofstream(out / "done.txt", std::ios::trunc) << kVersion;
+  REXLOG_INFO("gta4-addons: map references exported to {} ({} map archives found, {} files from {}, {} bytes)",
+              out.string(), archives.size(), copied, picked.size(), total);
 }
 
 // Niko's own model for the converter (logs/export/playerped on the console):
@@ -1753,20 +1907,42 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
                   game.string());
   }
   // The data files the game actually reads: in common.rpf. (Not this launch
-  // if the last one that used them never reached the city.)
+  // if the last two that used them never reached the city.)
   const fs::path cache = game.parent_path() / "addon_cache";
   std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, cache);
   if (!shadows.empty()) {
+    // The marker counts the launches in a row that mounted the shadows and
+    // never got to the city. One alone proves nothing (the game closed at
+    // the loading screen, or from the PS5 menu, says the same), so it takes
+    // two before a launch starts without them. (An older marker, with no
+    // count, is one.)
     const fs::path marker = cache / "launch-pending.txt";
     g_launch_marker = marker;
+    int missed = 0;
     if (fs::exists(marker, ec)) {
+      std::vector<uint8_t> raw;
+      ReadAll(marker, raw);
+      const std::string text(raw.begin(), raw.end());
+      const size_t colon = text.rfind(':');
+      missed = 1;
+      if (colon != std::string::npos) {
+        const int n = std::atoi(text.c_str() + colon + 1);
+        if (n > 0) missed = n;
+      }
+    }
+    if (missed >= 2) {
       fs::remove(marker, ec);
       g_shadows_skipped = true;
       shadows.clear();
-      REXLOG_WARN("gta4-addons: the last launch with the add-ons' data never reached the game; "
-                  "this launch starts without it (the next one tries again)");
+      REXLOG_WARN("gta4-addons: the last {} launches with the add-ons' data never reached the "
+                  "city; this launch starts without it (the next one tries again)", missed);
     } else {
-      std::ofstream(marker, std::ios::trunc) << "launched with the add-ons' shadow archive\n";
+      if (missed)
+        REXLOG_WARN("gta4-addons: the last launch with the add-ons' data never reached the city "
+                    "(closed early, or stopped); trying them again");
+      std::ofstream(marker, std::ios::trunc)
+          << "launches with the add-ons' shadow archive that have not reached the city: "
+          << (missed + 1) << "\n";
     }
   }
   // Every vehicles.img in the installed tree: base, title update, episodes.
@@ -1809,6 +1985,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
     ExportReference(images.front(), key, app_addons.parent_path() / "logs" / "export", refs);
     ExportGameIndex(game, key, app_addons.parent_path() / "logs" / "export" / "index");
     ExportPlayerPed(game, app_addons.parent_path() / "logs" / "export" / "playerped");
+    ExportMapReference(game, key, app_addons.parent_path() / "logs" / "export" / "maps");
   }
   std::vector<fs::path> files;
   for (const auto& a : addons) {

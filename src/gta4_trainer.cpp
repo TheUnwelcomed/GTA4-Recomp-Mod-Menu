@@ -42,6 +42,9 @@
 #include <rex/platform.h>
 #if REX_PLATFORM_PS5
 #include "ps5/game/sound.h"
+#if defined(__PROSPERO__)
+#include "ps5/hub/ps5_hub.h"  // (its fonts, for the menu)
+#endif
 #endif
 
 REXCVAR_DEFINE_BOOL(gta4_trainer, true, "GTA IV/Gameplay",
@@ -248,11 +251,106 @@ struct InvokeResult {
   uint32_t r0() const { return words[0]; }
   float f(size_t i) const { return std::bit_cast<float>(words[i]); }
 };
+// Handles the trainer keeps from frame to frame go stale: a wreck the game
+// cleared away, a ped it removed. Several natives look a handle up and use
+// what they get without checking it (GET_CHAR_IN_CAR_PASSENGER_SEAT reads the
+// seat at +0xF44 of a null vehicle: the crash of a blown-up Lazar 3, v1.7.23),
+// so a handle its pool no longer holds is never passed on. The pools, as the
+// game's own lookups read them: vehicles at 0x82FB0700, peds at 0x831D5388
+// (+0 storage, +4 a generation byte per slot, top bit set when free, +8 the
+// slot count, +12 the slot size); a handle is slot << 8 | generation.
+constexpr uint32_t kVehiclePoolPtr = 0x82FB0700, kPedPoolPtr = 0x831D5388;
+
+bool HandleGone(uint8_t* base, uint32_t pool_pointer, uint32_t handle) {
+  if (!Span(base, pool_pointer, 4))
+    return false;  // (the pool not readable: nothing known, the call goes ahead)
+  const uint32_t pool = Read(base, pool_pointer);
+  if (!Span(base, pool, 16))
+    return false;
+  const uint32_t slot = handle >> 8, flags = Read(base, pool + 4), count = Read(base, pool + 8);
+  if (count && slot >= count)
+    return true;
+  if (!Span(base, flags + slot, 1))
+    return false;
+  return *rex::memory::GuestPtr(base, flags + slot) != (handle & 0xFF);
+}
+
+// Which argument of a native the trainer uses is a vehicle or a ped handle
+// (by value; `seeded`: passed by pointer, the handle in the result seed).
+struct HandleUse {
+  std::string_view name;
+  int8_t vehicle = -1, ped = -1;
+  bool seeded = false;
+};
+constexpr HandleUse kHandleUses[] = {
+    {"ADD_BLIP_FOR_CAR", 0}, {"FIX_CAR", 0}, {"FORCE_CAR_LIGHTS", 0}, {"FREEZE_CAR_POSITION", 0},
+    {"GET_CAR_COLOURS", 0}, {"GET_CAR_COORDINATES", 0}, {"GET_CAR_HEADING", 0}, {"GET_CAR_MODEL", 0},
+    {"GET_CAR_SPEED", 0}, {"GET_CHAR_IN_CAR_PASSENGER_SEAT", 0}, {"GET_DOOR_ANGLE_RATIO", 0},
+    {"GET_OFFSET_FROM_CAR_IN_WORLD_COORDS", 0}, {"GET_VEHICLE_QUATERNION", 0},
+    {"IS_CAR_PASSENGER_SEAT_FREE", 0}, {"IS_VEHICLE_EXTRA_TURNED_ON", 0}, {"SET_CAR_COLLISION", 0},
+    {"SET_CAR_COLOURS", 0}, {"SET_CAR_COORDINATES", 0}, {"SET_CAR_FORWARD_SPEED", 0},
+    {"SET_CAR_HEADING", 0}, {"SET_CAR_ON_GROUND_PROPERLY", 0}, {"SET_CAR_PROOFS", 0},
+    {"SET_CAR_VISIBLE", 0}, {"SET_HELI_BLADES_FULL_SPEED", 0}, {"SET_VEHICLE_QUATERNION", 0},
+    {"TURN_OFF_VEHICLE_EXTRA", 0}, {"CREATE_CHAR_INSIDE_CAR", 0}, {"CREATE_CHAR_AS_PASSENGER", 0},
+    {"IS_CAR_DEAD", 0}, {"DELETE_CAR", 0, -1, true}, {"MARK_CAR_AS_NO_LONGER_NEEDED", 0, -1, true},
+    {"ADD_ARMOUR_TO_CHAR", -1, 0}, {"CLEAR_CHAR_TASKS", -1, 0}, {"CLEAR_CHAR_TASKS_IMMEDIATELY", -1, 0},
+    {"FREEZE_CHAR_POSITION", -1, 0}, {"GET_CAR_CHAR_IS_USING", -1, 0}, {"GIVE_WEAPON_TO_CHAR", -1, 0},
+    {"IS_CHAR_DEAD", -1, 0}, {"IS_CHAR_INJURED", -1, 0}, {"IS_CHAR_GETTING_IN_TO_A_CAR", -1, 0},
+    {"IS_CHAR_IN_ANY_CAR", -1, 0}, {"IS_CHAR_SITTING_IN_CAR", 1, 0}, {"REMOVE_ALL_CHAR_WEAPONS", -1, 0},
+    {"SET_CHAR_ACCURACY", -1, 0}, {"SET_CHAR_COLLISION", -1, 0}, {"SET_CHAR_COORDINATES", -1, 0},
+    {"SET_CHAR_HEALTH", -1, 0}, {"SET_CHAR_INVINCIBLE", -1, 0}, {"SET_CHAR_KEEP_TASK", -1, 0},
+    {"SET_CHAR_PROOFS", -1, 0}, {"SET_CHAR_VISIBLE", -1, 0}, {"SET_CHAR_WILL_DO_DRIVEBYS", -1, 0},
+    {"SET_CHAR_HEADING", -1, 0}, {"TASK_COMBAT", -1, 0}, {"TASK_HELI_MISSION", 1, 0},
+    {"TASK_LEAVE_CAR_IMMEDIATELY", 1, 0}, {"WARP_CHAR_INTO_CAR", 1, 0},
+    {"WARP_CHAR_INTO_CAR_AS_PASSENGER", 1, 0}, {"DELETE_CHAR", -1, 0, true},
+    {"MARK_CHAR_AS_NO_LONGER_NEEDED", -1, 0, true},
+};
+
+// Whether the call must not go ahead: a handle in it the game no longer has.
+bool StaleHandleCall(uint8_t* base, std::string_view name, std::initializer_list<uint32_t> values,
+                     uint32_t result_seed) {
+  for (const HandleUse& use : kHandleUses) {
+    if (use.name != name)
+      continue;
+    auto arg = [&](int i) -> std::optional<uint32_t> {
+      if (i < 0)
+        return std::nullopt;
+      if (use.seeded && i == 0)
+        return result_seed;
+      if (size_t(i) >= values.size())
+        return std::nullopt;
+      return *(values.begin() + i);
+    };
+    bool gone = false;
+    if (const auto v = arg(use.vehicle))
+      gone |= HandleGone(base, kVehiclePoolPtr, *v);
+    if (const auto p = arg(use.ped))
+      gone |= HandleGone(base, kPedPoolPtr, *p);
+    if (gone) {
+      static std::atomic<uint32_t> logged{0};
+      if (logged.fetch_add(1, std::memory_order_relaxed) < 24)
+        REXLOG_INFO("gta4-trainer: {} not called: its {} handle is gone (cleared away by the game)", name,
+                    use.vehicle >= 0 ? "vehicle" : "ped");
+    }
+    return gone;
+  }
+  return false;
+}
+
 std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::string_view name,
                                    std::initializer_list<uint32_t> values = {},
                                    int output_argument = -1, uint32_t result_seed = 0,
                                    int output_count = 1, int text_argument = -1,
                                    std::string_view text = {}, int output_word = 0) {
+  if (StaleHandleCall(base, name, values, result_seed)) {
+    // A vehicle or ped that is gone is dead as far as anyone asking goes.
+    if (name == "IS_CAR_DEAD" || name == "IS_CHAR_DEAD" || name == "IS_CHAR_INJURED") {
+      InvokeResult dead;
+      dead.words[0] = 1;
+      return dead;
+    }
+    return std::nullopt;
+  }
   const uint32_t address = NativeAddress(name);
   auto* runtime = rex::Runtime::instance();
   auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
@@ -863,7 +961,7 @@ enum class Action {
   kToggleRain, kToggleGravity,
   kToggleGod, kToggleNeverWanted, kWantedUp, kWantedDown, kWantedApply,
   kMoney, kHeal,
-  kToggleVehicleGod, kRepair, kToggleWarpIn, kToggleGadgets, kToggleJet,
+  kToggleVehicleGod, kRepair, kToggleWarpIn, kToggleGadgets, kToggleJet, kToggleJetExpert,
   kTogglePopupAuto, kToggleAnyRide, kToggleCarLights,
   kSpawnVehicle, kTeleportWaypoint, kTeleportPreset, kSavePosition, kLoadPosition,
   kHourUp, kHourDown, kMinuteUp, kMinuteDown, kTimeApply,
@@ -912,6 +1010,7 @@ struct State {
   bool god = false, never_wanted = false, vehicle_god = false, warp_in = false;
   bool gadgets = false;
   bool jet = true;  // F-16 flight and weapons, active only in the jet
+  bool jet_expert = false;  // the jets' controls: Standard (Ace Combat's, assisted) or Expert (GTA V's)
   bool raining = false, gravity_off = false;
   bool any_ride = false;     // Bring Your Own Ride: missions take the player's vehicle
   bool jet_route = false;    // the jet's autopilot asked (menu) to fly to the airport and land
@@ -957,9 +1056,15 @@ struct DrawModel {
   bool open = false;
   std::string title, footer, toast;
   std::vector<DrawLine> lines;
+  // v1.7.24's glass panel switcher: the sections as tabs (L1/R1), which one
+  // is shown, which way the last switch went (the slide), the list's place
+  int tab = 0, page_serial = 0, slide = 0;
+  std::vector<std::string> tabs;
+  int first = 0, total = 0;  // the window's first row and the page's rows
 };
 DrawModel g_draw;
 std::atomic<bool> g_input_owned{false};
+std::atomic<bool> g_menu_visible{false};  // the menu or a toast on screen (animated: drawn every frame)
 
 // Menu selections cross from the input poll to the script stage here. Both
 // run on the game's main thread, so plain containers suffice; the atomics
@@ -970,6 +1075,8 @@ struct PendingItem {
 };
 std::vector<PendingItem> g_pending;
 std::atomic<uint16_t> g_gadget_buttons{0}, g_gadget_previous{0};
+// When Y last went down (the jets' quick way in looks between its probes).
+std::atomic<uint64_t> g_y_down_at{0};
 // The full pad for the F-16's controls (sticks and triggers), sampled by
 // the input poll while the menu is shut; zero while it is open.
 struct DrivePad {
@@ -1039,6 +1146,26 @@ bool WantsWork(const State& s) {
          g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || s.car_lights;
 }
 
+// The sections the menu's tab strip shows, L1/R1 going through them.
+constexpr std::array<std::pair<Page, const char*>, 9> kTabs = {{{Page::kMain, "HOME"},
+                                                                {Page::kPlayer, "PLAYER"},
+                                                                {Page::kVehicle, "VEHICLES"},
+                                                                {Page::kSpawn, "SPAWN"},
+                                                                {Page::kTeleport, "TELEPORT"},
+                                                                {Page::kWorld, "WORLD"},
+                                                                {Page::kWeapons, "WEAPONS"},
+                                                                {Page::kChaos, "CHAOS"},
+                                                                {Page::kTimeMachine, "DELOREAN"}}};
+int TabOf(Page page) {
+  if (page == Page::kSpawnStandard)
+    return 3;
+  for (size_t i = 0; i < kTabs.size(); ++i)
+    if (kTabs[i].first == page)
+      return int(i);
+  return 0;  // (Menu Status: under Home)
+}
+std::atomic<int> g_page_serial{0}, g_page_slide{0};
+
 std::vector<Item> PageItems(const State& s) {
   std::vector<Item> items;
   switch (s.page) {
@@ -1074,6 +1201,9 @@ std::vector<Item> PageItems(const State& s) {
                 Action::kToggleGadgets},
                {s.jet ? "Jet Flight and Weapons (F-16, Batwing): ON" : "Jet Flight and Weapons (F-16, Batwing): OFF",
                 Action::kToggleJet},
+               {s.jet_expert ? "Jet Controls: Expert (roll and pull, like GTA V)"
+                             : "Jet Controls: Standard (bank to turn, like Ace Combat)",
+                Action::kToggleJetExpert},
                {s.popup_auto ? "Deimos/Nexus Pop-ups: Automatic (with the lights)"
                              : "Deimos/Nexus Pop-ups: D-pad Left",
                 Action::kTogglePopupAuto},
@@ -2280,8 +2410,12 @@ void FinishSpawn(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
                 "fragment {:08X}, structure {:08X})",
                 model, check.problem, check.info, check.vtable, check.fragment, check.structure);
     ReportModel(base, model, s.pending_hash, check);
-    give_up(std::string(choice.label) +
-            " did not load properly, so it was not spawned (details in the log).");
+    if (gta4::addons::ShadowsSkippedThisLaunch())
+      give_up("Add-on cars are off for this launch (the last two launches closed before the city "
+              "loaded). Restart the game to turn them back on.");
+    else
+      give_up(std::string(choice.label) +
+              " did not load properly, so it was not spawned (details in the log).");
     return;
   }
   if (!s.pending_ready_since) {
@@ -2422,6 +2556,12 @@ struct JetState {
   float last_pos[3]{};
   bool have_last_pos = false, vr_told = false, runway_checked = false;
   uint64_t ap_pressed_at = 0, next_stall_warn = 0;
+  // v1.7.24's takeoff roll: its own speed, whether its height on its wheels
+  // is known, what the log is told about the roll
+  float roll_v = 0.0f;
+  bool rest_known = false;
+  int roll_logs = 0;
+  uint64_t next_roll_log = 0;
 };
 JetState g_jet;
 // Flight, after GTA V's jets: the engine's thrust (the throttle, the
@@ -2595,10 +2735,21 @@ std::optional<float> GroundZ(PPCContext& ctx, uint8_t* base, float x, float y, f
   return gz;
 }
 
+// The menu's weapons' blasts have no culprit in the game (ADD_EXPLOSION
+// takes none), so the police never minded the Lazar's cannon or the jets'
+// missiles. Each blast the player sets off adds heat, and the heat raises
+// the wanted level the way the game's own crimes do: two stars at once,
+// three after a few more blasts, four for a rampage; it cools off by one
+// every 15 seconds. Never Wanted keeps it off.
+float g_heat_pending = 0.0f, g_heat = 0.0f;
+uint64_t g_heat_ms = 0;
+void AddHeat(float weight) { g_heat_pending += weight; }
+
 void Explode(PPCContext& ctx, uint8_t* base, const float p[3], float radius) {
   // type 2 (rocket), audible, visible, normal camera shake
   Invoke(ctx, base, "ADD_EXPLOSION",
          {Bits(p[0]), Bits(p[1]), Bits(p[2]), 2, Bits(radius), 1, 0, Bits(1.0f)});
+  AddHeat(1.0f);
 }
 
 void DeleteObject(PPCContext& ctx, uint8_t* base, uint32_t& object) {
@@ -3985,6 +4136,7 @@ struct CanopyState {
   // one climbing out, hidden until he is out and set down beside.
   uint32_t rider = 0, seated = 0, leaver = 0;
   uint64_t leaver_since = 0, next_rider_look = 0;
+  uint64_t y_seen = 0;  // the last Y press the quick way in has acted on
   int rider_log = 0;
 };
 struct CanopySpec {
@@ -4002,25 +4154,31 @@ struct CanopySpec {
   std::string_view bone2 = {};
   float degrees2 = 0.0f;
   void (*sound)(bool opening) = nullptr;
+  // Y within a few metres opens it at once and puts the player in (the
+  // jets: the game's walk to a door high up the Batwing's side took ages).
+  bool quick_entry = false;
 };
 constexpr CanopySpec kBatCanopy{"BATMOBILE", "Batmobile", "interiorlight", 60.0f, 0.45f, 0.7f,
                                 {-2.1f, 0.2f, 0.0f}, kPoseBatmobile, 0, true, true};
-constexpr CanopySpec kJetCanopy{"F16", "F-16", "interiorlight", 38.0f, 0.9f, 1.2f,
-                                {-2.3f, 4.3f, 0.0f}, kPoseF16, 3, true, false};
+constexpr CanopySpec kJetCanopy{"F16", "F-16", "interiorlight", 38.0f, 0.75f, 1.0f,
+                                {-2.3f, 4.3f, 0.0f}, kPoseF16, 3, true, false, 0, {}, 0.0f, nullptr, true};
 // The Batwing's canopy: cut out of its one-piece body by the converter
 // (from the rear of its side windows forward, above the sills) and hung on
 // interiorlight at its rear edge; it opens 40 degrees on its own actuator.
 void BatwingCanopySound(bool opening);  // (with the jet's sounds)
-constexpr CanopySpec kBatwingCanopy{"BATWING", "Batwing", "interiorlight", 40.0f, 1.1f, 1.3f, {-3.0f, -0.4f, 0.0f},
-                                    kPoseBatwing, 3, true, true, 0, {}, 0.0f, BatwingCanopySound};
+constexpr CanopySpec kBatwingCanopy{"BATWING", "Batwing", "interiorlight", 40.0f, 0.8f, 1.1f, {-3.0f, -0.4f, 0.0f},
+                                    kPoseBatwing, 3, true, true, 0, {}, 0.0f, BatwingCanopySound, true};
 CanopyState g_canopy, g_jet_canopy, g_batwing_canopy;
 // The Lazar 3's side ramps (the PC model's doors, hinged at their bottom
 // edge, folding out and down: 105 degrees there): the player in and out on
 // the left, a passenger on the right, both ramps moving together on their
 // hydraulics, slower than a canopy.
 void LazarRampSound(bool opening);  // (with the Lazar's turret, below)
-constexpr CanopySpec kLazarRamps{"LAZAR3", "Lazar 3", "extra_6", -100.0f, 1.5f, 1.7f, {-3.0f, 0.75f, 0.0f},
-                                 kPoseLazar, 2, true, true, 1, "interiorlight", 100.0f, LazarRampSound};
+// v1.7.24: they open 40 degrees, not 100, and quicker: the model has no
+// inside, and the open ramps showed the hollow shell; Y beside it puts the
+// player in at once, as the jets.
+constexpr CanopySpec kLazarRamps{"LAZAR3", "Lazar 3", "extra_6", -40.0f, 0.8f, 0.9f, {-3.0f, 0.75f, 0.0f},
+                                 kPoseLazar, 2, true, true, 1, "interiorlight", 40.0f, LazarRampSound, true};
 CanopyState g_lazar_ramps;
 
 void CanopySound(bool opening);  // (the Batmobile's sound section, below)
@@ -4468,11 +4626,30 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
   c.in_car = false;
   if (vehicle.car)
     return 0;
-  // On foot: is the game starting to put the player into one?
-  const auto getting = Invoke(ctx, base, "IS_CHAR_GETTING_IN_TO_A_CAR", {game.ped});
-  if (!getting || !getting->r0())
-    return 0;
-  const auto target = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {game.ped, 0}, 1);
+  // On foot: Y by a jet puts the player in at once; otherwise, is the game
+  // starting to put the player into one?
+  std::optional<InvokeResult> target;
+  const uint64_t y_at = g_y_down_at.load(std::memory_order_relaxed);
+  if (spec.quick_entry && y_at > c.y_seen && now - y_at < 400 && !s.open) {
+    c.y_seen = y_at;
+    const auto near = Invoke(ctx, base, "GET_CLOSEST_CAR",
+                             {Bits(game.position[0]), Bits(game.position[1]), Bits(game.position[2]), Bits(7.0f), 0,
+                              70});
+    if (near && near->r0()) {
+      const auto m = Invoke(ctx, base, "GET_CAR_MODEL", {near->r0(), 0}, 1);
+      if (m && m->words[0] == model) {
+        InvokeResult t;
+        t.words[0] = near->r0();
+        target = t;
+      }
+    }
+  }
+  if (!target) {
+    const auto getting = Invoke(ctx, base, "IS_CHAR_GETTING_IN_TO_A_CAR", {game.ped});
+    if (!getting || !getting->r0())
+      return 0;
+    target = Invoke(ctx, base, "GET_CAR_CHAR_IS_USING", {game.ped, 0}, 1);
+  }
   if (!target || !target->words[0])
     return 0;
   const auto got = Invoke(ctx, base, "GET_CAR_MODEL", {target->words[0], 0}, 1);
@@ -4653,11 +4830,15 @@ void DoorSound(int car, DoorEvent event) {
 struct Shell {
   bool live = false, armed = false, physics = true;
   uint32_t object = 0;
+  uint32_t target = 0;  // the locked vehicle it homes on, or 0
   float origin[3]{}, start[3]{}, dir[3]{}, pos[3]{};
   float speed = 0.0f;
   uint64_t fired = 0;
   int frames = 0;
 };
+// The Lazar's lock-on: the jets' (JetLock, the HUD's marks), along its gun.
+JetState g_lazar_aim;
+void PublishLazarHud(bool on);
 struct LazarState {
   uint32_t car = 0, info = 0;
   bool in_car = false, model_requested = false;
@@ -4809,6 +4990,26 @@ std::optional<std::pair<float, float>> CameraAim(PPCContext& ctx, uint8_t* base,
 void ShellBurst(PPCContext& ctx, uint8_t* base, const float p[3]) {
   // type 0 (grenade): a shell's burst, smaller than the missiles'
   Invoke(ctx, base, "ADD_EXPLOSION", {Bits(p[0]), Bits(p[1]), Bits(p[2]), 0, Bits(0.9f), 1, 0, Bits(0.35f)});
+  AddHeat(0.7f);
+}
+
+void ApplyHeat(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
+  if (g_heat_ms)
+    g_heat = std::max(0.0f, g_heat - float(now - g_heat_ms) / 15000.0f);
+  g_heat_ms = now;
+  if (g_heat_pending <= 0.0f)
+    return;
+  g_heat += g_heat_pending;
+  g_heat_pending = 0.0f;
+  if (s.never_wanted || !game.player)
+    return;
+  const int stars = g_heat >= 8.0f ? 4 : g_heat >= 3.5f ? 3 : 2;
+  const auto above = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, uint32_t(stars - 1)});
+  if (!above || above->r0())
+    return;  // (already as wanted, or more)
+  Invoke(ctx, base, "ALTER_WANTED_LEVEL", {game.player, uint32_t(stars)});
+  Invoke(ctx, base, "APPLY_WANTED_LEVEL_CHANGE_NOW", {game.player, 0});
+  REXLOG_INFO("gta4-trainer: weapons' blasts: wanted level {} (heat {:.1f})", stars, g_heat);
 }
 
 void FireLazar(PPCContext& ctx, uint8_t* base, LazarState& z, State& s) {
@@ -4860,6 +5061,7 @@ void FireLazar(PPCContext& ctx, uint8_t* base, LazarState& z, State& s) {
       sh.origin[a] = sh.start[a] = sh.pos[a] = (*from)[a] + dir[a] * 1.5f;
     }
     sh.speed = kLazarShellSpeed;
+    sh.target = g_lazar_aim.lock.target;
     const auto obj =
         Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits(sh.pos[0]), Bits(sh.pos[1]), Bits(sh.pos[2]), 0, 1}, 4);
     if (obj && obj->words[0]) {
@@ -4900,6 +5102,41 @@ void UpdateShells(PPCContext& ctx, uint8_t* base, LazarState& z, float dt) {
         sh.physics = false;
         Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {sh.object, 1});
         Invoke(ctx, base, "SET_OBJECT_COLLISION", {sh.object, 0});
+      }
+    }
+    // Locked: it turns towards its target (up to 1.6 rad/s), its line
+    // starting again where it is.
+    if (sh.target && sh.frames > 2) {
+      if (const auto tp = TargetPosition(ctx, base, sh.target)) {
+        float want[3], len = 0;
+        for (int a = 0; a < 3; ++a) {
+          want[a] = (*tp)[a] + (a == 2 ? 0.6f : 0.0f) - sh.pos[a];
+          len += want[a] * want[a];
+        }
+        len = std::sqrt(len);
+        if (len > 1.0f) {
+          float dot = 0;
+          for (int a = 0; a < 3; ++a) {
+            want[a] /= len;
+            dot += want[a] * sh.dir[a];
+          }
+          const float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
+          const float k = angle > 1e-4f ? std::min(1.0f, 1.6f * dt / angle) : 1.0f;
+          float n = 0;
+          for (int a = 0; a < 3; ++a) {
+            sh.dir[a] += (want[a] - sh.dir[a]) * k;
+            n += sh.dir[a] * sh.dir[a];
+          }
+          n = std::sqrt(std::max(n, 1e-6f));
+          for (int a = 0; a < 3; ++a) {
+            sh.dir[a] /= n;
+            sh.start[a] = sh.pos[a];
+          }
+          if (sh.object)
+            PointObjectAlong(ctx, base, sh.object, sh.dir);
+        }
+      } else {
+        sh.target = 0;  // (gone)
       }
     }
     if (sh.physics) {
@@ -4968,8 +5205,12 @@ uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   static const uint32_t kModel = ModelHash("LAZAR3");
   const auto& vehicle = PlayerVehicle(ctx, base, game);
   if (!vehicle.car || vehicle.model != kModel) {
-    if (z.in_car)
+    if (z.in_car) {
       LazarServoSound(0.0f);
+      DropLock(ctx, base, g_lazar_aim.lock);
+      g_jet_marks.clear();
+      PublishLazarHud(false);
+    }
     if (z.model_requested && !LazarShellsLive()) {
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
       z.model_requested = false;
@@ -5016,11 +5257,42 @@ uint32_t LazarTurret(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     z.posed_pitch = z.pitch;
     z.next_pose = now + 500;
   }
+  // Targets along the gun (the jets' lock-on: dots, the nearest to the
+  // line locks in 0.6 s, d-pad up picks the next); its shells home on the lock.
+  uint32_t kept = X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  {
+    float muzzle[3], line[3], ahead[3];
+    LazarGunLine(z, muzzle, line);
+    for (int a = 0; a < 3; ++a)
+      ahead[a] = muzzle[a] + line[a] * 100.0f;
+    const auto from = CarPoint(ctx, base, z.car, muzzle), far_point = CarPoint(ctx, base, z.car, ahead);
+    if (from && far_point) {
+      float fwd[3], len = 0;
+      for (int a = 0; a < 3; ++a) {
+        fwd[a] = (*far_point)[a] - (*from)[a];
+        len += fwd[a] * fwd[a];
+      }
+      len = std::sqrt(len);
+      if (len > 1.0f) {
+        for (auto& c : fwd)
+          c /= len;
+        g_lazar_aim.car = z.car;
+        const bool cycle = (buttons & X_INPUT_GAMEPAD_DPAD_UP) && !(g_lazar_aim.prev_buttons & X_INPUT_GAMEPAD_DPAD_UP) &&
+                           !s.open;
+        UpdateLock(ctx, base, g_lazar_aim, s, from->data(), fwd, now, cycle);
+        const float probe[3] = {(*from)[0] + fwd[0] * 60.0f, (*from)[1] + fwd[1] * 60.0f, (*from)[2] + fwd[2] * 60.0f};
+        BuildMarks(ctx, base, g_lazar_aim, probe, now);
+        PublishLazarHud(true);
+        kept |= X_INPUT_GAMEPAD_DPAD_UP;
+      }
+    }
+  }
+  g_lazar_aim.prev_buttons = buttons;
   if ((buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) && now >= z.next_shot && !s.open) {
     z.next_shot = now + kLazarShotMs;
     FireLazar(ctx, base, z, s);
   }
-  return X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -5151,8 +5423,17 @@ struct TimeMachineState {
   bool hover = false, landing = false, swap_pending = false, models_requested = false;
   float altitude = 0.0f, heading = 0.0f, fwd = 0.0f, climb = 0.0f, bank = 0.0f, pitch = 0.0f;
   int hover_log = 0;
+  // v1.7.24: a floor it has met (where it took off from, or where the
+  // physics pushed it back up coming down), good within a few metres: the
+  // ground probe misses some surfaces (a car park's deck read 14.7 m too
+  // low), and the car, placed lower each frame, went through them.
+  float floor_z = -1e9f, floor_x = 0.0f, floor_y = 0.0f;
+  float placed_z = 0.0f, placed_vz = 0.0f, landing_for = 0.0f;
+  bool placed = false;
+  int floor_log = 0;
 };
 TimeMachineState g_tm;
+constexpr float kTmContact = 0.55f;  // its origin over the road on its wheels (the rear patches' depth)
 std::atomic<bool> g_tm_in_car{false};
 
 // What the screen shows (the TCD, the flash), published for the overlay.
@@ -5530,6 +5811,25 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
       if (!gz || *g2 > *gz)
         gz = g2;
   }
+  // Coming down, pushed back up by the physics: something solid is there
+  // (the probe missed it): a floor, from here.
+  // (what its speed along a pitched nose moved it, allowed for)
+  if (m.placed && m.climb < -0.5f && (*c)[2] > m.placed_z + m.placed_vz * dt + 0.04f) {
+    m.floor_z = (*c)[2] - kTmContact;
+    m.floor_x = (*c)[0];
+    m.floor_y = (*c)[1];
+    if (m.floor_log < 4) {
+      ++m.floor_log;
+      REXLOG_INFO("gta4-trainer: time machine: something solid under it at {:.1f} (the probe's ground {:.1f})",
+                  m.floor_z, gz ? *gz : -999.0f);
+    }
+  }
+  // The floor it met counts within 6 m of where it met it.
+  {
+    const float dx = (*c)[0] - m.floor_x, dy = (*c)[1] - m.floor_y;
+    if (m.floor_z > -1e8f && dx * dx + dy * dy < 36.0f && (!gz || m.floor_z > *gz))
+      gz = m.floor_z;
+  }
   constexpr float kHoverClear = 1.2f;
   if (gz && z < *gz + kHoverClear) {
     z = *gz + kHoverClear;
@@ -5542,6 +5842,14 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
   const Quat q = QNormalize(QMul(QMul(QAxis(0, 0, 1, m.heading), QAxis(1, 0, 0, m.pitch)), QAxis(0, 1, 0, m.bank)));
   Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {m.car, Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
   PlaceCar(ctx, base, m.car, (*c)[0], (*c)[1], z);
+  m.placed = true;
+  m.placed_z = z;
+  {
+    const float nose[3] = {0.0f, 1.0f, 0.0f};
+    float f[3];
+    QRotate(q, nose, f);
+    m.placed_vz = m.fwd * f[2];
+  }
   Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {m.car, Bits(m.fwd)});
   g_tm_synth.SetHover(0.35f + 0.45f * std::min(1.0f, std::fabs(m.fwd) / 40.0f) + 0.2f * std::fabs(up));
   if (m.hover_log < 4 && dt > 0.0f) {
@@ -5674,6 +5982,13 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         m.landing = false;
         m.fwd = speed;
         m.climb = 3.0f;  // up off the road
+        m.placed = false;
+        m.landing_for = 0.0f;
+        if (const auto at = CarPosition(ctx, base, m.car)) {  // the road it is on: a floor
+          m.floor_z = (*at)[2] - kTmContact;
+          m.floor_x = (*at)[0];
+          m.floor_y = (*at)[1];
+        }
         m.pitch = m.bank = 0.0f;
         m.stalled_for = 0.0f;
         if (const auto h = Invoke(ctx, base, "GET_CAR_HEADING", {m.car, 0}, 1))
@@ -5682,6 +5997,11 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         Toast(s, "Flight mode: left stick to fly, R2 up, L2 down. D-pad right lands.", 3500);
       } else if (!m.landing) {
         m.landing = true;
+        m.landing_for = 0.0f;
+        if (m.hover_form && !legacy_form) {  // the wheels come down as it descends
+          m.hover_form = false;
+          g_tm_synth.Convert(false);
+        }
         Toast(s, "Landing...", 1500);
       }
     }
@@ -5697,7 +6017,11 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       m.hover_form = false;
       g_tm_synth.Convert(false);
     }
-    if (m.landing && (m.altitude < 1.5f || m.stalled_for > 0.6f)) {
+    if (m.landing)
+      m.landing_for += dt;
+    // (10 s coming down and still no ground: the physics takes it the rest of
+    // the way, which no surface lets through)
+    if (m.landing && (m.altitude < 1.5f || m.stalled_for > 0.6f || m.landing_for > 10.0f)) {
       if (legacy_form && !SwapForm(ctx, base, game, m, false, s)) {
         if (m.landing_log < 3) {
           ++m.landing_log;
@@ -5842,6 +6166,7 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
 // is locking, red once locked), as GTA V's jets show them.
 struct JetHudModel {
   bool visible = false;
+  bool marks_only = false;  // the Lazar 3: its targets' marks, no flight panel
   std::string label, autopilot;
   float kmh = 0, height = 0, throttle = 0, g = 1;
   bool burner = false, airbrake = false, on_ground = true, stalled = false, has_gear = true, weapons = true;
@@ -5896,6 +6221,20 @@ void PublishJetHud(const JetState& j, const State& s, float ground_speed, float 
     g_hud = std::move(m);
   }
   g_hud_active.store(s.jet, std::memory_order_relaxed);
+}
+
+// The Lazar's: its targets' marks alone.
+void PublishLazarHud(bool on) {
+  JetHudModel m;
+  m.visible = on;
+  m.marks_only = true;
+  if (on)
+    m.marks = g_jet_marks;
+  {
+    std::lock_guard lock(g_hud_mutex);
+    g_hud = std::move(m);
+  }
+  g_hud_active.store(on, std::memory_order_relaxed);
 }
 
 // Police helicopters after the jet. Wanted, in the air in it, two police
@@ -6108,8 +6447,10 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     j.r3_held = false;
     j.entered_at = now;
     j.spool_logged = j.ready_told = false;
-    j.pull_logs = j.flight_logs = 0;
-    j.next_pull_log = j.next_flight_log = 0;
+    j.pull_logs = j.flight_logs = j.roll_logs = 0;
+    j.next_pull_log = j.next_flight_log = j.next_roll_log = 0;
+    j.rest_known = false;
+    j.roll_v = 0.0f;
     REXLOG_INFO("gta4-trainer: {}: player in the aircraft; flight and weapons {}", std::string(spec->label),
                 s.jet ? "on" : "off (the menu)");
   }
@@ -6121,11 +6462,15 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   if (!j.announced) {
     j.announced = true;
     const std::string label(g_jet_spec->label);
-    Toast(s, s.jet ? label + ": hold RT till the engines are at full power, pull back to take off. LT air brake "
-                             "(and wheel brakes), LB/RB rudder" + std::string(g_jet_spec->gear ? ", R3 gear" : "") +
-                             ". D-pad: right cannon, left missile, up next target, down autopilot (hold: land)."
+    const int vr_kmh = int(g_jet_spec->flight->rotate * 3.6f + 0.5f);
+    Toast(s, s.jet ? label + ": RT throttle (full: afterburner), LT brakes. Past " + std::to_string(vr_kmh) +
+                         " km/h pull back to take off. " +
+                         (s.jet_expert ? std::string("Expert: the stick rolls and pulls")
+                                       : std::string("Left stick: up/down pitch, left/right bank and turn")) +
+                         "; LB/RB rudder" + std::string(g_jet_spec->gear ? ", R3 gear" : "") +
+                         ". D-pad: right cannon, left missile, up next target, down autopilot (hold: land)."
                    : label + ": flight and weapons are off: Vehicle Options > Jet Flight and Weapons.",
-          8000);
+          9000);
   }
   namespace fl = gta4::flight;
   const fl::Params& P = *g_jet_spec->flight;
@@ -6192,48 +6537,79 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     if (!j.flying) {
       // ---- On its wheels: its own thrust and brakes move it (the game's
       // handling only at walking pace and in reverse), and it leaves the
-      // ground pulled back at its rotate speed (10% over the stall).
+      // ground pulled back at its rotate speed.
       const float vr = fl::RotateSpeed(P, gear_down);
       const bool pulled = ly < -0.35f;
-      if (!j.vr_told && ground_speed >= vr && throttle > 0.3f) {
+      // Its height standing on its wheels (the touchdown's and these
+      // checks'): taken standing still, and never above what rolling shows.
+      if (!j.rest_known || (ground_speed < 0.5f && clearance < 4.0f)) {
+        if (clearance < 4.0f) {
+          j.rest_clearance = std::clamp(clearance, 0.3f, 3.0f);
+          j.rest_known = true;
+        }
+      } else if (clearance < j.rest_clearance) {
+        j.rest_clearance = std::max(clearance, 0.3f);
+      }
+      const bool grounded = clearance < j.rest_clearance + 0.35f;
+      // The roll's own speed. Read back from the game each frame, the game's
+      // drag and wheels took a share of every push, and v1.7.22's jets never
+      // reached their rotate speed; the game's only wins when something
+      // stops the jet (a wall, a car) or nothing is pushing it.
+      if (std::fabs(forward_speed - j.roll_v) > 4.0f && forward_speed < j.roll_v)
+        j.roll_v = std::max(forward_speed, 0.0f);
+      const float roll_v = j.roll_v;
+      if (!j.vr_told && roll_v >= vr && throttle > 0.3f) {
         j.vr_told = true;
         Toast(s, label + ": rotate speed. Pull back to take off.", 1500);
       }
-      if (ground_speed < vr * 0.8f)
+      if (roll_v < vr * 0.8f)
         j.vr_told = false;
       if (!j.spool_logged && throttle > 0.85f && rpm > kFullPower) {
         j.spool_logged = true;
         REXLOG_INFO("gta4-trainer: {} engines at full power {} ms after getting in", label, now - j.entered_at);
       }
-      if (pulled && ground_speed < vr && j.pull_logs < 6 && now >= j.next_pull_log && throttle > 0.2f) {
+      if (pulled && roll_v < vr && j.pull_logs < 6 && now >= j.next_pull_log && throttle > 0.2f) {
         ++j.pull_logs;
         j.next_pull_log = now + 2500;
-        Toast(s, fmt::format("{}: {:.0f} km/h; it lifts off at {:.0f}.", label, ground_speed * 3.6f, vr * 3.6f), 1500);
+        Toast(s, fmt::format("{}: {:.0f} km/h; it lifts off at {:.0f}.", label, roll_v * 3.6f, vr * 3.6f), 1500);
       }
-      if (pulled && ground_speed >= vr) {
+      if (throttle > 0.3f && j.roll_logs < 12 && now >= j.next_roll_log) {
+        ++j.roll_logs;
+        j.next_roll_log = now + 1500;
+        REXLOG_INFO("gta4-trainer: {} rolling: {:.1f} m/s (the game's {:.1f}), {:.2f} m over the ground (on its "
+                    "wheels {:.2f}), throttle {:.2f}",
+                    label, roll_v, forward_speed, clearance, j.rest_clearance, throttle);
+      }
+      // Off the ground on its own and fast (a bump, a ramp, a nose-high
+      // stance): it flies, rather than being pushed along its nose in the
+      // air (the Batwing floated off that way in v1.7.23).
+      const bool lifted = clearance > j.rest_clearance + 0.8f && std::max(ground_speed, roll_v) > 0.75f * vr;
+      if ((pulled && roll_v >= vr) || lifted) {
         const auto q = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {*car, 0, 0, 0, 0}, 1, 0, 4);
         if (q && NativeKnown("SET_VEHICLE_QUATERNION")) {
           j.fs = fl::State{};
           j.fs.q = fl::Norm({q->f(0), q->f(1), q->f(2), q->f(3)});
-          j.fs.speed = ground_speed;
+          j.fs.speed = std::max(roll_v, ground_speed);
           j.flying = true;
           j.pilot.mode = fl::Mode::kOff;
-          j.rest_clearance = std::clamp(clearance, 0.3f, 3.0f);
           j.climbed = false;
           j.airborne_at = now;
           j.blocked_since = 0;
           j.flight_logs = 0;
           j.next_flight_log = now + 1000;
-          REXLOG_INFO("gta4-trainer: {} airborne at {:.1f} m/s (rotate speed {:.1f}, gear {}, {:.2f} m over the ground "
-                      "on its wheels)",
-                      label, ground_speed, vr, gear_down ? "down" : "up", clearance);
+          REXLOG_INFO("gta4-trainer: {} airborne at {:.1f} m/s ({}; rotate speed {:.1f}, gear {}, {:.2f} m over the "
+                      "ground, {:.2f} on its wheels)",
+                      label, j.fs.speed, lifted ? "off the ground on its own" : "pulled back", vr,
+                      gear_down ? "down" : "up", clearance, j.rest_clearance);
         }
       } else {
         const float brake = std::max(airbrake, j.pilot.brakes ? 1.0f : 0.0f);
-        const bool drive = forward_speed > 2.0f || (throttle > 0.08f && forward_speed > -0.5f);
+        const bool drive = grounded && (forward_speed > 2.0f || (throttle > 0.08f && forward_speed > -0.5f));
         if (drive) {
-          const float next = fl::Roll(P, std::max(forward_speed, 0.0f), throttle, eff_burner, brake, gear_down, dt);
-          Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {*car, Bits(next)});
+          j.roll_v = fl::Roll(P, roll_v, throttle, eff_burner, brake, gear_down, dt);
+          Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {*car, Bits(j.roll_v)});
+        } else {
+          j.roll_v = std::max(forward_speed, 0.0f);  // (the game's own: coasting, reversing, in the air)
         }
         if (j.pilot.mode != fl::Mode::kOff && ground_speed < 1.0f) {
           j.pilot.mode = fl::Mode::kOff;
@@ -6323,6 +6699,7 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         in.pitch = -ly;
         in.roll = lx;
         in.yaw = rudder;
+        in.assist = !s.jet_expert;
         in.throttle = throttle;
         in.airbrake = airbrake;
         in.burner = eff_burner;
@@ -6365,6 +6742,7 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
           const Quat level = QAxis(0, 0, 1, a.yaw);
           Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {*car, Bits(level.x), Bits(level.y), Bits(level.z), Bits(level.w)});
           Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {*car, Bits(j.fs.speed)});
+          j.roll_v = j.fs.speed;
           if (j.pilot.mode == fl::Mode::kLand || j.pilot.mode == fl::Mode::kRoute) {
             j.pilot.phase = fl::Phase::kRollout;
             j.pilot.brakes = true;
@@ -6379,6 +6757,7 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         } else {
           j.pilot.mode = fl::Mode::kOff;
           Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {*car, Bits(ground_speed)});
+          j.roll_v = ground_speed;
           Toast(s, label + ": crashed.", 1500);
         }
         REXLOG_INFO("gta4-trainer: {} {} at {:.1f} m/s, sinking {:.1f} m/s, {:.0f} degrees ({:.2f} m over the ground)",
@@ -6633,6 +7012,12 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       s.jet = !s.jet;
       Toast(s, s.jet ? "Jet flight and weapons on (F-16, Batwing)." : "Jet flight and weapons off.");
       break;
+    case Action::kToggleJetExpert:
+      s.jet_expert = !s.jet_expert;
+      Toast(s, s.jet_expert ? "Expert controls: the stick rolls and pulls; banked, pull back to turn."
+                            : "Standard controls: left and right bank and turn; let go and the wings level.",
+            3000);
+      break;
     case Action::kSpawnVehicle:
       StartSpawn(s, item.index, ctx, base);
       break;
@@ -6761,7 +7146,7 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
     model.toast = s.toast;
   if (s.open) {
     switch (s.page) {
-      case Page::kMain: model.title = "LIBERTYRECOMP MENU"; break;
+      case Page::kMain: model.title = "HOME"; break;
       case Page::kPlayer: model.title = "PLAYER OPTIONS"; break;
       case Page::kVehicle: model.title = "VEHICLE OPTIONS"; break;
       case Page::kSpawn: model.title = "CAR SPAWNING"; break;
@@ -6785,10 +7170,12 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
     } else {
       const auto items = PageItems(s);
       // A windowed view keeps long lists (car spawning) on screen.
-      constexpr int kWindow = 14;
+      constexpr int kWindow = 12;
       int top = 0;
       if (int(items.size()) > kWindow)
         top = std::clamp(s.selected - kWindow / 2, 0, int(items.size()) - kWindow);
+      model.first = top;
+      model.total = int(items.size());
       for (int i = top; i < int(items.size()) && i < top + kWindow; ++i) {
         std::string text{items[size_t(i)].label};
         if (s.page == Page::kPlayer && items[size_t(i)].action == Action::kWantedApply)
@@ -6812,7 +7199,13 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
       model.footer = s.page == Page::kMain ? "X select    O close    L3+R3 open/close"
                                            : "X select    O back    < > change";
     }
+    model.tab = TabOf(s.page);
+    for (const auto& t : kTabs)
+      model.tabs.emplace_back(t.second);
+    model.page_serial = g_page_serial.load(std::memory_order_relaxed);
+    model.slide = g_page_slide.load(std::memory_order_relaxed);
   }
+  g_menu_visible.store(model.open || !model.toast.empty(), std::memory_order_relaxed);
   std::lock_guard lock(g_draw_mutex);
   g_draw = std::move(model);
 }
@@ -6962,6 +7355,7 @@ void PollMenu(PPCContext& ctx, uint8_t* base) {
   g_pad_adjust.store(adjust, std::memory_order_relaxed);
 
   if (s.open) {
+    const Page page_before = s.page;
     const auto items = PageItems(s);
     const int count = int(items.size());
     if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_DPAD_UP, now, true) && count)
@@ -6972,6 +7366,17 @@ void PollMenu(PPCContext& ctx, uint8_t* base) {
       Adjust(s, -1);
     if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_DPAD_RIGHT, now, true))
       Adjust(s, 1);
+    // L1/R1: the next section along the tab strip (the panel slides over).
+    const bool l1 = g_pad.Pressed(buttons, X_INPUT_GAMEPAD_LEFT_SHOULDER, now, true);
+    const bool r1 = g_pad.Pressed(buttons, X_INPUT_GAMEPAD_RIGHT_SHOULDER, now, true);
+    if (l1 != r1) {
+      const int n = int(kTabs.size());
+      const int tab = (TabOf(s.page) + (r1 ? 1 : n - 1)) % n;
+      s.page = kTabs[size_t(tab)].first;
+      s.selected = 0;
+      g_page_serial.fetch_add(1, std::memory_order_relaxed);
+      g_page_slide.store(r1 ? 1 : -1, std::memory_order_relaxed);
+    }
     if (g_pad.Pressed(buttons, X_INPUT_GAMEPAD_A, now) && s.selected < count) {
       const Item& item = items[size_t(s.selected)];
       switch (item.action) {
@@ -7001,15 +7406,22 @@ void PollMenu(PPCContext& ctx, uint8_t* base) {
         s.selected = 0;
       }
     }
+    // (into a page or back out: the panel's contents rise into place)
+    if (s.page != page_before && l1 == r1) {
+      g_page_serial.fetch_add(1, std::memory_order_relaxed);
+      g_page_slide.store(0, std::memory_order_relaxed);
+    }
     // No gadget input while the menu owns the pad.
     g_gadget_buttons.store(0, std::memory_order_relaxed);
     g_gadget_previous.store(0, std::memory_order_relaxed);
     std::lock_guard lock(g_drive_mutex);
     g_drive_previous = g_drive_pad = DrivePad{};
   } else {
-    g_gadget_previous.store(g_gadget_buttons.load(std::memory_order_relaxed),
-                            std::memory_order_relaxed);
+    const uint16_t was = g_gadget_buttons.load(std::memory_order_relaxed);
+    g_gadget_previous.store(was, std::memory_order_relaxed);
     g_gadget_buttons.store(buttons, std::memory_order_relaxed);
+    if ((buttons & X_INPUT_GAMEPAD_Y) && !(was & X_INPUT_GAMEPAD_Y))
+      g_y_down_at.store(now, std::memory_order_relaxed);
     std::lock_guard lock(g_drive_mutex);
     g_drive_previous = g_drive_pad;
     g_drive_pad = DrivePad{buttons, pad.gamepad.left_trigger, pad.gamepad.right_trigger,
@@ -7117,8 +7529,15 @@ struct PerfLevel {
   float population, distance;
   const char* env_interval;
 };
-constexpr std::array<PerfLevel, 5> kPerfLevels = {
-    {{1.0f, 1.0f, nullptr}, {0.85f, 1.0f, "2"}, {0.75f, 0.9f, "2"}, {0.65f, 0.8f, "2"}, {0.6f, 0.72f, "2"}}};
+// (v1.7.24: two more steps, for the places the game's own work stays over
+// a frame at the fourth: the airport with a jet, log 083's 19 ms main thread)
+constexpr std::array<PerfLevel, 7> kPerfLevels = {{{1.0f, 1.0f, nullptr},
+                                                   {0.85f, 1.0f, "2"},
+                                                   {0.75f, 0.9f, "2"},
+                                                   {0.65f, 0.8f, "2"},
+                                                   {0.6f, 0.72f, "2"},
+                                                   {0.5f, 0.66f, "3"},
+                                                   {0.42f, 0.6f, "3"}}};
 
 double ParseOr(const std::string& text, double fallback) {
   try {
@@ -7175,7 +7594,8 @@ void PerformanceMode(bool on) {
   }
 }
 // Once a frame while on: the frames over 17.6 ms in each second; over 12% of
-// them steps the trimming up (every 2 s at most), ten seconds under 2% steps it down.
+// them steps the trimming up (every 2 s at most; every second over 30%), ten
+// seconds under 2% steps it down.
 void PerformanceTick(State& s) {
   const uint64_t now_us = NowUs();
   const uint64_t last = g_perf.last_us;
@@ -7195,7 +7615,9 @@ void PerformanceTick(State& s) {
   const float fps = float(g_perf.frames) * 1e6f / float(g_perf.window_us);
   const uint64_t now = NowMs();
   int level = g_perf.level;
-  if (share > 0.12f && level < int(kPerfLevels.size()) - 1 && now - g_perf.last_change > 2000) {
+  // (a lot of long frames: a step a second; a few: one every two)
+  const uint64_t step_ms = share > 0.3f ? 1000 : 2000;
+  if (share > 0.12f && level < int(kPerfLevels.size()) - 1 && now - g_perf.last_change > step_ms) {
     ++level;
     g_perf.quiet = 0;
   } else if (share < 0.02f) {
@@ -7280,7 +7702,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
                               bttf1_engine_due || bttf2_engine_due || bttf3_engine_due;
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
-  if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
+  const bool heat_due = g_heat_pending > 0.0f;
+  if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due && !heat_due &&
       !jet_canopy_due && !batwing_canopy_due && !complete_due && !perf_due && !teleport_due && !any_engine_due &&
       s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
@@ -7311,8 +7734,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   if (!g_addons_probed) {
     g_addons_probed = true;
     if (gta4::addons::ShadowsSkippedThisLaunch())
-      Toast(s, "Add-on cars are off this launch: the last launch with them did not start. "
-               "Details in the log.", 8000);
+      Toast(s, "Add-on cars are off for this launch: the last two launches closed before the "
+               "city loaded. Restart the game to turn them back on.", 10000);
     auto installed = [&](std::string_view model) {
       const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {ModelHash(model)});
       return known && known->r0() != 0;
@@ -7458,6 +7881,7 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     FollowDoors(ctx, base, game);
   if (lights_due && CarLights(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed)))
     vehicle_mask |= X_INPUT_GAMEPAD_DPAD_LEFT;
+  ApplyHeat(ctx, base, game, s, now);
   g_vehicle_mask.store(vehicle_mask, std::memory_order_relaxed);
   SoundTick();
   if (rain_due)
@@ -7555,6 +7979,8 @@ void DrawJetHud(ImGuiIO& io) {
       }
     }
   }
+  if (m.marks_only)
+    return;
   // The panel.
   ImFont* font = ImGui::GetFont();
   const float fs = 22.0f * scale, small = 17.0f * scale, pad = 12.0f * scale;
@@ -7716,6 +8142,398 @@ void DrawTcd(ImGuiIO& io) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// v1.7.24: the menu as a glass panel switcher, after the user's own Ruffle5
+// (a bar of sections switched with L1/R1, glass cards, the focused row
+// lifted inside a ring with a light running round it, a row of button
+// hints), in Liberty's colours rather than Ruffle's blue and orange: the
+// Statue of Happiness's weathered copper green, and old gold for the light.
+// Drawn on the foreground list (ImGui has no blur: the glass is layered
+// tints, a sheen and a hairline edge).
+// ---------------------------------------------------------------------------
+namespace glass {
+struct Rgb {
+  int r, g, b;
+};
+constexpr Rgb kPatina{86, 214, 188}, kPatinaDeep{38, 128, 112}, kGold{238, 212, 140}, kInk{8, 22, 20},
+    kText{232, 242, 238}, kDim{140, 162, 158}, kGlassTop{22, 38, 37}, kGlassBottom{8, 14, 15};
+inline ImU32 C(Rgb c, float a) { return IM_COL32(c.r, c.g, c.b, int(std::clamp(a, 0.0f, 1.0f) * 255.0f + 0.5f)); }
+inline float Ease(float t) {
+  t = std::clamp(t, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+inline float Breathe(double t, float period) { return 0.5f - 0.5f * std::cos(float(t) * 6.2831853f / period); }
+
+// A soft shadow under a rounded box: widening, fading layers.
+void Shadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float r, float s, float alpha) {
+  for (int i = 7; i >= 1; --i) {
+    const float g = float(i) * 3.5f * s;
+    dl->AddRectFilled(ImVec2(a.x - g * 0.6f, a.y - g * 0.3f + 12.0f * s), ImVec2(b.x + g * 0.6f, b.y + g + 12.0f * s),
+                      IM_COL32(0, 0, 0, int(alpha * 26.0f)), r + g);
+  }
+}
+// A glow around a rounded box (the focused row's halo).
+void Glow(ImDrawList* dl, ImVec2 a, ImVec2 b, float r, float s, Rgb c, float alpha) {
+  for (int i = 6; i >= 1; --i) {
+    const float g = float(i) * 2.6f * s;
+    dl->AddRectFilled(ImVec2(a.x - g, a.y - g), ImVec2(b.x + g, b.y + g), C(c, alpha * 0.06f * float(7 - i) / 6.0f),
+                      r + g);
+  }
+}
+// The glass itself: a tint darkening downwards, a sheen over its top third,
+// a hairline edge and a lit top edge.
+void Pane(ImDrawList* dl, ImVec2 a, ImVec2 b, float r, float s, float alpha) {
+  const float h = b.y - a.y;
+  const ImU32 top = C(kGlassTop, 0.80f * alpha), bottom = C(kGlassBottom, 0.88f * alpha);
+  dl->AddRectFilled(a, ImVec2(b.x, a.y + r), top, r, ImDrawFlags_RoundCornersTop);
+  dl->AddRectFilledMultiColor(ImVec2(a.x, a.y + r), ImVec2(b.x, b.y - r), top, top, bottom, bottom);
+  dl->AddRectFilled(ImVec2(a.x, b.y - r), b, bottom, r, ImDrawFlags_RoundCornersBottom);
+  dl->AddRectFilledMultiColor(ImVec2(a.x + r * 0.7f, a.y + 2.0f * s), ImVec2(b.x - r * 0.7f, a.y + h * 0.34f),
+                              IM_COL32(255, 255, 255, int(24 * alpha)), IM_COL32(255, 255, 255, int(24 * alpha)),
+                              IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
+  dl->AddRect(a, b, C(kPatina, 0.32f * alpha), r, 0, 1.5f * s);
+  dl->AddLine(ImVec2(a.x + r, a.y + 1.5f * s), ImVec2(b.x - r, a.y + 1.5f * s), IM_COL32(255, 255, 255, int(56 * alpha)),
+              1.0f * s);
+}
+// The point `d` along a rounded box's outline, clockwise from its top-left.
+ImVec2 Perimeter(ImVec2 a, ImVec2 b, float r, float d) {
+  const float w = b.x - a.x, h = b.y - a.y;
+  r = std::clamp(r, 0.0f, std::min(w, h) * 0.5f);
+  const float sw = w - 2 * r, sh = h - 2 * r, arc = 1.5707963f * r;
+  const float total = 2 * (sw + sh) + 4 * arc;
+  d = std::fmod(d, total);
+  if (d < 0)
+    d += total;
+  const ImVec2 corners[4] = {ImVec2(b.x - r, a.y + r), ImVec2(b.x - r, b.y - r), ImVec2(a.x + r, b.y - r),
+                             ImVec2(a.x + r, a.y + r)};
+  const float start[4] = {-1.5707963f, 0.0f, 1.5707963f, 3.1415927f};
+  const ImVec2 from[4] = {ImVec2(a.x + r, a.y), ImVec2(b.x, a.y + r), ImVec2(b.x - r, b.y), ImVec2(a.x, b.y - r)};
+  const ImVec2 dir[4] = {ImVec2(1, 0), ImVec2(0, 1), ImVec2(-1, 0), ImVec2(0, -1)};
+  const float len[4] = {sw, sh, sw, sh};
+  for (int i = 0; i < 4; ++i) {
+    if (d <= len[i])
+      return ImVec2(from[i].x + dir[i].x * d, from[i].y + dir[i].y * d);
+    d -= len[i];
+    if (d <= arc) {
+      const float t = start[i] + (r > 0 ? d / r : 0.0f);
+      return ImVec2(corners[i].x + r * std::cos(t), corners[i].y + r * std::sin(t));
+    }
+    d -= arc;
+  }
+  return a;
+}
+// A light running round a ring: a bright head, a fading tail (a lap in 3.2 s).
+void Comet(ImDrawList* dl, ImVec2 a, ImVec2 b, float r, float s, double t, float alpha) {
+  const float w = b.x - a.x, h = b.y - a.y;
+  const float total = 2 * (w + h) - (8 - 2 * 3.1415927f) * std::min(r, std::min(w, h) * 0.5f);
+  const float head = float(std::fmod(t / 3.2, 1.0)) * total;
+  const float tail = std::min(total * 0.22f, 220.0f * s);
+  constexpr int kDots = 26;
+  for (int i = kDots - 1; i >= 0; --i) {
+    const float k = float(i) / kDots;
+    const ImVec2 p = Perimeter(a, b, r, head - k * tail);
+    const float fade = (1 - k) * (1 - k);
+    dl->AddCircleFilled(p, (1.2f + 1.6f * (1 - k)) * s, C(kGold, alpha * fade), 10);
+  }
+  const ImVec2 p = Perimeter(a, b, r, head);
+  dl->AddCircleFilled(p, 6.0f * s, C(kGold, 0.18f * alpha), 16);
+  dl->AddCircleFilled(p, 3.2f * s, IM_COL32(255, 250, 230, int(235 * alpha)), 12);
+}
+// A pad button's glyph: the PlayStation symbols on a dark disc, or a shoulder
+// button's name on a small key. Returns its width.
+float Glyph(ImDrawList* dl, ImFont* font, float size, ImVec2 at, const char* which, float alpha) {
+  const float r = size * 0.55f;
+  const ImVec2 c(at.x + r, at.y + size * 0.5f);
+  const std::string_view w(which);
+  if (w == "cross" || w == "circle" || w == "square" || w == "triangle") {
+    dl->AddCircleFilled(c, r, IM_COL32(12, 16, 18, int(220 * alpha)), 20);
+    dl->AddCircle(c, r, IM_COL32(255, 255, 255, int(40 * alpha)), 20, 1.0f);
+    const float k = r * 0.45f, th = std::max(1.5f, size * 0.09f);
+    if (w == "cross") {
+      const ImU32 col = IM_COL32(127, 168, 255, int(255 * alpha));
+      dl->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), col, th);
+      dl->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), col, th);
+    } else if (w == "circle") {
+      dl->AddCircle(c, k * 1.1f, IM_COL32(255, 111, 138, int(255 * alpha)), 18, th);
+    } else if (w == "square") {
+      dl->AddRect(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), IM_COL32(244, 154, 209, int(255 * alpha)), 0.0f,
+                  0, th);
+    } else {
+      const ImVec2 p[3] = {ImVec2(c.x, c.y - k * 1.1f), ImVec2(c.x + k * 1.05f, c.y + k * 0.75f),
+                           ImVec2(c.x - k * 1.05f, c.y + k * 0.75f)};
+      dl->AddPolyline(p, 3, IM_COL32(79, 216, 177, int(255 * alpha)), ImDrawFlags_Closed, th);
+    }
+    return 2 * r;
+  }
+  const float ts = size * 0.62f;
+  const ImVec2 ext = font->CalcTextSizeA(ts, FLT_MAX, 0.0f, which);
+  const float kw = ext.x + size * 0.5f;
+  dl->AddRectFilled(ImVec2(at.x, at.y + size * 0.08f), ImVec2(at.x + kw, at.y + size * 0.92f),
+                    IM_COL32(12, 16, 18, int(220 * alpha)), size * 0.2f);
+  dl->AddRect(ImVec2(at.x, at.y + size * 0.08f), ImVec2(at.x + kw, at.y + size * 0.92f),
+              IM_COL32(255, 255, 255, int(48 * alpha)), size * 0.2f, 0, 1.0f);
+  dl->AddText(font, ts, ImVec2(at.x + (kw - ext.x) * 0.5f, at.y + (size - ext.y) * 0.5f),
+              C(kText, 0.92f * alpha), which);
+  return kw;
+}
+// A switch: on, the track lit and the knob right.
+void Switch(ImDrawList* dl, ImVec2 at, float s, bool on, float alpha, bool focused) {
+  const float w = 46.0f * s, h = 24.0f * s;
+  const ImVec2 a(at.x - w, at.y - h * 0.5f), b(at.x, at.y + h * 0.5f);
+  dl->AddRectFilled(a, b, on ? C(focused ? kInk : kPatina, focused ? 0.55f * alpha : 0.85f * alpha)
+                             : IM_COL32(255, 255, 255, int((focused ? 40 : 28) * alpha)),
+                    h * 0.5f);
+  dl->AddRect(a, b, IM_COL32(255, 255, 255, int(50 * alpha)), h * 0.5f, 0, 1.0f);
+  const float kx = on ? b.x - h * 0.5f : a.x + h * 0.5f;
+  dl->AddCircleFilled(ImVec2(kx, at.y), h * 0.38f, IM_COL32(250, 252, 250, int(245 * alpha)), 18);
+}
+}  // namespace glass
+
+struct GlassAnim {
+  int serial = -1;
+  double switched = -10.0;
+  int slide = 0;
+};
+GlassAnim g_glass;
+
+void DrawGlassMenu(ImGuiIO& io, const DrawModel& model) {
+  using namespace glass;
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  ImFont* font = ImGui::GetFont();
+  // The hub's type when it is there (Oswald for the name and the tabs,
+  // Inter for the rows), else ImGui's own.
+  ImFont *f_head = font, *f_tab = font, *f_body = font, *f_bold = font;
+#if REX_PLATFORM_PS5 && defined(__PROSPERO__)
+  {
+    const auto& hf = gta4ps5::hub::Fonts();
+    if (hf.display) f_head = hf.display;
+    if (hf.nav) f_tab = hf.nav;
+    if (hf.body) f_body = hf.body;
+    if (hf.body_bold) f_bold = hf.body_bold;
+  }
+#endif
+  const float s = std::max(0.75f, io.DisplaySize.y / 1080.0f);
+  const double t = ImGui::GetTime();
+  const float body = 23.0f * s, small = 16.0f * s, tiny = 13.5f * s;
+  const float pad = 22.0f * s, radius = 22.0f * s, width = 580.0f * s;
+  const ImVec2 origin(56.0f * s, 92.0f * s);
+  // The panel's layout, top to bottom.
+  const float header_h = 44.0f * s, tabs_h = 40.0f * s, title_h = 34.0f * s, row_h = 46.0f * s,
+              hints_h = 40.0f * s;
+  if (model.page_serial != g_glass.serial) {
+    if (g_glass.serial >= 0)
+      g_glass.switched = t;
+    g_glass.serial = model.page_serial;
+    g_glass.slide = model.slide;
+  }
+  const float enter = Ease(float((t - g_glass.switched) / 0.24));
+  float panel_h = 0.0f;
+  if (model.open) {
+    panel_h = pad + header_h + tabs_h + 10.0f * s + title_h + float(model.lines.size()) * row_h + 8.0f * s + hints_h +
+              pad * 0.6f;
+    const ImVec2 a = origin, b(origin.x + width, origin.y + panel_h);
+    Shadow(dl, a, b, radius, s, 1.0f);
+    Pane(dl, a, b, radius, s, 1.0f);
+    float y = a.y + pad;
+    // ---- The header: the name, the credit.
+    {
+      const char* name = "LIBERTYRECOMP";
+      const float hs = body * 1.3f;
+      const ImVec2 n = f_head->CalcTextSizeA(hs, FLT_MAX, 0.0f, name);
+      dl->AddText(f_head, hs, ImVec2(a.x + pad, y - 4.0f * s), C(kPatina, 1.0f), name);
+      dl->AddText(f_tab, hs, ImVec2(a.x + pad + n.x + 9.0f * s, y - 4.0f * s), C(kText, 0.92f), "MENU");
+      const ImVec2 cr = f_body->CalcTextSizeA(tiny, FLT_MAX, 0.0f, kMenuCredit);
+      dl->AddText(f_body, tiny, ImVec2(b.x - pad - cr.x, y - 4.0f * s + (n.y - cr.y) * 0.5f), C(kDim, 0.95f),
+                  kMenuCredit);
+      y += header_h;
+    }
+    // ---- The sections: L1, the tabs (the shown one lit, the strip
+    // scrolled to keep it in view), R1.
+    {
+      const float gw = Glyph(dl, f_tab, small * 1.25f, ImVec2(a.x + pad, y + (tabs_h - small * 1.25f) * 0.5f - 2 * s),
+                             "L1", 1.0f);
+      const float rw_est = gw;
+      const float left = a.x + pad + gw + 10.0f * s, right = b.x - pad - rw_est - 10.0f * s;
+      Glyph(dl, f_tab, small * 1.25f, ImVec2(b.x - pad - rw_est, y + (tabs_h - small * 1.25f) * 0.5f - 2 * s), "R1",
+            1.0f);
+      std::vector<float> xs, ws;
+      float x = 0.0f;
+      for (const auto& tab : model.tabs) {
+        const float w = f_tab->CalcTextSizeA(small * 1.08f, FLT_MAX, 0.0f, tab.c_str()).x + 22.0f * s;
+        xs.push_back(x);
+        ws.push_back(w);
+        x += w + 4.0f * s;
+      }
+      const int cur = std::clamp(model.tab, 0, std::max(0, int(model.tabs.size()) - 1));
+      float scroll = 0.0f;
+      if (!xs.empty()) {
+        const float span = right - left;
+        const float want = xs[size_t(cur)] + ws[size_t(cur)] * 0.5f - span * 0.5f;
+        scroll = std::clamp(want, 0.0f, std::max(0.0f, x - 4.0f * s - span));
+      }
+      dl->PushClipRect(ImVec2(left, y), ImVec2(right, y + tabs_h), true);
+      const float pill_h = tabs_h - 10.0f * s, py = y + 3.0f * s;
+      for (size_t i = 0; i < model.tabs.size(); ++i) {
+        const float px = left + xs[i] - scroll;
+        const bool on = int(i) == cur;
+        if (on) {
+          Glow(dl, ImVec2(px, py), ImVec2(px + ws[i], py + pill_h), pill_h * 0.5f, s, kPatina,
+               0.6f + 0.4f * Breathe(t, 2.4f));
+          dl->AddRectFilled(ImVec2(px, py), ImVec2(px + ws[i], py + pill_h), C(kPatina, 0.95f), pill_h * 0.5f);
+          dl->AddRectFilledMultiColor(ImVec2(px + pill_h * 0.4f, py + 1.0f * s),
+                                      ImVec2(px + ws[i] - pill_h * 0.4f, py + pill_h * 0.5f),
+                                      IM_COL32(255, 255, 255, 60), IM_COL32(255, 255, 255, 60),
+                                      IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
+        }
+        const ImVec2 ts = f_tab->CalcTextSizeA(small * 1.08f, FLT_MAX, 0.0f, model.tabs[i].c_str());
+        dl->AddText(f_tab, small * 1.08f, ImVec2(px + (ws[i] - ts.x) * 0.5f, py + (pill_h - ts.y) * 0.5f),
+                    on ? C(kInk, 1.0f) : C(kDim, 0.95f), model.tabs[i].c_str());
+      }
+      dl->PopClipRect();
+      // (the strip fades out at its ends, where tabs go on past them)
+      const float fade = 26.0f * s;
+      const ImU32 glass_on = C(kGlassTop, 0.95f), glass_off = C(kGlassTop, 0.0f);
+      if (scroll > 0.5f)
+        dl->AddRectFilledMultiColor(ImVec2(left, y), ImVec2(left + fade, y + tabs_h), glass_on, glass_off, glass_off,
+                                    glass_on);
+      if (x - 4.0f * s - scroll > right - left + 0.5f)
+        dl->AddRectFilledMultiColor(ImVec2(right - fade, y), ImVec2(right, y + tabs_h), glass_off, glass_on, glass_on,
+                                    glass_off);
+      y += tabs_h;
+      dl->AddLine(ImVec2(a.x + pad, y + 2.0f * s), ImVec2(b.x - pad, y + 2.0f * s), C(kPatina, 0.22f), 1.0f);
+      y += 10.0f * s;
+    }
+    // ---- The page: it slides in from the side L1/R1 went to (or rises).
+    const float alpha = 0.25f + 0.75f * enter;
+    const float dx = float(g_glass.slide) * (1.0f - enter) * 70.0f * s;
+    const float dy = g_glass.slide == 0 ? (1.0f - enter) * 12.0f * s : 0.0f;
+    const float content_top = y;
+    dl->PushClipRect(ImVec2(a.x + 4.0f * s, content_top), ImVec2(b.x - 4.0f * s, content_top + title_h +
+                                                                                     float(model.lines.size()) * row_h + 6.0f * s),
+                     true);
+    {
+      const ImVec2 ts = f_tab->CalcTextSizeA(small * 1.1f, FLT_MAX, 0.0f, model.title.c_str());
+      dl->AddText(f_tab, small * 1.1f, ImVec2(a.x + pad + dx, y + dy + (title_h - ts.y) * 0.5f), C(kPatina, 0.85f * alpha),
+                  model.title.c_str());
+      if (model.total > int(model.lines.size())) {
+        int sel = model.first;
+        for (size_t i = 0; i < model.lines.size(); ++i)
+          if (model.lines[i].selected)
+            sel = model.first + int(i);
+        const std::string count = std::to_string(sel + 1) + " / " + std::to_string(model.total);
+        const ImVec2 cs = f_body->CalcTextSizeA(small, FLT_MAX, 0.0f, count.c_str());
+        dl->AddText(f_body, small, ImVec2(b.x - pad - cs.x + dx, y + dy + (title_h - cs.y) * 0.5f),
+                    C(kDim, 0.9f * alpha), count.c_str());
+      }
+      y += title_h;
+    }
+    for (const auto& line : model.lines) {
+      const ImVec2 ra(a.x + 14.0f * s + dx, y + dy + 3.0f * s), rb(b.x - 14.0f * s + dx, y + dy + row_h - 3.0f * s);
+      const float rr = 12.0f * s;
+      // Its label and what it is set to: "Label: ON" a switch, "Label: value" the value at the right.
+      std::string label = line.text, value;
+      int toggle = -1;
+      const size_t colon = line.text.rfind(": ");
+      if (colon != std::string::npos && colon > 0) {
+        std::string v = line.text.substr(colon + 2);
+        if (v.rfind("ON", 0) == 0 || v.rfind("OFF", 0) == 0) {
+          toggle = v.rfind("ON", 0) == 0 ? 1 : 0;
+          label = line.text.substr(0, colon);
+          if (v.size() > (toggle ? 2u : 3u))  // "ON (L1 missile...)": the rest stays with the label
+            label += " " + v.substr(toggle ? 2 : 3);
+        } else if (v.size() <= 24) {
+          label = line.text.substr(0, colon);
+          value = v;
+        }
+      }
+      const float text_y = y + dy + (row_h - body) * 0.5f;
+      const float value_right = rb.x - 14.0f * s;
+      if (line.selected) {
+        Glow(dl, ra, rb, rr, s, kPatina, (0.7f + 0.3f * Breathe(t, 2.4f)) * alpha);
+        dl->AddRectFilled(ra, rb, C(kPatina, 0.93f * alpha), rr);
+        dl->AddRectFilledMultiColor(ImVec2(ra.x + rr * 0.6f, ra.y + 1.0f * s), ImVec2(rb.x - rr * 0.6f, ra.y + (rb.y - ra.y) * 0.5f),
+                                    IM_COL32(255, 255, 255, int(70 * alpha)), IM_COL32(255, 255, 255, int(70 * alpha)),
+                                    IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
+        const ImVec2 ring_a(ra.x - 4.0f * s, ra.y - 4.0f * s), ring_b(rb.x + 4.0f * s, rb.y + 4.0f * s);
+        dl->AddRect(ring_a, ring_b, C(kPatina, (0.55f + 0.3f * Breathe(t, 2.4f)) * alpha), rr + 4.0f * s, 0, 2.0f * s);
+        Comet(dl, ring_a, ring_b, rr + 4.0f * s, s, t, alpha);
+      }
+      const ImU32 ink = line.selected ? C(kInk, alpha) : line.dim ? C(kDim, alpha) : C(kText, alpha);
+      float label_right = value_right;
+      if (toggle >= 0) {
+        Switch(dl, ImVec2(value_right, y + dy + row_h * 0.5f), s, toggle == 1, alpha, line.selected);
+        label_right = value_right - 58.0f * s;
+      } else if (!value.empty()) {
+        const std::string shown = line.selected ? "\xE2\x80\xB9 " + value + " \xE2\x80\xBA" : value;
+        const char* v = line.selected ? value.c_str() : shown.c_str();
+        const ImVec2 vs = f_body->CalcTextSizeA(body, FLT_MAX, 0.0f, v);
+        if (line.selected) {  // the arrows drawn as small chevrons (the font may lack the marks)
+          const float cx0 = value_right - vs.x - 18.0f * s, cx1 = value_right - 2.0f * s, cy = y + dy + row_h * 0.5f;
+          const float k = 5.0f * s;
+          dl->AddLine(ImVec2(cx0 + k, cy - k), ImVec2(cx0, cy), C(kInk, 0.8f * alpha), 2.0f * s);
+          dl->AddLine(ImVec2(cx0, cy), ImVec2(cx0 + k, cy + k), C(kInk, 0.8f * alpha), 2.0f * s);
+          dl->AddLine(ImVec2(cx1 - k, cy - k), ImVec2(cx1, cy), C(kInk, 0.8f * alpha), 2.0f * s);
+          dl->AddLine(ImVec2(cx1, cy), ImVec2(cx1 - k, cy + k), C(kInk, 0.8f * alpha), 2.0f * s);
+          dl->AddText(f_bold, body, ImVec2(value_right - vs.x - 9.0f * s, text_y), ink, v);
+          label_right = value_right - vs.x - 30.0f * s;
+        } else {
+          dl->AddText(f_body, body, ImVec2(value_right - vs.x, text_y), C(kPatina, 0.9f * alpha), v);
+          label_right = value_right - vs.x - 12.0f * s;
+        }
+      }
+      dl->PushClipRect(ImVec2(ra.x, ra.y), ImVec2(std::max(ra.x + 10.0f, label_right), rb.y), true);
+      dl->AddText(line.selected ? f_bold : f_body, body, ImVec2(ra.x + 16.0f * s, text_y), ink, label.c_str());
+      dl->PopClipRect();
+      y += row_h;
+    }
+    dl->PopClipRect();
+    // A long page's place in it: a thin bar at the right.
+    if (model.total > int(model.lines.size()) && model.total > 0) {
+      const float top = content_top + title_h, bottom = top + float(model.lines.size()) * row_h;
+      const float h = bottom - top;
+      const float th = std::max(18.0f * s, h * float(model.lines.size()) / float(model.total));
+      const float ty = top + (h - th) * float(model.first) / float(std::max(1, model.total - int(model.lines.size())));
+      dl->AddRectFilled(ImVec2(b.x - 7.0f * s, top), ImVec2(b.x - 4.0f * s, bottom), IM_COL32(255, 255, 255, 18), 2.0f * s);
+      dl->AddRectFilled(ImVec2(b.x - 7.0f * s, ty), ImVec2(b.x - 4.0f * s, ty + th), C(kPatina, 0.8f), 2.0f * s);
+    }
+    y += 8.0f * s;
+    // ---- The hints.
+    {
+      dl->AddLine(ImVec2(a.x + pad, y), ImVec2(b.x - pad, y), C(kPatina, 0.18f), 1.0f);
+      float x = a.x + pad;
+      const float gy = y + (hints_h - small * 1.3f) * 0.5f;
+      auto hint = [&](const char* glyph, const char* words) {
+        x += Glyph(dl, f_tab, small * 1.3f, ImVec2(x, gy), glyph, 1.0f) + 7.0f * s;
+        const ImVec2 ws = f_body->CalcTextSizeA(small, FLT_MAX, 0.0f, words);
+        dl->AddText(f_body, small, ImVec2(x, gy + (small * 1.3f - ws.y) * 0.5f), C(kDim, 1.0f), words);
+        x += ws.x + 18.0f * s;
+      };
+      const bool home = model.tab == 0 && model.title == "HOME";
+      hint("cross", "Select");
+      hint("circle", home ? "Close" : "Back");
+      hint("L1", "");
+      x -= 22.0f * s;
+      hint("R1", "Sections");
+      if (!home)
+        hint("L3+R3", "Close");
+    }
+  }
+  // ---- A toast: a glass pill under the panel (or where it would be),
+  // wrapped to its width.
+  if (!model.toast.empty()) {
+    const float wrap = width - 2 * pad;
+    const ImVec2 ts = f_body->CalcTextSizeA(small * 1.15f, FLT_MAX, wrap, model.toast.c_str());
+    const ImVec2 a(origin.x, origin.y + (model.open ? panel_h + 12.0f * s : 0.0f));
+    const ImVec2 b(a.x + std::min(width, ts.x + 2 * pad), a.y + ts.y + 22.0f * s);
+    Shadow(dl, a, b, 16.0f * s, s, 0.6f);
+    Pane(dl, a, b, 16.0f * s, s, 1.0f);
+    dl->AddRectFilled(ImVec2(a.x + 9.0f * s, a.y + 10.0f * s), ImVec2(a.x + 12.0f * s, b.y - 10.0f * s), C(kGold, 0.9f),
+                      1.5f * s);
+    dl->AddText(f_body, small * 1.15f, ImVec2(a.x + pad, a.y + 11.0f * s), C(kText, 1.0f), model.toast.c_str(), nullptr,
+                wrap);
+  }
+}
+
 class TrainerOverlay final : public rex::ui::ImGuiDialog {
  public:
   explicit TrainerOverlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
@@ -7724,7 +8542,8 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
   // (the HUD's marks follow their targets; the time circuits' display blinks
   // and the flash fades: drawn every frame then)
   bool WantsContinuousRepaint() const override {
-    return g_tcd_active.load(std::memory_order_relaxed) || g_hud_active.load(std::memory_order_relaxed);
+    return g_tcd_active.load(std::memory_order_relaxed) || g_hud_active.load(std::memory_order_relaxed) ||
+           g_menu_visible.load(std::memory_order_relaxed);
   }
   void OnDraw(ImGuiIO& io) override {
     if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f)
@@ -7740,97 +8559,7 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
     }
     if (!model.open && model.toast.empty())
       return;
-    // The look leans on GTA IV's own menus: a dark sheet, an amber header
-    // band, a filled highlight bar on the selected row.
-    const float scale = std::max(1.0f, io.DisplaySize.y / 1080.0f);
-    const ImU32 kSheet = IM_COL32(12, 12, 14, 230);
-    const ImU32 kBand = IM_COL32(255, 159, 14, 255);
-    const ImU32 kBandText = IM_COL32(16, 12, 4, 255);
-    const ImU32 kText = IM_COL32(235, 235, 235, 255);
-    const ImU32 kDim = IM_COL32(150, 150, 150, 255);
-    const ImU32 kSelBar = IM_COL32(255, 159, 14, 235);
-    const ImU32 kSelText = IM_COL32(20, 14, 2, 255);
-    const ImU32 kToastText = IM_COL32(150, 240, 150, 255);
-    const ImU32 kEdge = IM_COL32(255, 159, 14, 90);
-
-    ImGui::SetNextWindowPos(ImVec2(56.0f * scale, 108.0f * scale), ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    if (ImGui::Begin("##liberty_trainer", nullptr,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-                         ImGuiWindowFlags_NoBackground)) {
-      ImGui::SetWindowFontScale(1.3f * scale);
-      const float pad = 16.0f * scale;
-      const float width = 440.0f * scale;
-      const float line_h = ImGui::GetTextLineHeight() + 7.0f * scale;
-      const float band_h = line_h + 10.0f * scale;
-      auto* draw = ImGui::GetWindowDrawList();
-      const ImVec2 origin = ImGui::GetCursorScreenPos();
-
-      float body_h = 0;
-      if (model.open) {
-        body_h = band_h + 8.0f * scale + float(model.lines.size()) * line_h +
-                 (model.footer.empty() ? 0.0f : line_h + 6.0f * scale) + pad;
-      }
-      const bool has_toast = !model.toast.empty();
-      const float toast_h = has_toast ? line_h + 8.0f * scale : 0.0f;
-      const float total_h = body_h + (model.open && has_toast ? 6.0f * scale : 0.0f) + toast_h;
-
-      if (model.open) {
-        // Sheet and edge.
-        draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + body_h), kSheet,
-                            8.0f * scale);
-        draw->AddRect(origin, ImVec2(origin.x + width, origin.y + body_h), kEdge, 8.0f * scale,
-                      0, 1.5f);
-        // Header band.
-        draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + band_h), kBand,
-                            8.0f * scale, ImDrawFlags_RoundCornersTop);
-        draw->AddText(ImVec2(origin.x + pad, origin.y + 5.0f * scale), kBandText,
-                      model.title.c_str());
-        {  // the credit, smaller, at the band's right
-          ImFont* font = ImGui::GetFont();
-          const float size = ImGui::GetFontSize() * 0.68f;
-          const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, kMenuCredit);
-          draw->AddText(font, size,
-                        ImVec2(origin.x + width - pad - extent.x, origin.y + (band_h - extent.y) * 0.5f),
-                        (kBandText & 0x00FFFFFFu) | (200u << 24), kMenuCredit);
-        }
-        // Rows.
-        float y = origin.y + band_h + 8.0f * scale;
-        for (const auto& line : model.lines) {
-          if (line.selected) {
-            draw->AddRectFilled(ImVec2(origin.x + 6.0f * scale, y),
-                                ImVec2(origin.x + width - 6.0f * scale, y + line_h - 2.0f * scale),
-                                kSelBar, 4.0f * scale);
-            draw->AddText(ImVec2(origin.x + pad, y + 2.0f * scale), kSelText, line.text.c_str());
-          } else {
-            draw->AddText(ImVec2(origin.x + pad, y + 2.0f * scale),
-                          line.dim ? kDim : kText, line.text.c_str());
-          }
-          y += line_h;
-        }
-        if (!model.footer.empty()) {
-          draw->AddLine(ImVec2(origin.x + pad, y + 2.0f * scale),
-                        ImVec2(origin.x + width - pad, y + 2.0f * scale), kEdge, 1.0f);
-          draw->AddText(ImVec2(origin.x + pad, y + 7.0f * scale), kDim, model.footer.c_str());
-        }
-      }
-      if (has_toast) {
-        const float ty = origin.y + body_h + (model.open ? 6.0f * scale : 0.0f);
-        const ImVec2 size = ImGui::CalcTextSize(model.toast.c_str());
-        draw->AddRectFilled(ImVec2(origin.x, ty),
-                            ImVec2(origin.x + size.x + pad * 2, ty + toast_h), kSheet,
-                            6.0f * scale);
-        draw->AddText(ImVec2(origin.x + pad, ty + 4.0f * scale), kToastText, model.toast.c_str());
-      }
-      // Reserve the drawn area so auto-resize fits it.
-      ImGui::Dummy(ImVec2(width, total_h));
-    }
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
+    DrawGlassMenu(io, model);
   }
 };
 }  // namespace

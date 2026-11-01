@@ -34,8 +34,8 @@ void SetShadowsActive(bool active);
 bool ShadowsActive();
 
 // Launch guard: a launch that mounts the shadows leaves a marker until the
-// game reaches the city (the trainer calls MarkLaunchHealthy then). A marker
-// still there at the next launch means that launch never got in, so this one
+// game reaches the city (the trainer calls MarkLaunchHealthy then). The
+// marker counts such launches in a row; after two that never got in, a launch
 // starts without the shadows - the stock game - and the one after tries again.
 void MarkLaunchHealthy();
 bool ShadowsSkippedThisLaunch();

@@ -902,6 +902,9 @@ class Converter:
                 else:
                     self.split_rules.append((dindex[s], cond, tname))
             target[ti] = spec['hinge'] or db[dindex[spec['sources'][0][0]]]['pos']
+        for bname, at in self.options.get('points', {}).items():
+            assert bname in tindex, 'points: %s not in the template' % bname
+            target[tindex[bname]] = at
         self.doors = self._doors(tb, db, tindex, dindex, phys, trot, sane, target)
         self.moved = set(target)
 
@@ -1153,11 +1156,12 @@ class Converter:
         bnd = t.vptr(0xEC)
         boxes = t.vptr(bnd + 0x8C)
         done = []
+        radii = self.options.get('radii', {})
         for name, (p, child, radius) in sorted(tw.items()):
             src = name if name in dw else WHEEL_STAND_IN.get(name)
-            if src not in dw:
+            if src not in dw and name not in radii:
                 continue
-            want = dw[src][2]
+            want = radii.get(name, dw[src][2] if src in dw else radius)
             margin = t.f32(p + 0x70)
             edge_r = max(want - margin, 0.02)
             edges, n = t.vptr(p + 0xE4), t.u32(p + 0xEC)
@@ -1374,6 +1378,7 @@ class Converter:
         assert max(idx) < vcount
         vsrc, idx, vcount = self._cut_faces(vsrc, src_usage, vcount, g['vb_stride'], table, tb, idx)
         vsrc = self._split_vertices(vsrc, src_usage, vcount, g['vb_stride'], table, tb)
+        vsrc = self._shift_vertices(vsrc, src_usage, vcount, g['vb_stride'], table)
         vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
         if fill_uv:
             self.uv_filled += 1
@@ -1413,6 +1418,33 @@ class Converter:
                                                                  if idx[t] in assign)
         self.faces_copied = getattr(self, 'faces_copied', 0) + len(dup)
         return bytes(out), idx, vcount + len(dup)
+
+    def _shift_vertices(self, vsrc, usage, vcount, stride, table):
+        """The shift option: vertices whose main influence is a named donor
+        bone moved by its offset (PC data)."""
+        shifts = self.options.get('shift', {})
+        if not shifts:
+            return vsrc
+        want = {}
+        for k, b in enumerate(table):
+            name = BONE_ALIAS.get(self.donor_bones[b]['name'], self.donor_bones[b]['name'])
+            if name in shifts:
+                want[k] = shifts[name]
+        if not want:
+            return vsrc
+        at = dict(vertex_layout(usage, SIZE_PC)[0])
+        out = bytearray(vsrc)
+        moved = 0
+        for v in range(vcount):
+            d = want.get(main_influence(vsrc, at, v, stride))
+            if d is None:
+                continue
+            o = v * stride + at[0]
+            x, y, z = struct.unpack_from('<3f', out, o)
+            struct.pack_into('<3f', out, o, x + d[0], y + d[1], z + d[2])
+            moved += 1
+        self.shifted = getattr(self, 'shifted', 0) + moved
+        return bytes(out)
 
     def _split_vertices(self, vsrc, usage, vcount, stride, table, tb):
         """Re-bind the vertices a conditional pivot source claims (see
@@ -1685,7 +1717,12 @@ def parse_options(text):
     the place of the mod's own (remaster.py); bump / spec: the maps a shader
     gets where the mod gives its bump or specular slot its colour map (the
     Batwing's: its colour map in every slot); colour: the colour map those
-    two go with (other shaders' placeholders take the template's)."""
+    two go with (other shaders' placeholders take the template's).
+    points=wheel_lr=-1.37:-1.49:-1.35;... puts template bones (and the physics
+    parts on them) at those points instead of the donor's; radii=wheel_lr:0.24;...
+    gives physics wheels those radii; shift=wheel_lf:0:0:0.15 moves the donor
+    geometry bound to a bone (the Batwing's: its physics wheels under the
+    wheels it draws, the nose wheel up so it stands level)."""
     out = {}
     for item in filter(None, (text or '').split(',')):
         key, value = item.split('=', 1)
@@ -1693,6 +1730,16 @@ def parse_options(text):
             out[key] = [int(v) for v in value.split(':')]
         elif key in ('textures', 'bump', 'spec', 'colour'):
             out[key] = value
+        elif key == 'points':  # bone=x:y:z;... : template bones put at these points
+            out[key] = {b: tuple(float(v) for v in at.split(':'))
+                        for b, at in (item.split('=') for item in value.split(';') if item)}
+        elif key == 'radii':  # wheel_xx:r;... : the physics wheels' radii
+            out[key] = {b: float(r) for b, r in (item.split(':') for item in value.split(';') if item)}
+        elif key == 'shift':  # donor_bone:dx:dy:dz;... : the geometry bound to it moved
+            out[key] = {}
+            for item in filter(None, value.split(';')):
+                b, *d = item.split(':')
+                out[key][b] = tuple(float(v) for v in d)
         else:
             out[key] = int(value)
     return out

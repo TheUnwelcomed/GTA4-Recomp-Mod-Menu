@@ -188,11 +188,15 @@ constexpr Physical kGauntletEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0,
 // combustion knocks through the block with every firing (the diesel's
 // clatter, loudest at idle and pulling hard) and the turbo whistles up as
 // the boost builds.
+// v1.7.24: a deeper, rounder idle (the user found v1.7.23's thin): the
+// muffler lower and its chamber fuller, the knock ringing lower in a heavier
+// block, more cycle-to-cycle life, the turbo's whistle
+// lower and quieter (it comes in with the boost), idling at 600.
 constexpr Physical kLazarEngine{6, {0, 120, 240, 360, 480, 600}, {0, 0, 0, 0, 0, 0},
-                                250.0f, 2.4f, 0.9f, 1.6f, 0.6f, -0.2f, 0.2f, -0.25f, 0.5f,
-                                430.0f, 70.0f, 0.45f, 1.7f, 0.3f, 0.035f, 0.0f, 0.35f, 85.0f,
-                                0.07f, 1300.0f, 0.0f, 0.03f, 0.0f, 0.0f, 1.15f,
-                                0.22f, 1300.0f, 0.22f, 3800.0f};
+                                250.0f, 2.8f, 0.9f, 1.9f, 0.7f, -0.2f, 0.25f, -0.25f, 0.5f,
+                                300.0f, 58.0f, 0.62f, 1.85f, 0.26f, 0.05f, 0.0f, 0.4f, 75.0f,
+                                0.05f, 1100.0f, 0.0f, 0.025f, 0.0f, 0.0f, 1.2f,
+                                0.2f, 1000.0f, 0.12f, 2900.0f};
 // The DeLorean DMC-12 (and the time machines built on it): the PRV
 // ZMJ-159, a 2.85-litre 90-degree V6 on common crankpins, so it fires
 // unevenly, 90 and 150 degrees apart in turn (1-6-3-5-2-4, the banks taking
@@ -210,7 +214,7 @@ constexpr Character kDelorean{.idle_rpm = 800.0f, .limit_rpm = 6000.0f, .pops = 
                               .physical = &kDeloreanEngine};
 constexpr Character kGauntlet{.idle_rpm = 800.0f, .limit_rpm = 5800.0f, .pops = 11.0f, .flare = 1.9f,
                               .physical = &kGauntletEngine};
-constexpr Character kLazar{.idle_rpm = 650.0f, .limit_rpm = 2300.0f, .pops = 0.0f, .flare = 1.5f,
+constexpr Character kLazar{.idle_rpm = 600.0f, .limit_rpm = 2300.0f, .pops = 0.0f, .flare = 1.5f,
                            .physical = &kLazarEngine};
 constexpr Character kArbiter{.idle_rpm = 850.0f, .limit_rpm = 5600.0f, .pops = 10.0f, .flare = 1.9f,
                              .physical = &kArbiterEngine};
@@ -495,14 +499,18 @@ class EngineSynth {
                   (hyd_opening_ ? 0.75f : 1.0f);
         land_t_ += dt;
       }
-      // ---- a turret's traverse: the motors' whine rising with the slew,
-      // the gear ring's whine over it
-      servo_ += (servo_target - servo_) * 15.0f * dt;
+      // ---- a turret's traverse: a heavy drive's hum (v1.7.24: an octave
+      // and more below v1.7.23's whine, which the user found shrill), the
+      // ring gear's teeth chugging through it, and the race's low grind
+      servo_ += (servo_target - servo_) * 12.0f * dt;
       if (servo_ > 1e-3f) {
-        servo_ph_ = Wrap(servo_ph_ + (180.0f + 240.0f * servo_) * dt);
-        ring_ph_ = Wrap(ring_ph_ + (1400.0f + 900.0f * servo_) * dt);
-        const float buzz = Sin(servo_ph_) + 0.5f * Sin(2.0f * servo_ph_) + 0.3f * Sin(4.0f * servo_ph_);
-        canopy += (servo_bp_.Bandpass(buzz, 3.14159265f * 520.0f / kRate, 0.8f) * 0.07f + Sin(ring_ph_) * 0.007f) *
+        servo_ph_ = Wrap(servo_ph_ + (46.0f + 34.0f * servo_) * dt);
+        ring_ph_ = Wrap(ring_ph_ + (9.0f + 7.0f * servo_) * dt);  // the teeth meshing: a chug
+        const float hum = Sin(servo_ph_) + 0.6f * Sin(2.0f * servo_ph_) + 0.35f * Sin(3.0f * servo_ph_) +
+                          0.12f * Sin(5.0f * servo_ph_);
+        const float chug = 0.75f + 0.25f * Sin(ring_ph_);
+        const float grind = servo_lp_.Lowpass(Noise(), 3.14159265f * 180.0f / kRate, 1.2f);
+        canopy += (servo_bp_.Bandpass(hum, 3.14159265f * 150.0f / kRate, 0.7f) * 0.11f * chug + grind * 0.05f) *
                   std::min(1.0f, servo_ * 3.0f);
       }
 
@@ -915,7 +923,7 @@ class EngineSynth {
   float servo_ = 0, servo_ph_ = 0, ring_ph_ = 0;
   float knock_ = 0, spool_ = 0, turbo_ph_ = 0;
   Svf crack_hi_, blast_lp_, rumble_lp_tail_, breech_bp_, brake_bp_, brake_lp_, pop_bp_, fluid_bp_, lock_bp_,
-      lock2_bp_, land_lp_, land_bp_, servo_bp_, knock_hi_, knock_lo_, turbo_bp_;
+      lock2_bp_, land_lp_, land_bp_, servo_bp_, servo_lp_, knock_hi_, knock_lo_, turbo_bp_;
   uint32_t seed_ = 0x7F4A7C15u;
   Svf thump_lp_, exhaust_bp_, rumble_lp_, howl_bp_, rasp_l_, rasp_r_, roar_l_, roar_r_, jet_l_, jet_r_, crack_bp_,
       hiss_bp_, click_bp_, clunk_lp_, motor_bp_, door_hi_bp_, door_mid_bp_, door_lo_lp_, slam_bp_, slam_lp_,

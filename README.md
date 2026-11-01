@@ -19,6 +19,7 @@ survives reinstalls of the game data and works in GTA IV, TLAD and TBoGT alike.
 | D-pad left / right | change a value (wanted level, hour, weather) |
 | A (Cross) | select |
 | B (Circle) | back / close |
+| L1 / R1 | the previous / next section (v1.7.24) |
 
 While the menu is open the game sees no controller input (the same rule the system
 dialogs use), so you won't punch anyone while navigating. The one exception is
@@ -184,6 +185,38 @@ network session.
 
 ## Changes
 
+- **v1.7.24**: the menu is a **glass panel switcher** (after the author's
+  Ruffle5, in Liberty's colours: patina green, old gold): the sections as
+  tabs (L1/R1, the panel sliding over), switches for on/off rows, values
+  at the right, the focused row lifted in a ring with a light running
+  round it, button hints; the hub's Oswald and Inter. **Jets**: an arcade
+  flight model, Ace Combat's and GTA V's way (`src/gta4_jet_flight.h`):
+  a five-second takeoff roll on the jet's own speed (v1.7.22's, read back
+  from the game each frame, lost a share to the game's drag and never
+  reached its 40 m/s rotate speed), rates that answer at once, the path
+  along the nose, Standard controls (the stick banks and the bank turns,
+  height held; wings level hands off) or Expert (roll and pull), soft
+  stalls; the jet leaving the ground on its own goes into flight rather
+  than being pushed along its nose (the Batwing floated off); Triangle by
+  a jet gets in at once. The **Batwing** is rebuilt with its physics
+  wheels under the ones it draws, their size, and its nose wheel 15 cm up
+  so it stands level (converter options `points`, `radii`, `shift`). A
+  crash with a blown-up Lazar 3 (`GET_CHAR_IN_CAR_PASSENGER_SEAT` reading
+  a removed vehicle): every native taking a vehicle or ped handle now
+  checks it against the pools first (vehicles `0x82FB0700`, peds
+  `0x831D5388`). The weapons' blasts raise the wanted level (heat: two
+  stars, three, four). **Lazar 3**: the jets' lock-on along its gun,
+  homing shells, a lower turret hum and diesel idle, ramps opening 40
+  degrees. **DeLorean** Part II: the wheels come down as soon as it lands,
+  and it remembers floors it met (the ground probe missed a car park
+  deck, and it sank through). **60 FPS Mode**: two more trimming steps.
+  The installer: a launch guard needing two launches in a row that never
+  reached the city before it starts one without the add-ons' data (one
+  closed at the loading screen had turned them off).
+- **v1.7.23**: the installer exports a few of the console's own map files
+  (`logs/export/maps`) for the map converter to come (`tools/maps`:
+  `mapscan.py` surveys a PC map mod, `v_reader.py` reads GTA V's
+  drawables, texture dictionaries and placements).
 - **v1.7.22**: renamed the **LibertyRecomp Menu**, with the author's
   credit in its header; Car Spawning puts the stock cars under Standard
   Vehicles. **Complete Current Mission**: the 193 mission scripts are
