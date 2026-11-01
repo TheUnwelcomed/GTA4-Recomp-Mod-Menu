@@ -2,18 +2,22 @@
 stock 360 car from your console as the template (physics, collision, the
 fragment layout).
 
-usage: run_vehicle.py <export_dir> <work_dir> <pc.wft> <pc.wtd> <out_dir> <name> [template] [pivot]
+usage: run_vehicle.py <export_dir> <work_dir> <pc.wft> <pc.wtd> <out_dir> <name> [template] [pivots] [sources]
 
   export_dir  the stock 360 files exported by the trainer build (logs/export)
-  work_dir    their decompressed bodies (xlzx unrsc <car>.xft work/<car>.xft.bin);
-              every stock car decoded there is also a source of shaders the
-              template lacks (paint2/paint3 from the airtug, police, taxi...)
+  work_dir    their decompressed bodies (xlzx unrsc <car>.xft work/<car>.xft.bin)
   name        the add-on's model name: writes <name>.xft.bin / <name>.xtd.bin and
               flags.txt (the RSC flags for xlzx rsc)
   template    the stock car to build on (default: fbi)
-  pivot       optional: donor bones whose geometry turns together about a
-              template bone the trainer animates, moved to the first donor
-              bone's position, e.g. "extra_1=misc_a,misc_y,misc_headlight_l"
+  pivots      optional ("-": none): donor geometry a template bone carries and the
+              trainer turns (batconv.parse_pivots), e.g. the Deimos's pop-ups
+              "extra_1=misc_a,misc_y,misc_headlight_l", or the F-16's gear
+              "extra_1@0,2.73,-0.22=boot:y>1.5;extra_6@0,-0.073,-0.028=boot:y<=1.5,door_pside_f"
+  sources     optional ("-": none): other stock cars (decoded in work_dir) to take
+              a shader from that the template lacks, e.g. "airtug" for the F-16's
+              livery paints. Without them a missing shader falls back to the
+              template's nearest (paint3 -> paint1, interior -> interior2), which
+              is what the game colours like its own cars.
 """
 import os
 import struct
@@ -25,9 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import batconv  # noqa: E402
 import rsc5  # noqa: E402
 
-# Stock cars to take a missing shader from, in order of preference.
-SHADER_SOURCES = ('airtug', 'police', 'police2', 'taxi', 'taxi2', 'noose', 'feroci', 'infernus',
-                  'turismo', 'banshee', 'sultan', 'comet', 'coquette', 'cavalcade', 'fbi')
 
 
 def load_pc_wtd(path):
@@ -36,17 +37,16 @@ def load_pc_wtd(path):
     return rsc5.Resource(zlib.decompress(raw[12:]), rf, False, rt, os.path.basename(path))
 
 
-def parse_pivot(spec):
-    if not spec:
-        return {}
-    target, bones = spec.split('=')
-    return {target: bones.split(',')}
+def arg(i, default=''):
+    v = sys.argv[i] if len(sys.argv) > i else default
+    return '' if v == '-' else v
 
 
 def main():
     export, work, wft, wtd, out, name = sys.argv[1:7]
-    template = sys.argv[7] if len(sys.argv) > 7 else 'fbi'
-    pivots = parse_pivot(sys.argv[8] if len(sys.argv) > 8 else '')
+    template = arg(7) or 'fbi'
+    pivots = batconv.parse_pivots(arg(8))
+    source_names = [s for s in arg(9).split(',') if s]
     os.makedirs(out, exist_ok=True)
     t0 = time.time()
 
@@ -55,8 +55,7 @@ def main():
     tt = rsc5.Resource.x360(os.path.join(export, template + '.xtd'),
                             os.path.join(work, template + '.xtd.bin'))
     sources = [rsc5.Resource.x360(os.path.join(export, s + '.xft'), os.path.join(work, s + '.xft.bin'))
-               for s in SHADER_SOURCES
-               if s != template and os.path.exists(os.path.join(work, s + '.xft.bin'))]
+               for s in source_names if s != template]
     dft = rsc5.Resource.pc(wft)
     dtd = load_pc_wtd(wtd)
 
@@ -65,6 +64,8 @@ def main():
     for sps, tsps in conv.shader_report:
         if sps != tsps:
             print('shader: %s -> 360 %s' % (sps, tsps))
+    if getattr(conv, 'split_moved', 0):
+        print('pivots: %d vertex influences re-bound by position' % conv.split_moved)
 
     embedded = rsc5.read_fragtype(dft)['drawable']['shader_group']['texdict']
     tex_sources = [batconv.pc_textures(dtd, 0)]

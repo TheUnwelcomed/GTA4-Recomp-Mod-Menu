@@ -39,4 +39,5 @@ Converted with:
 | Doors, bonnet, boot, glass | fixed to the body: they don't open or break (the Banshee's parts are elsewhere; posing the Deimos's on them drew them displaced) |
 | Moving steering wheel | a ZolikaPatch feature: the wheel is fixed |
 | Collision | the Banshee's (the template) |
+| Physics wheels | the mod's own size (0.33 m); on the Banshee's 0.38 m wheels it floated 5 cm |
 | Tuning parts (`misc_*` bones) | the non-tuning version, as the mod's Addon folder ships it |

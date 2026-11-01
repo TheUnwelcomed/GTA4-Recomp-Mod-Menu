@@ -46,10 +46,10 @@ every donor texture untiles back to its source.
 
 | car | template | result |
 |---|---|---|
-| Batmobile | FBI | 19/19 checks: 262,043 vertices skinned at rest, 0.00000 m off |
-| F-16C (airtug slot on PC) | FBI | 19/19 checks: paint2/paint3 from the airtug, 74,436 vertices exact |
-| Grotti Deimos GTS | Banshee | 19/19 checks: lamp pods on a pivot, 119,139 vertices exact |
-| Vapid Dominator 645 | Banshee | 19/19 checks: 91 geometries, 293,238 vertices exact |
+| Batmobile | FBI | 21/21 checks: 262,043 vertices skinned at rest, 0.00000 m off |
+| F-16C (airtug slot on PC) | Cavalcade | 21/21 checks: paint2/paint3 from the airtug, landing gear on three pivots (12,872 vertex influences split by position), 74,436 vertices exact |
+| Grotti Deimos GTS | Banshee | 21/21 checks: lamp pods on a pivot, 119,139 vertices exact |
+| Vapid Dominator 645 | Banshee | 21/21 checks: 91 geometries, 293,238 vertices exact |
 
 `build_bundled.sh` converts, packs and validates all four in one go.
 
@@ -127,11 +127,21 @@ checks a file against the rule, and `validate_vehicle.py` runs it.
   lose only their own motion.
 - **A missing wheel** takes its opposite's place (a tricycle's nose wheel fills
   both front slots). **No wheel mesh at all** hides the template's wheels.
-- **Shaders the template lacks** are cloned from another stock 360 car that
-  has them (`paint2`/`paint3` from the airtug, `interior` from the police car;
-  their name strings are copied along). Only shaders no stock car has map to
-  the nearest one (`generic` to `mesh`, `default` to `interior2`). When the
-  360 shader reads a texcoord set the part lacks, it is filled from set 0.
+- **Shaders the template lacks** map to its nearest one (`paint2`/`paint3` to
+  `paint1`, `interior` to `interior2`, `generic` to `mesh`, `default` to
+  `interior2`), which the game colours and lights like its own car's. Named
+  stock cars (`sources` argument) can supply the real shader instead, name
+  strings copied along: the F-16 takes `paint2`/`paint3` from the airtug for
+  its liveries. It's opt-in: v1.7.5 took shaders from other cars for every
+  add-on, and the Dominator's borrowed `paint3` stayed white while the
+  Batmobile's borrowed `interior` came out chrome. When the 360 shader reads a
+  texcoord set the part lacks, it is filled from set 0.
+- **Physics wheels** take the donor's radii. A wheel's collision part is a
+  curved geometry (a disc swept by the bound's margin); the template's curved
+  edges, box and bounding sphere are resized to the donor's wheel (its box,
+  which mods' exporters fit to the wheel). On the template's own wheels every
+  add-on floated by the difference (the Dominator 6 cm on the Banshee's
+  0.38 m).
 - **Uncompressed textures** (A8R8G8B8, A8, L8) are compressed to DXT5
   (`dxt.py`), so they take the same verified path as every other texture.
 - **Exporter quirks**: geometry counts left zero (taken from the buffers), the
@@ -139,13 +149,20 @@ checks a file against the rule, and `validate_vehicle.py` runs it.
   in-range ones are untouched).
 - **Textures borrowed from another stock car's dictionary** get a black
   stand-in. The shared `vehicle_generic_*` pack resolves the rest.
-- **Pivots** (`pivot` argument, `template_bone=donor_bone,...`): the listed
-  donor bones' geometry is bound to one template bone (one no physics part
-  drives and nothing hangs from), moved to the first donor bone's position.
-  The trainer turns it in the car's live skeleton: the Deimos's pop-up lamp
-  pods swing on the Banshee's `extra_1`. (v1.7.1-v1.7.4 emitted posed copies
-  on three extras instead; hiding an extra drew their shared triangles to the
-  world's origin.)
+- **Pivots** (`pivots` argument, see `batconv.parse_pivots`): donor geometry
+  bound to a template bone no physics part drives and nothing hangs from,
+  moved to its hinge, which the trainer turns in the car's live skeleton.
+  Several pivots are separated by `;`, a hinge is given with `@x,y,z` (else
+  the first donor bone's position), and a donor bone can be split between
+  pivots by position (`boot:y>1.5`): its vertices are re-bound one by one.
+  The Deimos's pop-up lamp pods swing on the Banshee's `extra_1`; the F-16's
+  nose gear (the front of the mod's `boot`) and two main gears fold on the
+  Cavalcade's `extra_1`, `extra_5` and `extra_6`. (v1.7.1-v1.7.4 emitted
+  posed copies on three extras instead; hiding an extra drew their shared
+  triangles to the world's origin.) The template needs the skeleton's
+  rotation arrays (+8, +12): of the stock cars only the Banshee, Cavalcade,
+  FBI, Infernus, NOOSE and Turismo carry them, and only the Cavalcade has
+  three spare extras on its chassis.
 
 ## Format notes (what was mapped)
 
@@ -175,9 +192,9 @@ checks a file against the rule, and `validate_vehicle.py` runs it.
 clang++ -std=c++20 -O2 -I<libmspack/mspack> xlzx.cpp lzxd.o -o xlzx   # port's patched libmspack
 ./xlzx unrsc fbi.xft work/fbi.xft.bin && ./xlzx unrsc fbi.xtd work/fbi.xtd.bin
 python3 identity_test.py <export_dir> <stock PC fbi dir> work         # prove the rules
-python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [pivot]   # template: fbi
-python3 validate_vehicle.py out mycar car.wft car.wtd [pivot]         # structural checks, rest pose included
-python3 restpose.py out/mycar.xft out/mycar.xft.bin [pivot bone]      # the rest-pose check alone
+python3 run_vehicle.py <export_dir> work car.wft car.wtd out mycar [template] [pivots] [sources]   # template: fbi; "-" skips one
+python3 validate_vehicle.py out mycar car.wft car.wtd [pivots]        # structural checks, rest pose included
+python3 restpose.py out/mycar.xft out/mycar.xft.bin [pivot bone,...]  # the rest-pose check alone
 python3 chunkcheck.py out/mycar.xft out/mycar.xft.bin out/mycar.xtd out/mycar.xtd.bin   # GPU buffers vs load chunks
 ./xlzx rsc 112 <flags> out/mycar.xft.bin mycar.xft   # flags from out/flags.txt
 ./xlzx rsc 7   <flags> out/mycar.xtd.bin mycar.xtd
@@ -197,9 +214,8 @@ Converted files are not committed here — they contain data from the game.
 
 ## Known limits
 
-- Collision stays the template car's (the Batmobile collides like a Buffalo),
-  including its physics wheels' size (FBI 0.40 m, Banshee 0.38 m): a donor
-  with smaller wheels sits a few centimetres high.
+- Collision stays the template car's (the Batmobile collides like a Buffalo);
+  only the physics wheels take the donor's size.
 - Doors, bonnet, boot and glass are fixed to the body: they don't open,
   break or fall off.
 - Template bones the donor lacks (rear doors, sirens, …) keep their position;

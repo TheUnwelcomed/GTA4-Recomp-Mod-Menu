@@ -15,7 +15,8 @@ run_vehicle.py <export> <work> dom645t.wft dom645t.wtd out dom645t banshee
 | | |
 |---|---|
 | Body, interior, wheels, lamps | the mod's (91 geometries, one LOD: the game uses it at every distance) |
-| Paint | the mod's paint3 shader, taken from the stock airtug (the Banshee has only paint1) |
+| Paint | the Banshee's paint1 (the mod's paint3 without its livery layer: this is the *No liveries* version). v1.7.5-v1.7.6 borrowed the airtug's paint3 and the body came out white; paint1 takes the car's own colour, like the Deimos's |
+| Physics wheels | the mod's own size (0.32 m); on the Banshee's 0.38 m wheels it floated 6 cm |
 | Doors, bonnet, boot, glass | fixed to the body |
 | Moving steering wheel | a ZolikaPatch feature: the wheel is fixed |
 | Collision | the Banshee's |

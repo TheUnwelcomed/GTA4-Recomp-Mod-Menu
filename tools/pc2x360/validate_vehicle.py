@@ -1,8 +1,8 @@
 """Structural validation of a converted 360 vehicle against its PC donor.
 
-usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd> [pivot]
+usage: validate_vehicle.py <out_dir> <name> <pc.wft> <pc.wtd> [pivots]
 
-pivot: as given to run_vehicle.py ("extra_1=misc_a,...").
+pivots: as given to run_vehicle.py (batconv.parse_pivots).
 """
 import os
 import struct
@@ -17,10 +17,15 @@ import restpose  # noqa: E402
 import xenos  # noqa: E402
 
 out_dir, name, wft, wtd = sys.argv[1:5]
-PIVOT, PIVOT_SOURCES = None, []
-if len(sys.argv) > 5:
-    PIVOT, _src = sys.argv[5].split('=')
-    PIVOT_SOURCES = _src.split(',')
+PIVOTS = batconv.parse_pivots(sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != '-' else '')
+# donor bone -> the pivots its geometry may ride on; a conditional source may
+# also leave a vertex on the chassis fallback when no condition claims it
+PIVOT_OF = {}
+for _p, _spec in PIVOTS.items():
+    for _b, _cond in _spec['sources']:
+        PIVOT_OF.setdefault(_b, set()).add(_p)
+UNCONDITIONAL = {_b for _spec in PIVOTS.values() for _b, _cond in _spec['sources'] if _cond is None}
+SPLIT_RULES = [(_b, _cond, _p) for _p, _spec in PIVOTS.items() for _b, _cond in _spec['sources'] if _cond]
 flags = dict(l.split()[0:3:2] for l in open(os.path.join(out_dir, 'flags.txt')))
 x = rsc5.Resource(open(os.path.join(out_dir, name + '.xft.bin'), 'rb').read(), int(flags[name + '.xft'], 16), True, 112, 'xft')
 t = rsc5.Resource(open(os.path.join(out_dir, name + '.xtd.bin'), 'rb').read(), int(flags[name + '.xtd'], 16), True, 7, 'xtd')
@@ -156,16 +161,19 @@ for xg, (dg, pose, dtable) in pairs:
     xbp, dbp = x.vptr(xg['off'] + 56), d.vptr(dg['off'] + 56)
     xtab = [x.u16(xbp + 2 * k) for k in range(x.u16(xg['off'] + 62))] if xbp is not None else []
     dtab = [d.u16(dbp + 2 * k) for k in range(d.u16(dg['off'] + 62))] if dbp is not None else []
-    for xi, di in zip(xtab, dtab):  # bone tables: the same-named safe bone, the pivot, or the chassis
+    for xi, di in zip(xtab, dtab):  # bone tables: the same-named safe bone, a pivot, or the chassis
         want = batconv.BONE_ALIAS.get(dbones[di], dbones[di])
         got = xbones[xi]
-        if dbones[di] in PIVOT_SOURCES:
-            ok = got == PIVOT
+        if dbones[di] in UNCONDITIONAL:
+            ok = got in PIVOT_OF[dbones[di]]
         elif got == want:
             ok = batconv.carries(got)
         else:
-            ok = got in (batconv.BONE_FALLBACK, PIVOT)
+            ok = got == batconv.BONE_FALLBACK or got in PIVOTS
         if not ok:
+            bone_bad += 1
+    for xi in xtab[len(dtab):]:  # slots appended for vertices a pivot claims by position
+        if xbones[xi] not in PIVOTS:
             bone_bad += 1
     step = max(1, xg['vertex_count'] // 400)
     for v in range(0, xg['vertex_count'], step):
@@ -178,7 +186,23 @@ for xg, (dg, pose, dtable) in pairs:
             else:
                 a = dec(i, bytes(x.phys[xb + v * xs + xo:xb + v * xs + xo + 4]))
             b = dec_pc(i, bytes(d.phys[db + v * ds + do:db + v * ds + do + batconv.SIZE_PC[i]]))
-            if i in (6, 7, 8, 9, 10, 11, 12, 13):
+            if i == 2 and SPLIT_RULES and dtab:
+                # each influence: the 360 bone must be the PC bone's own mapping,
+                # or the pivot a conditional source gives this vertex's position
+                dat = dict(dl)
+                pos = struct.unpack_from('<3f', d.phys, db + v * ds + dat[0])
+                wts = list(d.phys[db + v * ds + dat[1]:db + v * ds + dat[1] + 4]) if 1 in dat else [255, 0, 0, 0]
+                err = 0
+                for k in range(4):
+                    if not wts[k]:
+                        continue
+                    dbone = dbones[dtab[b[k]]] if b[k] < len(dtab) else None
+                    xbone = xbones[xtab[a[k]]] if a[k] < len(xtab) else None
+                    claim = next((pv for sb, cond, pv in SPLIT_RULES if sb == dbone and batconv.meets(pos, cond)), None)
+                    expect = claim or (xbones[xtab[b[k]]] if b[k] < len(xtab) else None)
+                    if xbone != expect:
+                        err = 1
+            elif i in (6, 7, 8, 9, 10, 11, 12, 13):
                 err = max(abs(p - q) / max(1.0, abs(q)) for p, q in zip(a, b))
             else:
                 err = max(abs(p - q) for p, q in zip(a, b))
@@ -191,8 +215,8 @@ check('normals/tangents within packing precision (<= 2/511)',
 check('UVs within half precision (rel <= 2^-10)', max(worst.get(i, 0) for i in range(6, 14)) <= 2 ** -10,
       'max rel err %.6f' % max(worst.get(i, 0) for i in range(6, 14)))
 check('weights/indices/colors carried byte-exact', max(worst.get(1, 0), worst.get(2, 0), worst.get(4, 0)) == 0)
-check('bone tables: same-named safe bones, the pivot or the chassis', bone_bad == 0, 'bad=%d' % bone_bad)
-_ok, _msg = restpose.check_rest_pose(x, PIVOT)
+check('bone tables: same-named safe bones, a pivot or the chassis', bone_bad == 0, 'bad=%d' % bone_bad)
+_ok, _msg = restpose.check_rest_pose(x, set(PIVOTS))
 check('rest pose: every vertex skinned where it is stored; safe bones only', _ok, _msg.split(': ', 1)[1])
 check('texcoord sets filled for the 360 shader repeat texcoord 0', uv_fill_bad == 0, 'bad=%d' % uv_fill_bad)
 

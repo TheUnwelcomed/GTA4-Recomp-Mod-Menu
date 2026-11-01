@@ -446,15 +446,60 @@ def pose(bones, translations):
     return pos, rot
 
 
+def parse_pivots(spec):
+    """Pivot spec -> {template bone: {'hinge': (x, y, z) or None,
+    'sources': [(donor bone, condition or None)]}}.
+
+    spec   := entry (';' entry)*
+    entry  := template_bone ['@' x ',' y ',' z] '=' source (',' source)*
+    source := donor_bone [':' axis op value]     (axis x|y|z, op > >= < <=)
+
+    A plain source binds all of the donor bone's geometry to the pivot; one
+    with a condition only the vertices (in the car's space) that meet it, so
+    one donor bone can be split between pivots (the F-16's nose gear and left
+    main gear share the mod's `boot`). The pivot bone goes to the hinge when
+    one is given, else to the first source bone's position."""
+    out = {}
+    for entry in filter(None, (spec or '').split(';')):
+        head, srcs = entry.split('=', 1)
+        hinge = None
+        if '@' in head:
+            head, at = head.split('@')
+            hinge = tuple(float(c) for c in at.split(','))
+            assert len(hinge) == 3, entry
+        sources = []
+        for src in srcs.split(','):
+            if ':' not in src:
+                sources.append((src, None))
+                continue
+            name, cond = src.split(':')
+            for op in ('>=', '<=', '>', '<'):
+                if op in cond:
+                    axis, value = cond.split(op)
+                    break
+            else:
+                raise ValueError('bad condition %r' % src)
+            sources.append((name, (axis.strip(), op, float(value))))
+        out[head] = dict(hinge=hinge, sources=sources)
+    return out
+
+
+def meets(pos, cond):
+    axis, op, value = cond
+    x = pos['xyz'.index(axis)]
+    return {'>': x > value, '>=': x >= value, '<': x < value, '<=': x <= value}[op]
+
+
 class Converter:
     def __init__(self, tmpl, donor, log=print, pivots=None, shader_sources=()):
-        """`pivots`: {template bone: [donor bones]} - the donor bones' geometry
-        is bound to that template bone, which is moved to the first donor
-        bone's position; the trainer turns it (pop-up lamps).
+        """`pivots`: parse_pivots() output (or {template bone: [donor bones]}):
+        the donor bones' geometry is bound to that template bone, moved to the
+        hinge; the trainer turns it (pop-up lamps, landing gear).
         `shader_sources`: other stock 360 cars to take a shader from when the
         template lacks the donor's (paint2/paint3 live on the airtug, police,
         taxi...)."""
-        self.pivots = pivots or {}
+        self.pivots = {k: (v if isinstance(v, dict) else dict(hinge=None, sources=[(b, None) for b in v]))
+                       for k, v in (pivots or {}).items()}
         self.t = tmpl     # rsc5.Resource (360, big-endian)
         self.d = donor    # rsc5.Resource (PC)
         self.log = log
@@ -607,16 +652,20 @@ class Converter:
             if src != n:
                 self.stand_ins.append('%s<-%s' % (n, src))
             target[ti] = p
-        self.pivot_of = {}  # donor bone index -> template pivot bone
-        for tname, sources in self.pivots.items():
+        self.pivot_of = {}     # donor bone index -> template pivot bone (all its geometry)
+        self.split_rules = []  # (donor bone index, condition, template pivot bone): some of it
+        for tname, spec in self.pivots.items():
             assert tname in tindex, 'pivot %s not in the template' % tname
             ti = tindex[tname]
             assert ti not in phys, 'pivot %s is a physics part of the template' % tname
             assert not any(b['parent'] == ti for b in tb), 'pivot %s has bones under it' % tname
-            for s in sources:
+            for s, cond in spec['sources']:
                 assert s in dindex, 'pivot source %s not in the donor' % s
-                self.pivot_of[dindex[s]] = tname
-            target[ti] = db[dindex[sources[0]]]['pos']
+                if cond is None:
+                    self.pivot_of[dindex[s]] = tname
+                else:
+                    self.split_rules.append((dindex[s], cond, tname))
+            target[ti] = spec['hinge'] or db[dindex[spec['sources'][0][0]]]['pos']
         self.moved = set(target)
 
         # new local translations, parents first (rotations stay the template's)
@@ -647,6 +696,7 @@ class Converter:
                 put3(glo + 0x40 * i + 0x30, npos[i])
         self.bone_pos = npos
         self._move_composite_parts(phys, tpos, npos)
+        self._resize_wheels(phys, dindex)
 
         # which template bone each donor bone's geometry is drawn with
         self.bone_map, self.rigid = {}, []
@@ -713,6 +763,63 @@ class Converter:
             struct.pack_into('>3f', v.buf, bnd + 0x20, *mn)
             struct.pack_into('>3f', v.buf, bnd + 0x30, *[(a + b) / 2 for a, b in zip(mx, mn)])
             struct.pack_into('>2f', v.buf, bnd + 0x08, max(r08, radius), max(r0c, radius + (r0c - r08)))
+
+    @staticmethod
+    def _wheel_bounds(res, frag, names):
+        """{wheel bone name: (bound, child, tyre radius)}. A wheel's collision
+        part is a curved geometry: a disc (its curved edges' radius) swept by
+        the bound's margin; Rockstar's wheels keep the two adding up to their
+        box's half height (FBI: 0.2592 + 0.1412 = 0.4004). Mods' exporters
+        don't always (the Batmobile's add up to 0.51 in a 0.35 box), so the
+        radius is read from the box, which they fit to the wheel itself."""
+        bnd = res.vptr(0xEC)
+        parts, lst = res.vptr(bnd + 0x80), res.vptr(0xD4)
+        out = {}
+        for i in range(frag['child_count']):
+            c = res.vptr(lst + 4 * i)
+            if c is None:
+                continue
+            name = names[res.u16(c + 0x0E)]
+            p = res.vptr(parts + 4 * i)
+            if not name.startswith('wheel_') or p is None or res.u8(p + 4) != 5:
+                continue
+            edges, n = res.vptr(p + 0xE4), res.u32(p + 0xEC)
+            if edges is None or not n:
+                continue
+            out[name] = (p, i, res.f32(p + 0x14))
+        return out
+
+    def _resize_wheels(self, phys, dindex):
+        """The template's physics wheels take the donor's radii. A stock
+        wheel larger than the mod's held the car up by the difference (all the
+        add-ons floated: the Dominator 6 cm on the Banshee's 0.38 m wheels)."""
+        t, v = self.t, self.v
+        tw = self._wheel_bounds(t, self.tf, [b['name'] for b in self.tmpl_bones])
+        dw = self._wheel_bounds(self.d, self.df, [BONE_ALIAS.get(b['name'], b['name']) for b in self.donor_bones])
+        bnd = t.vptr(0xEC)
+        boxes = t.vptr(bnd + 0x8C)
+        done = []
+        for name, (p, child, radius) in sorted(tw.items()):
+            src = name if name in dw else WHEEL_STAND_IN.get(name)
+            if src not in dw:
+                continue
+            want = dw[src][2]
+            margin = t.f32(p + 0x70)
+            edge_r = max(want - margin, 0.02)
+            edges, n = t.vptr(p + 0xE4), t.u32(p + 0xEC)
+            for e in range(n):
+                struct.pack_into('>f', v.buf, edges + 0x30 * e + 0x20, edge_r)
+            r = edge_r + margin
+            hx = t.f32(p + 0x10)
+            struct.pack_into('>2f', v.buf, p + 0x14, r, r)
+            struct.pack_into('>2f', v.buf, p + 0x24, -r, -r)
+            struct.pack_into('>f', v.buf, p + 0x08, (hx * hx + 2 * r * r) ** 0.5)
+            struct.pack_into('>2f', v.buf, boxes + 0x20 * child + 0x04, -r, -r)
+            struct.pack_into('>2f', v.buf, boxes + 0x20 * child + 0x14, r, r)
+            done.append('%s %.3f->%.3f' % (name[6:], radius, r))
+        self.wheel_report = done
+        if done:
+            self.log('wheels: physics radii from the donor: ' + ', '.join(done))
 
     # ---------------- shaders
     def build_shader_group(self):
@@ -855,6 +962,8 @@ class Converter:
         bp = d.vptr(g['off'] + 56)
         bc = d.u16(g['off'] + 62)
         table = [d.u16(bp + 2 * k) for k in range(bc)] if bp is not None else []
+        tb = [self.bone_map[b] for b in table]
+        vsrc = self._split_vertices(vsrc, src_usage, vcount, g['vb_stride'], table, tb)
         vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
         if fill_uv:
             self.uv_filled += 1
@@ -862,12 +971,43 @@ class Converter:
         isrc = d.phys[g['ib_data'][1]:g['ib_data'][1] + 2 * n]
         idata = struct.pack('>%dH' % n, *struct.unpack('<%dH' % n, isrc))
         assert max(struct.unpack('<%dH' % n, isrc)) < vcount
-        tb = [self.bone_map[b] for b in table]
         decl_src = d.vptr(g['vb_off'] + 16)
         # vo/io: set by place_buffers once every geometry is converted
         return dict(usage=usage, stride=stride, vcount=vcount, icount=n,
                     vdata=vdata, vbytes=len(vdata), idata=idata, ibytes=len(idata), bones=tb,
                     decl_src=decl_src)
+
+    def _split_vertices(self, vsrc, usage, vcount, stride, table, tb):
+        """Re-bind the vertices a conditional pivot source claims (see
+        parse_pivots): their bone index points at a bone-table slot for the
+        pivot, appended to `tb` (the geometry's template bone table) when it
+        is not there yet. Returns the (possibly patched) PC vertex data."""
+        rules = {}
+        for k, b in enumerate(table):
+            for di, cond, tname in self.split_rules:
+                if b == di:
+                    rules.setdefault(k, []).append((cond, self.template_bone_index[tname]))
+        if not rules or not usage & 4:
+            return vsrc
+        at = dict(vertex_layout(usage, SIZE_PC)[0])
+        out = bytearray(vsrc)
+        moved = 0
+        for v in range(vcount):
+            o = v * stride
+            pos = struct.unpack_from('<3f', out, o + at[0])
+            for slot in range(4):
+                if 1 in at and out[o + at[1] + slot] == 0:
+                    continue  # (an unused influence)
+                k = out[o + at[2] + slot]
+                for cond, ti in rules.get(k, ()):
+                    if meets(pos, cond):
+                        if ti not in tb:
+                            tb.append(ti)
+                        out[o + at[2] + slot] = tb.index(ti)
+                        moved += 1
+                        break
+        self.split_moved = getattr(self, 'split_moved', 0) + moved
+        return bytes(out)
 
     def place_buffers(self, *lod_sets):
         """Lay every converted geometry's vertex and index data out in the

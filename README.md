@@ -38,9 +38,12 @@ keeps going while you browse.
   detected and refused outside their episode
 - **Add-on vehicles**, converted to the 360 format and installed by the app
   itself as their own vehicles (no stock car replaced; see `addons/`):
-  - **Batmobile** (JulioNIB), with its gadgets re-created
-  - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a nose cannon and
-    missiles (the PC mod's Air Combat IV script, re-done in the trainer)
+  - **Batmobile** (JulioNIB), with its gadgets re-created: minigun ahead and
+    behind, grenades on the horn, booster
+  - **F-16C Fighting Falcon** (SkylineGTRFreak): flies, with a cannon and
+    missiles (the PC mod's Air Combat IV script, re-done in the trainer), a
+    synthesized jet engine that spools with the throttle, landing gear on R3
+    and an afterburner flame
   - **Grotti Deimos GTS** (harithd / Milcin), with pop-up headlights the
     trainer swings on their hinge
   - **Vapid Dominator 645** (johndoe968, Rodger Dodger / Milcin)
@@ -49,7 +52,10 @@ keeps going while you browse.
 - **Time & Weather** — set the clock, force or release any weather
 - **Weapons** — full loadout with ammo, or strip all weapons
 - **Chaos**: raining cars (random cars dropped around you), gravity on/off
+- **Headlights on D-pad Left**: switch any car's lights on and off
 - **Trainer Status** — shows which game natives resolved, for debugging
+
+Every option starts off: the menu changes nothing until you ask it to.
 
 The menu is **single-player only**: it closes itself and refuses to act inside a
 network session.
@@ -124,6 +130,7 @@ network session.
 | | |
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
+| `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
@@ -138,7 +145,7 @@ describes:
 ```
 git clone https://github.com/elripalda/gta4-ps5 && cd gta4-ps5 && ./setup.sh
 git apply /path/to/patches/liberty-trainer.patch
-cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* glue/rexglue-sdk-main/gta4-recomp/src/
+cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* /path/to/src/gta4_jet_engine.h glue/rexglue-sdk-main/gta4-recomp/src/
 # then the cmake + ninja commands from ps5/BUILD.md
 # (glslangValidator must be built with ENABLE_OPT=ON: the shader overrides use -Os)
 ```

@@ -3,7 +3,7 @@ every vertex skinned the way the game does it (runtime matrix x inverse rest
 pose) must land where it is stored, and the main drawable may only use bones
 the game never hides or poses from collision parts.
 
-usage: restpose.py <name.xft> <name.xft.bin> [pivot bone]   (exit 1 on failure)"""
+usage: restpose.py <name.xft> <name.xft.bin> [pivot bone[,pivot bone...]]   (exit 1 on failure)"""
 import struct
 import sys
 import rsc5
@@ -57,7 +57,8 @@ def check_rest_pose(r, pivot=None):
         return tuple(local[0] * g[0][k] + local[1] * g[1][k] + local[2] * g[2][k] + g[3][k] for k in range(3))
 
 
-    allowed = lambda nm: batconv.carries(nm) or nm == pivot  # noqa: E731
+    pivots = set(pivot) if isinstance(pivot, (set, list, tuple)) else {pivot}
+    allowed = lambda nm: batconv.carries(nm) or nm in pivots  # noqa: E731
     worst, bad_bones, checked = 0.0, set(), 0
     for li, lod in enumerate(d['lods']):
         for m in lod:

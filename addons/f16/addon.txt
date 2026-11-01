@@ -1,4 +1,6 @@
 # F-16C Fighting Falcon (SkylineGTRFreak), converted for the 360 build
 model=f16
 donor=fbi
+# built on the stock Cavalcade (its spare extras carry the landing gear)
+template=cavalcade
 colours=airtug

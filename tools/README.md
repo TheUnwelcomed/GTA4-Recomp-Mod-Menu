@@ -10,6 +10,7 @@ console exports and the mods' own files.
 | `inspect/skeleton.py` | A car's skeleton (PC or 360): parents, local translations, positions, rotations, which bones physics parts drive. Spots parked bones like the Batmobile's 13 m-deep doors. |
 | `inspect/palettes.py` | Which bones each geometry is skinned to, and its shader. |
 | `re/ppc_asm.py` | A game function's PowerPC assembly, from the comments the recompiler leaves in `generated/gta4_recomp.*.cpp`; `--find` lists the functions using an instruction pattern. |
+| `jet/render_preview.cpp` | Renders the F-16's synthesized engine (`src/gta4_jet_engine.h`) to a WAV through a scripted flight (start-up, throttle, afterburner, cannon, missile, shutdown), to hear changes without a console. |
 | `unarc.py` | Unpacks `.rar` / `.7z` / `.zip` mod archives with the system's libarchive (no unrar needed): `python3 -I unarc.py mod.rar outdir`. |
 
 ## Game addresses the trainer relies on (360 build)
