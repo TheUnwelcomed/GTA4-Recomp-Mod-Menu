@@ -32,7 +32,7 @@
 #include <rex/ui/imgui_dialog.h>
 #include "gta4_init.h"
 #include "gta4_jet_engine.h"
-#include "gta4_bat_engine.h"
+#include "gta4_car_engine.h"
 
 #include <rex/platform.h>
 #if REX_PLATFORM_PS5
@@ -181,6 +181,7 @@ std::array g_natives = {
     // Setting the player down (canopies, teleports): collision, holding still
     // while the ground streams in, loading a destination.
     NativeEntry{"SET_CHAR_COLLISION"}, NativeEntry{"FREEZE_CHAR_POSITION"}, NativeEntry{"LOAD_SCENE"},
+    NativeEntry{"TASK_LEAVE_CAR_IMMEDIATELY"}, NativeEntry{"SET_CHAR_VISIBLE"}, NativeEntry{"CLEAR_CHAR_TASKS"},
     NativeEntry{"SET_CAR_COORDINATES"}, NativeEntry{"FREEZE_CAR_POSITION"},
     // Batmobile missile lock: the target's mark on the radar.
     NativeEntry{"ADD_BLIP_FOR_CAR"}, NativeEntry{"CHANGE_BLIP_COLOUR"}, NativeEntry{"REMOVE_BLIP"},
@@ -919,9 +920,9 @@ void PlaceOnGround(PPCContext& ctx, uint8_t* base, const GameContext& game, uint
     Invoke(ctx, base, "SET_CAR_COORDINATES", {car, Bits(x), Bits(y), Bits(gz + 1.0f)});
     Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {car});
   } else {
-    // (SET_CHAR_COORDINATES takes the ground's height: Rockstar's scripts
-    // pass GET_GROUND_Z_FOR_3D_COORD's answer straight in.)
-    Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits(x), Bits(y), Bits(gz)});
+    // (A metre over the ground, as the trainer's teleports have always put
+    // the player: a short drop at most.)
+    Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits(x), Bits(y), Bits(gz + 1.0f)});
   }
 }
 
@@ -1331,12 +1332,14 @@ void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const Mode
 struct PopupState {
   uint32_t car = 0;
   bool in_car = false;
+  bool swinging = false;  // the pods are on the move (the motor has sounded)
   bool up = false;          // where they are heading
   float angle = 0.0f;       // where they are, degrees
   uint16_t prev_buttons = 0;
   uint64_t next_probe = 0, next_check = 0, last_ms = 0, next_write = 0;
 };
 PopupState g_popup;
+void PopupMotorSound(float seconds);  // (with the cars' engines, below)
 constexpr uint32_t kPopupExtra = 1;          // extra_1 holds the pods
 constexpr float kPopupUpDegrees = 30.0f;     // ZolikaPatch's angle for this mod on PC
 constexpr float kPopupDegreesPerSecond = 85.0f;  // up in about a third of a second
@@ -1615,6 +1618,10 @@ bool PopupLights(PPCContext& ctx, uint8_t* base, const GameContext& game, const 
   g_popup.last_ms = now;
   const float target = g_popup.up ? kPopupUpDegrees : 0.0f;
   const float before = g_popup.angle;
+  // The motor whirs as the pods start to swing.
+  if (target != before && !g_popup.swinging)
+    PopupMotorSound(std::fabs(target - before) / kPopupDegreesPerSecond);
+  g_popup.swinging = target != before;
   const float step = kPopupDegreesPerSecond * dt;
   g_popup.angle = std::fabs(target - before) <= step ? target : before + (target > before ? step : -step);
   if (g_popup.angle != before || now >= g_popup.next_write) {
@@ -2960,7 +2967,7 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
     const float target = std::min(speed + 3.0f, 55.0f);
     Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {car, Bits(target)});
   }
-  // (The roar is the Batmobile's own engine's: BatEngine reads `boosting`.)
+  // (The roar is the Batmobile's own engine's: CarEngine reads `boosting`.)
   BatFlame(ctx, base, car, boost);
   g_gadget.boosting = boost;
   return X_INPUT_GAMEPAD_LEFT_SHOULDER | X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT |
@@ -2973,17 +2980,19 @@ uint32_t Gadgets(PPCContext& ctx, uint8_t* base, const GameContext& game, State&
 // getting out (Y, kept from the game inside) the same the other way, the
 // player set down beside the cockpit. The Batmobile's (frame and glass, on
 // the FBI template) pops up; the F-16's bubble rises more slowly, as a jet's
-// does, and opens only on the ground at a standstill (in the air or rolling
+// does. Both open only at a standstill on the ground (rolling or in the air
 // Y is the game's: the player jumps out). No toggle. The cockpits under them
 // (seats, dash, the jet's ejection seat and panel) are the mods' own.
 struct CanopyState {
-  enum Phase : int { kShut, kOpeningIn, kClosingIn, kOpeningOut, kClosingOut };
+  enum Phase : int { kShut, kOpeningIn, kClosingIn, kOpeningOut, kLeaving, kClosingOut };
   Phase phase = kShut;
   uint32_t car = 0;   // the vehicle being got into or out of
   float open = 0.0f;  // 0 shut .. 1 open
   float hold = 0.0f;  // a beat with it up
   uint64_t next_probe = 0, last_ms = 0, started = 0;
   bool in_car = false, sounded = false;
+  bool hidden = false;          // the player hidden while he climbs out
+  uint64_t leaving_since = 0;
   uint16_t prev_buttons = 0;
   uint32_t info = 0;  // the model whose pivot bone is known
   int32_t bone = -1;
@@ -3003,7 +3012,7 @@ struct CanopySpec {
   bool ground_only;  // opens only standing still on the ground
 };
 constexpr CanopySpec kBatCanopy{"BATMOBILE", "Batmobile", "interiorlight", 60.0f, 0.45f, 0.7f,
-                                {-2.1f, 0.2f, 0.0f}, kPoseBatmobile, 0, false};
+                                {-2.1f, 0.2f, 0.0f}, kPoseBatmobile, 0, true};
 constexpr CanopySpec kJetCanopy{"F16", "F-16", "interiorlight", 38.0f, 0.9f, 1.2f,
                                 {-2.3f, 4.3f, 0.0f}, kPoseF16, 3, true};
 CanopyState g_canopy, g_jet_canopy;
@@ -3032,46 +3041,40 @@ bool CanopyBusy(const CanopyState& c) {
   return c.phase != CanopyState::kShut || c.in_car || c.exit_at != 0;
 }
 
-// The player out of the seat and onto the ground beside the cockpit, as
-// Rockstar's scripts do it (dating_kate): tasks cleared, then warped out of
-// the vehicle (or placed, once out of it) at the ground's height, which the
-// native lifts to standing height. The ground is looked for from above the
-// vehicle's roof (under awnings too); an implausible answer (another level,
-// a roof) falls back to the ground under the vehicle itself.
-void SetDown(PPCContext& ctx, uint8_t* base, const GameContext& game, const CanopySpec& spec, CanopyState& c,
-             uint64_t now) {
+// The player, out of the seat and on his feet (the game's own exit took him
+// out), put on the ground beside the cockpit. SET_CHAR_COORDINATES with the
+// ground's height a metre up (what the trainer's teleports always gave it).
+// The ground is looked for from above the vehicle's roof (under awnings
+// too); with no plausible answer (another level, a roof) he stays where the
+// game set him down.
+void PlaceBeside(PPCContext& ctx, uint8_t* base, const GameContext& game, const CanopySpec& spec, CanopyState& c,
+                 uint64_t now) {
   const std::string label(spec.label);
   const auto p = CarPoint(ctx, base, c.car, spec.exit);
   const auto at = CarPosition(ctx, base, c.car);
-  if (!p || !at) {
-    REXLOG_WARN("gta4-trainer: {}: no position to set the player down at", label);
-    return;
+  std::optional<float> gz;
+  if (p && at) {
+    gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*at)[2] + 1.5f);
+    if (gz && (*gz > (*at)[2] + 0.8f || *gz < (*at)[2] - 3.0f))
+      gz.reset();
   }
-  auto gz = GroundZ(ctx, base, (*p)[0], (*p)[1], (*at)[2] + 1.5f);
-  const char* where = "beside it";
-  if (!gz || *gz > (*at)[2] + 0.8f || *gz < (*at)[2] - 3.0f) {
-    gz = GroundZ(ctx, base, (*at)[0], (*at)[1], (*at)[2] + 1.5f);
-    where = "under it";
+  if (p && gz) {
+    Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits((*p)[0]), Bits((*p)[1]), Bits(*gz + 1.0f)});
+    c.exit[0] = (*p)[0];
+    c.exit[1] = (*p)[1];
+    c.exit[2] = *gz;
+  } else {
+    for (int a = 0; a < 3; ++a)
+      c.exit[a] = game.position[a];
+    c.exit[2] -= 1.0f;  // (a standing ped's origin rides about a metre up)
   }
-  const float z = gz ? *gz : (*at)[2] - 0.6f;  // (a car's origin rides ~0.6 m up)
-  Invoke(ctx, base, "CLEAR_CHAR_TASKS_IMMEDIATELY", {game.ped});
-  const auto in_car = Invoke(ctx, base, "IS_CHAR_IN_ANY_CAR", {game.ped});
-  const bool warped = in_car && in_car->r0();
-  if (warped)
-    Invoke(ctx, base, "WARP_CHAR_FROM_CAR_TO_COORD", {game.ped, Bits((*p)[0]), Bits((*p)[1]), Bits(z + 0.3f)});
-  else
-    Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits((*p)[0]), Bits((*p)[1]), Bits(z + 0.3f)});
-  Invoke(ctx, base, "SET_CHAR_COLLISION", {game.ped, 1});
-  c.exit[0] = (*p)[0];
-  c.exit[1] = (*p)[1];
-  c.exit[2] = z;
   c.exit_at = now;
   c.catches = 0;
   c.watch_log = 0;
   ++c.exits;
-  REXLOG_INFO("gta4-trainer: {}: player set down at {:.1f}, {:.1f}, {:.2f} (ground {}{}; vehicle at z {:.2f}; {})",
-              label, (*p)[0], (*p)[1], z, gz ? "found " : "not found", gz ? where : "", (*at)[2],
-              warped ? "warped out of the seat" : "already out of the seat, placed");
+  REXLOG_INFO("gta4-trainer: {}: player out of the seat after {} ms; {} ({:.1f}, {:.1f}, ground {:.2f})", label,
+              now - c.leaving_since, p && gz ? "put beside the cockpit" : "left where the game set him down",
+              c.exit[0], c.exit[1], c.exit[2]);
 }
 
 // Returns the buttons it keeps from the game: Y while the player is in the
@@ -3093,6 +3096,10 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
     c.unfreeze_at = 0;
     Invoke(ctx, base, "FREEZE_CHAR_POSITION", {game.ped, 0});
   }
+  if (c.hidden && c.phase != CanopyState::kLeaving) {
+    Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
+    c.hidden = false;
+  }
   if (c.exit_at) {
     if (c.exits <= 3 && c.watch_log < 12 && now - c.exit_at >= 250 * uint64_t(c.watch_log)) {
       ++c.watch_log;
@@ -3106,7 +3113,7 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
         ++c.catches;
         Invoke(ctx, base, "FREEZE_CHAR_POSITION", {game.ped, 1});
         Invoke(ctx, base, "SET_CHAR_COORDINATES",
-               {game.ped, Bits(c.exit[0]), Bits(c.exit[1]), Bits(c.exit[2] + 0.3f)});
+               {game.ped, Bits(c.exit[0]), Bits(c.exit[1]), Bits(c.exit[2] + 1.0f)});
         Invoke(ctx, base, "SET_CHAR_COLLISION", {game.ped, 1});
         c.unfreeze_at = now + 350;
         REXLOG_WARN("gta4-trainer: {}: player dropping through the world after getting out (z {:.1f}, ground "
@@ -3145,22 +3152,62 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
         Invoke(ctx, base, "WARP_CHAR_INTO_CAR", {game.ped, c.car});
         c.in_car = true;
       } else {
-        // As Rockstar's own scripts do it (dating_kate): the player's tasks
-        // cleared first, then set down at the ground's height. v1.7.8 kept
-        // the driving task and gave a height a metre up: the player fell
-        // through the world.
-        SetDown(ctx, base, game, spec, c, now);
-        c.in_car = false;
+        // Out the game's own way, as Rockstar's brucie_heli takes the player
+        // out of a car (CLEAR_CHAR_TASKS, TASK_LEAVE_CAR_IMMEDIATELY), hidden
+        // while he climbs out; kLeaving puts him beside the cockpit once he
+        // is on his feet. v1.7.8-v1.7.11 warped him out of the seat
+        // (WARP_CHAR_FROM_CAR_TO_COORD) and he fell through the world.
+        if (c.log < 8) {
+          ++c.log;
+          REXLOG_INFO("gta4-trainer: {} canopy open, player getting out", label);
+        }
+        Invoke(ctx, base, "CLEAR_CHAR_TASKS", {game.ped});
+        if (NativeKnown("SET_CHAR_VISIBLE")) {
+          Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 0});
+          c.hidden = true;
+        }
+        Invoke(ctx, base, "TASK_LEAVE_CAR_IMMEDIATELY", {game.ped, c.car});
+        c.leaving_since = now;
+        c.phase = CanopyState::kLeaving;
+        return X_INPUT_GAMEPAD_Y;
       }
       if (c.log < 8) {
         ++c.log;
-        REXLOG_INFO("gta4-trainer: {} canopy open, player {}", label,
-                    c.phase == CanopyState::kOpeningIn ? "in" : "out");
+        REXLOG_INFO("gta4-trainer: {} canopy open, player in", label);
       }
       c.phase = c.phase == CanopyState::kOpeningIn ? CanopyState::kClosingIn : CanopyState::kClosingOut;
       c.hold = 0.0f;
       c.sounded = false;
       return c.in_car ? uint32_t(X_INPUT_GAMEPAD_Y) : 0u;
+    }
+    case CanopyState::kLeaving: {
+      // On his feet beside it: put down, shown, the canopy closes.
+      const auto in_car = Invoke(ctx, base, "IS_CHAR_IN_ANY_CAR", {game.ped});
+      const bool out = in_car && !in_car->r0();
+      if (out && now - c.leaving_since >= 150) {
+        PlaceBeside(ctx, base, game, spec, c, now);
+        if (c.hidden) {
+          Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
+          c.hidden = false;
+        }
+        c.in_car = false;
+        c.phase = CanopyState::kClosingOut;
+        c.hold = 0.0f;
+        c.sounded = false;
+        return 0;
+      }
+      if (now - c.leaving_since > 3500) {
+        // The game did not take him out: shown again, the canopy closes over him.
+        if (c.hidden) {
+          Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
+          c.hidden = false;
+        }
+        REXLOG_WARN("gta4-trainer: {}: the game did not take the player out in 3.5 s; canopy closes", label);
+        c.phase = CanopyState::kClosingOut;
+        c.hold = 0.0f;
+        c.sounded = false;
+      }
+      return X_INPUT_GAMEPAD_Y;
     }
     case CanopyState::kClosingIn:
     case CanopyState::kClosingOut:
@@ -3189,8 +3236,8 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
       PoseCanopy(ctx, base, spec, c, *vehicle.car, 0.0f);  // shut (and its pivot looked up)
     c.in_car = true;
     c.car = *vehicle.car;
-    if (c.bone < 0 || !NativeKnown("WARP_CHAR_FROM_CAR_TO_COORD"))
-      return 0;  // no canopy pivot (or no way to set the player down): the game's own way out
+    if (c.bone < 0 || !NativeKnown("TASK_LEAVE_CAR_IMMEDIATELY"))
+      return 0;  // no canopy pivot (or no way to take the player out): the game's own way out
     if (spec.ground_only) {
       // In the air or rolling, Y is the game's (the player jumps out).
       float speed = 0.0f;
@@ -3233,54 +3280,67 @@ uint32_t Canopy(PPCContext& ctx, uint8_t* base, const GameContext& game, State& 
   return 0;
 }
 
-// The Batmobile's own engine: an original synthesized voice
-// (gta4_bat_engine.h) in the spirit of the 1989/1992 film car, a turbine
-// whine over a deep V8 rumble with a roar on the booster, played through the
-// port's mixer like the jet's. Its revs come from the road speed through five
-// simulated gears (the throttle revs it standing still); the booster (gadgets
-// on, d-pad right) brings in the roar. The car's game name, BATMOBILE, has no
-// engine sound in IV, so this is the only one (up to v1.7.10 it drove with
-// the Sabre GT's). The canopy's hiss and clunk (the F-16's too) come from the
-// same voice.
-gta4::bat::EngineSynth g_bat_synth;
+// The add-on cars' own engines: original synthesized voices
+// (gta4_car_engine.h) played through the port's mixer like the jet's. The
+// Batmobile's, in the spirit of the 1989/1992 film car: a turbine whine over
+// a deep, lumpy V8, a roar on the booster (gadgets on, d-pad right). The
+// Grotti Deimos's: a high-revving flat-plane Italian V8 with a carburettor
+// howl, and its pop-up lamps' motor. Revs come from the road speed through
+// five simulated gears (the throttle revs it standing still); getting in
+// cranks the starter, getting out it winds down. The cars' game names
+// (BATMOBILE, DEIMOS) have no engine sound in IV, so these are the only ones
+// (up to v1.7.10 the Batmobile drove with the Sabre GT's engine, up to
+// v1.7.12 the Deimos with the Turismo's). Canopy hiss and clunk (the
+// Batmobile's and the F-16's) come from the Batmobile's voice.
+gta4::car::EngineSynth g_bat_synth{gta4::car::kBatmobile}, g_deimos_synth{gta4::car::kDeimos};
 #if REX_PLATFORM_PS5
-class BatSource final : public gta4ps5::sound::Source {
+class SynthSource final : public gta4ps5::sound::Source {
  public:
+  explicit SynthSource(gta4::car::EngineSynth& synth) : synth_(synth) {}
   size_t Read(float* lr, size_t frames) override {
-    g_bat_synth.Render(lr, frames);
+    synth_.Render(lr, frames);
     return frames;
   }
   bool Rewind() override { return true; }
+
+ private:
+  gta4::car::EngineSynth& synth_;
 };
-gta4ps5::sound::Voice* g_bat_voice = nullptr;
 #endif
-struct BatEngineState {
+struct CarEngineState {
+  gta4::car::EngineSynth* synth;
+  std::string_view label, model;
+  std::array<float, 5> gear_top;  // m/s at the rev limit in each gear
   bool in_car = false, running = false;  // running: the voice plays (winding down too)
   int gear = 0;
   uint64_t next_probe = 0;
   int log = 0;
-};
-BatEngineState g_bat_engine;
-constexpr float kBatGearTop[5] = {12.0f, 21.0f, 31.0f, 42.0f, 56.0f};  // m/s at the rev limit in each gear
-constexpr float kBatVolume = 1.0f;
-
-// Starts the voice (want) or stops it once the synth has gone quiet.
-void BatVoice(bool want) {
 #if REX_PLATFORM_PS5
-  if (!g_bat_voice) {
+  gta4ps5::sound::Voice* voice = nullptr;
+#endif
+};
+CarEngineState g_bat_engine{&g_bat_synth, "Batmobile", "BATMOBILE", {12.0f, 21.0f, 31.0f, 42.0f, 56.0f}};
+CarEngineState g_deimos_engine{&g_deimos_synth, "Deimos", "DEIMOS", {14.0f, 24.0f, 35.0f, 47.0f, 62.0f}};
+constexpr float kCarEngineVolume = 1.0f;
+
+// Starts a car's voice (want) or stops it once its synth has gone quiet.
+void CarVoice(CarEngineState& e, bool want) {
+#if REX_PLATFORM_PS5
+  if (!e.voice) {
     if (!want)
       return;
     gta4ps5::sound::StartOutput();
-    g_bat_voice = gta4ps5::sound::NewVoice();
-    g_bat_voice->game_sound = true;  // quiet while the game mutes its own sound
+    e.voice = gta4ps5::sound::NewVoice();
+    e.voice->game_sound = true;  // quiet while the game mutes its own sound
   }
-  if (want && !g_bat_voice->Active()) {
-    g_bat_voice->SetVolume(1.0f);
-    g_bat_voice->Play(std::make_unique<BatSource>(), true);
-  } else if (!want && g_bat_voice->Active() && g_bat_synth.Quiet()) {
-    g_bat_voice->Stop();
+  if (want && !e.voice->Active()) {
+    e.voice->SetVolume(1.0f);
+    e.voice->Play(std::make_unique<SynthSource>(*e.synth), true);
+  } else if (!want && e.voice->Active() && e.synth->Quiet()) {
+    e.voice->Stop();
   }
 #else
+  (void)e;
   (void)want;
 #endif
 }
@@ -3290,41 +3350,49 @@ void CanopySound(bool opening) {
     g_bat_synth.CanopyOpen();
   else
     g_bat_synth.CanopyShut();
-  BatVoice(true);
-  g_bat_engine.running = true;  // (stopped by BatEngine once quiet)
+  CarVoice(g_bat_engine, true);
+  g_bat_engine.running = true;  // (stopped by CarEngine once quiet)
 }
 
-// Every frame in the Batmobile, and while the voice still sounds after
-// getting out; a look a few times a second otherwise.
-void BatEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const DrivePad& pad) {
-  auto& e = g_bat_engine;
+// The Deimos's pop-up lamps' motor, for as long as they swing.
+void PopupMotorSound(float seconds) {
+  g_deimos_synth.Motor(seconds);
+  CarVoice(g_deimos_engine, true);
+  g_deimos_engine.running = true;
+}
+
+// Every frame in the car, and while its voice still sounds after getting
+// out; a look a few times a second otherwise.
+void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const DrivePad& pad, CarEngineState& e,
+               float boost) {
   const uint64_t now = NowMs();
   if (!e.in_car && !e.running && now < e.next_probe)
     return;
   e.next_probe = now + 300;
-  static const uint32_t kBat = ModelHash("BATMOBILE");
+  const uint32_t model = ModelHash(e.model);
   const auto& vehicle = PlayerVehicle(ctx, base, game);
-  if (!vehicle.car || vehicle.model != kBat) {
+  auto& synth = *e.synth;
+  if (!vehicle.car || vehicle.model != model) {
     if (e.in_car)
-      g_bat_synth.SetTarget(0.0f, 0.0f, 0.0f, kBatVolume);  // switched off: it winds down
+      synth.SetTarget(0.0f, 0.0f, 0.0f, kCarEngineVolume);  // switched off: it winds down
     e.in_car = false;
-    BatVoice(false);
+    CarVoice(e, false);
 #if REX_PLATFORM_PS5
-    e.running = g_bat_voice && g_bat_voice->Active();
+    e.running = e.voice && e.voice->Active();
 #else
     e.running = false;
 #endif
     return;
   }
-  const float idle = gta4::bat::EngineSynth::kIdle;
+  const float idle = gta4::car::EngineSynth::kIdle;
   if (!e.in_car) {
     e.in_car = e.running = true;
     e.gear = 0;
-    g_bat_synth.SetTarget(idle, 0.0f, 0.0f, kBatVolume);  // the starter, then idle
-    BatVoice(true);
+    synth.SetTarget(idle, 0.0f, 0.0f, kCarEngineVolume);  // the starter, then idle
+    CarVoice(e, true);
     if (e.log < 4) {
       ++e.log;
-      REXLOG_INFO("gta4-trainer: Batmobile engine started (synthesized)");
+      REXLOG_INFO("gta4-trainer: {} engine started (synthesized)", std::string(e.label));
     }
   }
   float speed = 0.0f;
@@ -3332,14 +3400,14 @@ void BatEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
     speed = std::fabs(v->f(0));
   const float throttle = pad.right_trigger / 255.0f;
   // Five gears: up near the limit, down when the revs fall low.
-  if (speed > kBatGearTop[e.gear] * 0.94f && e.gear < 4)
+  if (speed > e.gear_top[size_t(e.gear)] * 0.94f && e.gear < 4)
     ++e.gear;
-  else if (e.gear > 0 && speed < kBatGearTop[e.gear - 1] * 0.55f)
+  else if (e.gear > 0 && speed < e.gear_top[size_t(e.gear - 1)] * 0.55f)
     --e.gear;
-  float rpm = idle + (1.0f - idle) * std::clamp(speed / kBatGearTop[e.gear], 0.0f, 1.0f);
+  float rpm = idle + (1.0f - idle) * std::clamp(speed / e.gear_top[size_t(e.gear)], 0.0f, 1.0f);
   // Standing (or crawling) the throttle revs it.
   rpm = std::max(rpm, idle + (1.0f - idle) * 0.6f * throttle * (speed < 3.0f ? 1.0f : 0.35f));
-  g_bat_synth.SetTarget(rpm, throttle, g_gadget.boosting ? 1.0f : 0.0f, kBatVolume);
+  synth.SetTarget(rpm, throttle, boost, kCarEngineVolume);
 }
 
 // Every frame in the F-16 (a look a few times a second otherwise, and while
@@ -4088,10 +4156,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool jet_canopy_due = g_have_f16 && (CanopyBusy(g_jet_canopy) || now >= g_jet_canopy.next_probe);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
                                                    now >= g_bat_engine.next_probe);
+  const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
+                                                   now >= g_deimos_engine.next_probe);
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due &&
-      !jet_canopy_due && !teleport_due && !bat_engine_due &&
+      !jet_canopy_due && !teleport_due && !bat_engine_due && !deimos_engine_due &&
       s.pending_model < 0 && !jet_due && !rain_due && !popup_due && !lights_due && !drive_due &&
       g_addons_probed)
     return;
@@ -4184,13 +4254,16 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   if (jet_canopy_due)
     vehicle_mask |= Canopy(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), kJetCanopy,
                            g_jet_canopy);
-  if (bat_engine_due) {
+  if (bat_engine_due || deimos_engine_due) {
     DrivePad pad;
     {
       std::lock_guard lock(g_drive_mutex);
       pad = g_drive_pad;
     }
-    BatEngine(ctx, base, game, pad);
+    if (bat_engine_due)
+      CarEngine(ctx, base, game, pad, g_bat_engine, g_gadget.boosting ? 1.0f : 0.0f);
+    if (deimos_engine_due)
+      CarEngine(ctx, base, game, pad, g_deimos_engine, 0.0f);
   }
   if (jet_due) {
     DrivePad pad;

@@ -2,13 +2,27 @@
 
 An add-on car on PC, and here too: its own vehicle (`deimos`), with the mod's
 own handling and colour combinations. Spawn **Car Spawning → Grotti Deimos
-GTS**. In-game it shows the Turismo's name (and has its engine sound), as the
-mod's line chooses.
+GTS**. Its game name is its own (`DEIMOS`), so IV gives it no engine sound
+of its own: the trainer plays a synthesized one (below). Up to v1.7.12 it
+showed the Turismo's name and had its engine, as the mod's line chooses.
+
+## Engine sound
+
+An original synthesized voice (`src/gta4_car_engine.h`, character
+`kDeimos`): a small mid-engined Italian V8 with a flat-plane crank, as the
+1970s-80s cars the Deimos echoes had. An even beat alternating between the
+banks (no American burble), a busy idle at 950 rpm, revs to 7,700, a bright
+exhaust and the carburettors' howl at twice the firing rate opening with the
+revs, pops on lift-off. The revs come from the road speed through five
+simulated gears; getting in cranks it, getting out it winds down. The pods'
+electric motor whirs as they swing. `tools/car/render_preview.cpp deimos`
+renders a scripted drive to a WAV.
 
 ## Pop-up headlights
 
-In the car, **d-pad left** raises or lowers the lamp pods, and the headlights
-follow (pods up: lights on, pods down: lights off). The pods swing up on
+Getting in, the pods flip up and the lamps come on; getting out, they flip
+down and go off. In the car, **d-pad left** raises or lowers the lamp pods,
+and the headlights follow (pods up: lights on, pods down: lights off). The pods swing up on
 their hinge in about a third of a second. The d-pad doesn't change the radio
 in the Deimos. *Vehicle Options → Deimos Pop-ups* switches to **Automatic**:
 up whenever IV turns car lights on (night, rain, fog).

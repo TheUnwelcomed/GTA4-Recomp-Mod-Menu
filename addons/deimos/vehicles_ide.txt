@@ -1,1 +1,1 @@
-deimos, deimos, car, DEIMOS, TURISMO, VEH@LOW, VEH@LOW_LE1_RI1, 0, 10, 0.2667, 0.2667, 0, 5, 1.0, 0, sports
+deimos, deimos, car, DEIMOS, DEIMOS, VEH@LOW, VEH@LOW_LE1_RI1, 0, 10, 0.2667, 0.2667, 0, 5, 1.0, 0, sports

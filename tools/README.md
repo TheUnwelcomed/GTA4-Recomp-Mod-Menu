@@ -12,7 +12,7 @@ console exports and the mods' own files.
 | `re/ppc_asm.py` | A game function's PowerPC assembly, from the comments the recompiler leaves in `generated/gta4_recomp.*.cpp`; `--find` lists the functions using an instruction pattern. |
 | `jet/render_preview.cpp` | Renders the F-16's synthesized engine (`src/gta4_jet_engine.h`) to a WAV through a scripted flight (start-up, throttle, afterburner, cannon, missile, shutdown), to hear changes without a console. |
 | `jet/flight_model_sim.py` | The F-16's flight model (the trainer's equations) run through takeoff, an idle glide, banks, a pulled turn, a stall, the afterburner and the rudder; prints speed, climb, bank, heading and height. |
-| `bat/render_preview.cpp` | Renders the Batmobile's synthesized engine (`src/gta4_bat_engine.h`) through a scripted drive (start-up, idle, blips, four gears, cruise, booster, lift-off, the canopy, shut down). |
+| `car/render_preview.cpp` | Renders an add-on car's synthesized engine (`src/gta4_car_engine.h`: `batmobile` or `deimos`) through a scripted drive (start-up, idle, blips, four gears, cruise, booster or full throttle, lift-off, the canopy or the pop-up lamps, shut down). |
 | `unarc.py` | Unpacks `.rar` / `.7z` / `.zip` mod archives with the system's libarchive (no unrar needed): `python3 -I unarc.py mod.rar outdir`. |
 
 ## Game addresses the trainer relies on (360 build)

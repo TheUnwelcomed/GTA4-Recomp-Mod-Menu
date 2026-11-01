@@ -27,7 +27,7 @@ stock FBI lines back by itself.
 | Parts it has no mesh for (rear doors, sirens) | not drawn |
 | Canopy | pops open when you get in or out (see below); it rides the FBI's `interiorlight` bone, hinged at its rear edge |
 | Its doors, bonnet, boot | fixed to the body (the mod parks its door bones 13 m under the car; v1.7.4 drew the parts there, the long black shapes) |
-| Engine sound | its own, synthesized (`src/gta4_bat_engine.h`; see below). Its game name is `BATMOBILE`, which has no engine sound in IV; up to v1.7.10 it was `SABREGT` and drove with the Sabre GT's |
+| Engine sound | its own, synthesized (`src/gta4_car_engine.h`; see below). Its game name is `BATMOBILE`, which has no engine sound in IV; up to v1.7.10 it was `SABREGT` and drove with the Sabre GT's |
 | Gadget script (ScriptHookDotNet `.net.dll`s) | cannot run on the port. The trainer re-creates its missiles, miniguns, bombs and booster: see below |
 | Physics wheels | the mod's own sizes (0.35 m front, 0.39 m rear); on the FBI's 0.40 m wheels it sat high |
 | Body shader | the template's `interior2`, as the mod's `interior` maps to: v1.7.5-v1.7.6 borrowed the police car's `interior` and the body came out chrome |
@@ -41,13 +41,16 @@ skeleton, as it turns the Deimos's lamp pods, and moves the player with
 `WARP_CHAR_INTO_CAR` / `WARP_CHAR_FROM_CAR_TO_COORD`. The cockpit under the
 canopy (seats, dash, wheel) is the mod's own.
 
-Setting the player down (since v1.7.11): tasks cleared, then warped out of
-the seat (or placed, if already out) on the ground beside the cockpit, the
-ground looked for from above the car's roof, falling back to the ground under
-the car when the answer is implausible. For four seconds the trainer
-watches: dropping through the world, the player is held still on the spot
-(`FREEZE_CHAR_POSITION`, collision on) and let go 0.35 s later, up to four
-times, then put back in the seat. Each step is logged.
+Getting out (since v1.7.12, at a standstill; rolling, Triangle is the
+game's own exit): the canopy opens, the game's own exit takes the player out
+(`CLEAR_CHAR_TASKS`, `TASK_LEAVE_CAR_IMMEDIATELY`, as Rockstar's
+`brucie_heli` gets the player out of a car), hidden while he climbs out
+(`SET_CHAR_VISIBLE`); on his feet he is put on the ground beside the cockpit
+(`SET_CHAR_COORDINATES`, the ground found from above the car's roof) and
+shown, and the canopy closes. v1.7.8-v1.7.11 warped him out of the seat
+(`WARP_CHAR_FROM_CAR_TO_COORD`) and he dropped through the world. For four
+seconds the trainer still watches: dropping, the player is held on the spot
+and let go a moment later, up to four times, then put back in the seat.
 
 ## Engine sound
 
@@ -59,7 +62,7 @@ roar with crackles on the booster. The trainer works the revs out of the road
 speed through five simulated gears (the throttle revs it standing still);
 getting in cranks the starter and it catches; getting out it winds down. The
 canopy's hiss and clunk come from the same voice (the F-16's canopy too).
-`tools/bat/render_preview.cpp` renders a scripted drive to a WAV.
+`tools/car/render_preview.cpp batmobile` renders a scripted drive to a WAV.
 
 ## Gadgets
 

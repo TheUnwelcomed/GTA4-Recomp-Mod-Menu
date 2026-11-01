@@ -1,23 +1,28 @@
-// Renders the Batmobile's synthesized engine (src/gta4_bat_engine.h) to a WAV
+// Renders an add-on car's synthesized engine (src/gta4_car_engine.h) to a WAV
 // file through a scripted drive: start-up, idle, two blips of the throttle,
-// four gears, a cruise, the booster, a lift-off, idle, the canopy opening and
-// shutting, shut down. With a second argument it also writes the script's
-// section boundaries (seconds) for a level check.
+// four gears, a cruise, the booster (Batmobile), a lift-off, idle, the car's
+// own sounds (the Batmobile's canopy opening and shutting, the Deimos's
+// pop-up lamps going up and down), shut down. With a third argument it also
+// writes the script's section boundaries (seconds) for a level check.
 //   c++ -std=c++20 -O2 -Wall -Wextra -I../../src render_preview.cpp -o render_preview
-//   ./render_preview bat_preview.wav [sections.txt]
+//   ./render_preview batmobile bat_preview.wav [sections.txt]
+//   ./render_preview deimos deimos_preview.wav [sections.txt]
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
-#include "gta4_bat_engine.h"
+#include "gta4_car_engine.h"
 
 int main(int argc, char** argv) {
-  const char* out = argc > 1 ? argv[1] : "bat_preview.wav";
-  static gta4::bat::EngineSynth synth;
+  const bool deimos = argc > 1 && std::strcmp(argv[1], "deimos") == 0;
+  const char* out = argc > 2 ? argv[2] : (deimos ? "deimos_preview.wav" : "bat_preview.wav");
+  static gta4::car::EngineSynth synth(deimos ? gta4::car::kDeimos : gta4::car::kBatmobile);
   constexpr int kRate = 48000, kBlock = 256;
-  constexpr float idle = gta4::bat::EngineSynth::kIdle;
+  constexpr float idle = gta4::car::EngineSynth::kIdle;
   struct Step { float until, rpm0, rpm1, throttle, boost; const char* name; };
   // seconds: what the trainer would set by then (rpm ramps from rpm0 to rpm1)
+  const float boost = deimos ? 0.0f : 1.0f;
   const Step script[] = {
       {0.5f, 0, 0, 0, 0, "silence"},
       {3.0f, idle, idle, 0, 0, "start-up"},
@@ -31,14 +36,14 @@ int main(int argc, char** argv) {
       {14.8f, 0.58f, 0.95f, 1, 0, "gear 3"},
       {17.4f, 0.62f, 0.93f, 1, 0, "gear 4"},
       {20.0f, 0.7f, 0.7f, 0.45f, 0, "cruise"},
-      {23.0f, 0.75f, 0.95f, 1, 1, "boost"},
+      {23.0f, 0.75f, 0.95f, 1, boost, deimos ? "full throttle" : "boost"},
       {25.0f, 0.95f, 0.4f, 0, 0, "lift-off"},
-      {27.5f, idle, idle, 0, 0, "idle 2 (canopy at 25.5 / 27.0)"},
+      {27.5f, idle, idle, 0, 0, deimos ? "idle 2 (lamps up 25.5, down 26.7)" : "idle 2 (canopy at 25.5 / 27.0)"},
       {31.5f, 0, 0, 0, 0, "shut down"},
   };
   constexpr int kSteps = sizeof(script) / sizeof(script[0]);
-  if (argc > 2) {
-    if (FILE* s = std::fopen(argv[2], "w")) {
+  if (argc > 3) {
+    if (FILE* s = std::fopen(argv[3], "w")) {
       float from = 0;
       for (const auto& st : script) {
         std::fprintf(s, "%.2f %.2f %s\n", from, st.until, st.name);
@@ -51,15 +56,21 @@ int main(int argc, char** argv) {
   float lr[kBlock * 2];
   double t = 0;
   int step = 0;
-  bool opened = false, shut = false;
+  bool first = false, second = false;
   while (t < 31.5) {
     while (step + 1 < kSteps && t >= script[step].until) ++step;
     const auto& s = script[step];
     const float from = step ? script[step - 1].until : 0.0f;
     const float u = float((t - from) / (s.until - from));
     synth.SetTarget(s.rpm0 + (s.rpm1 - s.rpm0) * u, s.throttle, s.boost, 1.0f);
-    if (!opened && t >= 25.5) { synth.CanopyOpen(); opened = true; }
-    if (!shut && t >= 27.0) { synth.CanopyShut(); shut = true; }
+    if (!first && t >= 25.5) {
+      deimos ? synth.Motor(0.4f) : synth.CanopyOpen();
+      first = true;
+    }
+    if (!second && t >= (deimos ? 26.7 : 27.0)) {
+      deimos ? synth.Motor(0.4f) : synth.CanopyShut();
+      second = true;
+    }
     synth.Render(lr, kBlock);
     for (float v : lr) {
       const float c = v > 1 ? 1 : (v < -1 ? -1 : v);

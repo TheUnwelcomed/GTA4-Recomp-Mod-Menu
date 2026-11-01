@@ -136,6 +136,15 @@ network session.
 
 ## Changes
 
+- **v1.7.13**: the Grotti Deimos gets its own synthesized engine (a
+  high-revving flat-plane Italian V8 with a carburettor howl) and a motor
+  whir for its pop-up lamps; its game name is now `DEIMOS` (no Turismo
+  engine).
+- **v1.7.12**: getting out through a canopy uses the game's own exit
+  (`TASK_LEAVE_CAR_IMMEDIATELY`, hidden while the player climbs out), then
+  puts the player beside the cockpit: warping out of the seat
+  (`WARP_CHAR_FROM_CAR_TO_COORD`, v1.7.8-v1.7.11) dropped him through the
+  world. Canopies open only at a standstill.
 - **v1.7.11**: the F-16 gets a canopy that rises as you get in and out, flies
   the way GTA V's jets do (speed from the engine, stalls, LB/RB rudder),
   locks its missiles and cannon on a car ahead, fires from both sides and is
@@ -171,7 +180,7 @@ network session.
 |---|---|
 | `src/gta4_trainer.h` / `src/gta4_trainer.cpp` | the whole trainer |
 | `src/gta4_jet_engine.h` | the F-16's synthesized engine (plain C++, played through the port's own mixer; `tools/jet/` renders it to a file) |
-| `src/gta4_bat_engine.h` | the Batmobile's synthesized engine and canopy sounds (the same way; `tools/bat/` renders it) |
+| `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's, the Deimos's) and their canopy and pop-up lamp sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `patches/liberty-trainer.patch` | the five small wiring edits to the port |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
@@ -186,7 +195,7 @@ describes:
 ```
 git clone https://github.com/elripalda/gta4-ps5 && cd gta4-ps5 && ./setup.sh
 git apply /path/to/patches/liberty-trainer.patch
-cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* /path/to/src/gta4_jet_engine.h /path/to/src/gta4_bat_engine.h glue/rexglue-sdk-main/gta4-recomp/src/
+cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* /path/to/src/gta4_jet_engine.h /path/to/src/gta4_car_engine.h glue/rexglue-sdk-main/gta4-recomp/src/
 # then the cmake + ninja commands from ps5/BUILD.md
 # (glslangValidator must be built with ENABLE_OPT=ON: the shader overrides use -Os)
 ```
