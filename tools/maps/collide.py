@@ -325,10 +325,16 @@ def pair_quads(vq, t, m, dot_min=0.9995, off_max=0.01):
     used = np.zeros(n, bool)
     polys, pm = [], []
 
-    def turns(corners, normal):
+    def turns(corners):
+        """Convex in order round it, every corner turning by more than half a
+        degree, against the normal written for it (its two triangles' sum)."""
+        a_, b_, c_, d_ = (vq[x] for x in corners)
+        normal = np.cross(b_ - a_, c_ - a_) + np.cross(c_ - a_, d_ - a_)
+        normal = normal / max(np.linalg.norm(normal), 1e-12)
         for k in range(4):
-            a_, b_, c_ = vq[corners[k]], vq[corners[(k + 1) % 4]], vq[corners[(k + 2) % 4]]
-            if np.dot(np.cross(b_ - a_, c_ - b_), normal) <= 1e-9:
+            p0, p1, p2 = vq[corners[k]], vq[corners[(k + 1) % 4]], vq[corners[(k + 2) % 4]]
+            e0, e1 = p1 - p0, p2 - p1
+            if np.dot(np.cross(e0, e1), normal) <= 0.01 * np.linalg.norm(e0) * np.linalg.norm(e1):
                 return False
         return True
 
@@ -351,7 +357,7 @@ def pair_quads(vq, t, m, dot_min=0.9995, off_max=0.01):
             if abs(float(np.dot(vq[s_] - vq[p_], un[i]))) > off_max:
                 continue
             quad = [r_, p_, s_, q_]
-            if not turns(quad, un[i] + un[j]):
+            if not turns(quad):
                 continue
             if best is None or dot > best[0]:
                 best = (dot, j, quad)

@@ -186,6 +186,24 @@ network session.
 
 ## Changes
 
+- **v1.7.32**: on the island **only the buildings and palms showed**, floating,
+  and the car landed in the sea: every missing piece was big (the terrain
+  pieces about a kilometre across, the roads and rocks hundreds of metres),
+  everything shown under about 200 m, so the game seemingly neither draws
+  nor collides with an object that big. `mapset.py` now cuts every model
+  over 100 m in radius into tiles of 150 m (`mapdraw.plan_tiles`: cells of
+  its triangles' centres; `MapDrawable(tile=...)` keeps a tile's triangles
+  moved to its origin, the middle of what it holds), each a model with its
+  own drawable (read back: its triangles, indices and positions), IDE line,
+  placement and collision (each piece's collision now in its own model's
+  space, rotations undone: no carrier); render triangles over 3 m under the
+  sea dropped, as the collision's are. The Gator Keys: 119 tiles, 156
+  models; its collision checked in world space against the mod's (400
+  walkable samples, none missing, median 9 mm). The departure plays out
+  before the screen goes dark (v1.7.31 cut it off); a check 3 s after an
+  arrival logs the pieces existing and drawn (`DOES_OBJECT_EXIST`,
+  `IS_OBJECT_ON_SCREEN`) and the ground under the arrival. The installer
+  drops a map set's files the release no longer has (`prefix` in map.txt).
 - **v1.7.31**: the Gator Keys trip **crashed**: waiting for an island that
   never loaded, the player got out; the world took the hidden car (a spawned
   car is handed to it), and the arrival moved a car that was gone

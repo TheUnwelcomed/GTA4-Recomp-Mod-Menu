@@ -6,6 +6,7 @@ pieces as frozen objects when the destination is chosen, and deletes them
 when the trip home is made (one destination loaded at a time).
 
 usage: python3 -I mapset.py <set.json> <source dir> <xdr dir> <template.xtd.bin:flags> <xlzx> <out dir>
+                             [--draw=<template.xdr.bin:flags>,<shader sources dir>]
                              [--skip-textures] [--skip-models]
   set.json     the set's settings (tools/maps/sets/<name>.json)
   source dir   the mod's pieces: <model>.wdr / .wtd / .wbn, the .ide and the
@@ -13,6 +14,8 @@ usage: python3 -I mapset.py <set.json> <source dir> <xdr dir> <template.xtd.bin:
   xdr dir      the models converted by mapdraw.py (<model>.xdr.bin, flags.txt)
   template     a decompressed stock .xtd with a texture with mips
   xlzx         the resource packer (pc2x360/xlzx.cpp)
+  --draw       what mapdraw.py converted the models with: needed for a set
+               with tiles (its big models cut up here)
 
 Writes to <out dir>:
   <prefix><model>.xdr, <prefix><txd>.xtd   models and texture dictionaries
@@ -24,7 +27,9 @@ Writes to <out dir>:
   objs.ide     the models' lines for that .ide
   place.txt    one line per piece for the trainer
   map.txt      the destination: label, date, the shift from the mod's
-               coordinates, its sea level, the arrival, its area
+               coordinates, its sea level, the arrival, its area, the
+               prefix (the installer drops image files with it that the set
+               no longer has)
 
 Every model is renamed <prefix><name> (no clash with the game's own names),
 shortened where that is over 20 characters: the game registers an image's
@@ -32,11 +37,18 @@ files by the first 24 characters of the name, the extension among them (a
 longer one is never registered: v1.7.30's gk_gtr_deco_polgrnda018).
 WPL rotations are stored inverted (checked: Gator Keys' rotated pad lines up
 with its collision only that way), so place.txt carries the true rotation.
-Collision comes in world space, one .wbn per model; a piece whose model is
-placed unrotated moves into the model's space, the rest (rotated pieces,
-collision with no model) join the set's carrier model's composite.
+Collision comes in world space, one .wbn per model; each moves into its
+model's space (its placement's rotation undone). Tiles (v1.7.32): a model
+over the set's tiles.radius across, placed once and unrotated, is cut into
+tiles of tiles.cell metres (mapdraw.plan_tiles), each a model of its own
+named <model>_<n>, its drawable converted here, its collision the piece's
+triangles over its cell, all in its own space round its origin; the game
+neither draws nor collides with a model several hundred metres across placed
+as an object (v1.7.31's island: its terrain and roads missing, its
+buildings there).
 """
 import fnmatch
+import glob
 import json
 import math
 import os
@@ -53,6 +65,7 @@ sys.path.insert(0, HERE)
 import batconv  # noqa: E402
 import bounds360  # noqa: E402
 import collide  # noqa: E402
+import mapdraw  # noqa: E402
 import maptex  # noqa: E402
 import rsc5  # noqa: E402
 
@@ -304,8 +317,64 @@ def pack(xlzx, rtype, flags, body, out_path):
     os.remove(tmp)
 
 
+def quat_matrix(q):
+    """The rotation (x, y, z, w) as a matrix taking model to world (column
+    vectors: world = R @ model)."""
+    x, y, z, w = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def to_model(v, place):
+    """World points into the placed model's space."""
+    return (v - np.array(place['pos'])) @ quat_matrix(place['q'])
+
+
+def tile_of(points, tiles):
+    """For each triangle centre (n x 2) the tile whose cell holds it, or the
+    tile with the nearest origin where none does."""
+    x0, y0, cell = tiles[0]['grid']
+    ix = np.floor((points[:, 0] - x0) / cell).astype(np.int64)
+    iy = np.floor((points[:, 1] - y0) / cell).astype(np.int64)
+    by_cell = {t['cell']: k for k, t in enumerate(tiles)}
+    origins = np.array([t['origin'][:2] for t in tiles])
+    out = np.empty(len(points), np.int64)
+    for i in range(len(points)):
+        k = by_cell.get((int(ix[i]), int(iy[i])))
+        if k is None:
+            k = int(np.argmin(((origins - points[i]) ** 2).sum(axis=1)))
+        out[i] = k
+    return out
+
+
+def check_tile(body, flags, donor, tile):
+    """A tile's drawable read back: the triangles planned for it, every index
+    inside its buffer, every position one of the mod's moved to the tile."""
+    x = rsc5.Resource(body, flags, True, XDR_TYPE, 'tile')
+    xd = rsc5.read_drawable(x, 0)
+    tri = sum(g['index_count'] // 3 for m in xd['lods'][0] for g in m['geometries'])
+    assert tri == tile['triangles'], (tri, tile['triangles'])
+    pc = np.unique(mapdraw.pc_triangles(donor).reshape(-1, 3), axis=0)
+    ox, oy, oz = tile['origin']
+    checked = 0
+    for m in xd['lods'][0]:
+        for g in m['geometries']:
+            n = g['vertex_count'] or g['vb_count']
+            idx = struct.unpack_from('>%dH' % g['index_count'], x.phys, g['ib_data'][1])
+            assert max(idx) < n
+            at = dict(batconv.vertex_layout(g['decl']['usage'], batconv.SIZE_360)[0])[0]
+            for v in range(0, n, max(1, n // 50)):
+                px, py, pz = struct.unpack_from('>3f', x.phys, g['vb_data'][1] + v * g['vb_stride'] + at)
+                miss = np.abs(pc - np.array([px + ox, py + oy, pz + oz])).max(axis=1).min()
+                assert miss < 2e-3, (px, py, pz, miss)
+                checked += 1
+    return tri, checked
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    draw_arg = next((a[len('--draw='):] for a in sys.argv[1:] if a.startswith('--draw=')), None)
     skip = {a[len('--skip-'):] for a in sys.argv[1:] if a.startswith('--skip-')}  # textures, models
     set_path, src, xdr_dir, tmpl_arg, xlzx, out = args[:6]
     cfg = json.load(open(set_path))
@@ -323,11 +392,31 @@ def main():
                 placed.append(dict(inst, model=by_hash[inst['hash']]))
     print('%d models, %d pieces placed (%s)' % (len(models), len(placed), ', '.join(cfg['wpl'])))
     where = {p['model']: p for p in placed}
-    # the game's names for the models and the texture dictionaries
-    mname = short_names(models, prefix, cfg.get('rename'))
+    # ---- tiles: the big models, placed once and unrotated, cut up
+    tcfg = cfg.get('tiles')
+    tiles_of = {}
+    if tcfg:
+        for m, fields in sorted(models.items()):
+            p = where.get(m)
+            if float(fields[14]) <= tcfg['radius'] or p is None or abs(p['q'][3]) < 0.99999:
+                continue
+            donor = rsc5.Resource.pc(os.path.join(src, m + '.wdr'))
+            zmin = cfg['sea'] - tcfg.get('below_sea', 6.0) - p['pos'][2]
+            ts = mapdraw.plan_tiles(donor, tcfg['cell'], zmin)
+            x0 = ts[0]['lo'][0] - ts[0]['cell'][0] * tcfg['cell']
+            y0 = ts[0]['lo'][1] - ts[0]['cell'][1] * tcfg['cell']
+            for k, t in enumerate(ts):
+                t['key'] = '%s_%d' % (m, k)
+                t['grid'] = (x0, y0, tcfg['cell'])
+            tiles_of[m] = (donor, ts)
+        print('tiles: %s' % ', '.join('%s %d' % (m, len(ts)) for m, (_, ts) in sorted(tiles_of.items())))
+    # the game's names for the models (a tiled one's tiles) and the texture dictionaries
+    game_names = [m for m in models if m not in tiles_of] + [t['key'] for _, ts in tiles_of.values() for t in ts]
+    mname = short_names(game_names, prefix, cfg.get('rename'))
     tname = short_names({f[1].lower() for f in models.values()}, prefix, cfg.get('rename'))
     for k in sorted(set(mname) | set(tname)):
-        if mname.get(k, prefix + k) != prefix + k or tname.get(k, prefix + k) != prefix + k:
+        if mname.get(k, prefix + k) not in (prefix + k, prefix + k.replace('_', '')) or \
+                tname.get(k, prefix + k) != prefix + k:
             print('renamed %s -> model %s, dictionary %s' % (k, mname.get(k, '-'), tname.get(k, '-')))
 
     # ---- textures: each dictionary holds what its models reference
@@ -396,19 +485,37 @@ def main():
     for m in sorted(models):
         if 'models' in skip:
             break
+        if m in tiles_of:
+            continue
         body = open(os.path.join(xdr_dir, m + '.xdr.bin'), 'rb').read()
         pack(xlzx, XDR_TYPE, flags_of[m], body, os.path.join(out, mname[m] + '.xdr'))
         total_xdr += len(body)
-    print('models: %.1f MiB, %d drawables' % (total_xdr / 1048576.0, len(models)))
+    if tiles_of:
+        assert draw_arg, 'a set with tiles needs --draw (what mapdraw.py converted the models with)'
+        dtmpl_arg, shader_dir = draw_arg.split(',', 1)
+        dtmpl_path, dtmpl_flags = dtmpl_arg.rsplit(':', 1)
+        dtmpl = rsc5.Resource(open(dtmpl_path, 'rb').read(), int(dtmpl_flags, 16), True, XDR_TYPE, dtmpl_path)
+        sources = [mapdraw.load_console(q) for q in sorted(glob.glob(os.path.join(shader_dir, '*.bin')))]
+        for k, fb in mapdraw.MAP_FALLBACK.items():
+            batconv.SPS_FALLBACK.setdefault(k, fb)
+        tiles_done = 0
+        for m, (donor, ts) in sorted(tiles_of.items()):
+            for t in ts:
+                conv = mapdraw.MapDrawable(dtmpl, donor, sources, log=lambda msg: None, tile=t)
+                flags, body = conv.run()
+                t['bounds'] = conv.tile_bounds()
+                check_tile(body, flags, donor, t)
+                if 'models' not in skip:
+                    pack(xlzx, XDR_TYPE, flags, body, os.path.join(out, mname[t['key']] + '.xdr'))
+                total_xdr += len(body)
+                tiles_done += 1
+        print('tiles: %d drawables, every one read back (its triangles, indices and positions)' % tiles_done)
+    print('models: %.1f MiB, %d drawables' % (total_xdr / 1048576.0, len(game_names)))
 
     # ---- collision: each .wbn (world space) welded, cut below the shallows,
-    # decimated within the set's error and split into BVH meshes (collide.py);
-    # a piece whose model is placed unrotated in that model's space, the rest
-    # (rotated pieces, collision with no model) in the carrier's
+    # decimated within the set's error, moved into its model's space (a tiled
+    # model's: each triangle into its tile's) and split into BVH meshes
     col = cfg.get('collision', {})
-    carrier = cfg['carrier']
-    cpos = where[carrier]['pos']
-    assert abs(where[carrier]['q'][3]) > 0.99999, 'the carrier must be placed unrotated'
     floor_z = cfg['sea'] - col.get('seabed', 3.0)
 
     def error_for(name):
@@ -417,7 +524,7 @@ def main():
                 return e
         return col.get('error', {}).get('*', 0.2)
 
-    gathered, pieces_world, dropped, joined = {}, [], [], []
+    gathered, pieces_world, dropped, unplaced = {}, [], [], []
     tri_in = tri_out = 0
     for f in sorted(os.listdir(src)):
         if not f.endswith('.wbn'):
@@ -428,20 +535,27 @@ def main():
         if any(fnmatch.fnmatch(name, pat) for pat in col.get('drop', [])):
             dropped.append(name)
             continue
+        p = where.get(name)
+        if p is None:
+            unplaced.append(name)
+            continue
         v, t, m = collide.soup(b)
         tri_in += len(t)
         v, t, m = collide.weld(v, t, m, col.get('weld', 0.02))
         v, t, m = collide.cut_below(v, t, m, floor_z)
         v, t, m = collide.decimate(v, t, m, error_for(name))
         tri_out += len(t)
-        p = where.get(name)
-        if p and abs(p['q'][3]) > 0.99999 and name != carrier:
-            key, shift = mname[name], p['pos']
+        local = to_model(v, p)
+        if name in tiles_of:
+            ts = tiles_of[name][1]
+            which = tile_of(local[t].mean(axis=1)[:, :2], ts)
+            for k in np.unique(which):
+                sel = which == k
+                tv, tt, tm = collide.compact(local, t[sel], m[sel])
+                gathered.setdefault(mname[ts[k]['key']], []).append((tv - np.array(ts[k]['origin']), tt, tm))
         else:
-            key, shift = mname[carrier], cpos
-            if name != carrier:
-                joined.append(name)
-        gathered.setdefault(key, []).append((v - np.array(shift), t, m))
+            gathered.setdefault(mname[name], []).append((local, t, m))
+    assert not unplaced, 'collision with no placed model: %s (drop it)' % ', '.join(unplaced)
     entries = []
     worst = 0.0
     for key in sorted(gathered):
@@ -453,26 +567,37 @@ def main():
     body, xflags = build_dictionary(entries)
     n = bounds360.check(body, xflags, entries)
     pack(xlzx, XBD_TYPE, xflags, body, os.path.join(out, cfg['bounds'] + '.xbd'))
-    print('collision: %d bounds, %d triangles from %d (%s joined to %s; no collision: %s), %.2f MiB, flags %08X, '
-          'trees walked: worst %.4f m' % (n, tri_out, tri_in, ', '.join(joined), carrier, ', '.join(dropped),
-                                         len(body) / 1048576.0, xflags, worst))
+    print('collision: %d bounds, %d triangles from %d (no collision: %s), %.2f MiB, flags %08X, trees walked: '
+          'worst %.4f m' % (n, tri_out, tri_in, ', '.join(dropped), len(body) / 1048576.0, xflags, worst))
     with_bounds = {name for name, _ in entries}
 
     # ---- the models' lines, the pieces, the destination
     with open(os.path.join(out, 'objs.ide'), 'w', newline='\r\n') as f:
         for m, fields in sorted(models.items()):
             line = list(fields)
-            line[0] = mname[m]
             line[1] = tname[fields[1].lower()]
             line[-1] = 'null'
+            if m in tiles_of:
+                for t in tiles_of[m][1]:
+                    lo, hi, centre, radius = t['bounds']
+                    line[0] = mname[t['key']]
+                    line[5:15] = ['%.4f' % x for x in (*lo, *hi, *centre, radius)]
+                    f.write(', '.join(line) + '\n')
+                continue
+            line[0] = mname[m]
             f.write(', '.join(line) + '\n')
     with open(os.path.join(out, 'place.txt'), 'w') as f:
         f.write('# model qx qy qz qw x y z collision (the mod\'s coordinates)\n')
+        count = 0
         for p in placed:
             q, pos = p['q'], p['pos']
-            f.write('%s %.6f %.6f %.6f %.6f %.3f %.3f %.3f %d\n' % (
-                mname[p['model']], q[0], q[1], q[2], q[3], pos[0], pos[1], pos[2],
-                1 if mname[p['model']] in with_bounds else 0))
+            parts = [(mname[p['model']], (0.0, 0.0, 0.0))] if p['model'] not in tiles_of else \
+                [(mname[t['key']], t['origin']) for t in tiles_of[p['model']][1]]
+            for name, o in parts:
+                f.write('%s %.6f %.6f %.6f %.6f %.3f %.3f %.3f %d\n' % (
+                    name, q[0], q[1], q[2], q[3], pos[0] + o[0], pos[1] + o[1], pos[2] + o[2],
+                    1 if name in with_bounds else 0))
+                count += 1
     allpts = np.concatenate([mesh_points(b) for b in pieces_world])
     lo, hi = allpts[:, :2].min(0), allpts[:, :2].max(0)
     hm, hlo, cell = height_map(pieces_world)
@@ -486,7 +611,8 @@ def main():
         f.write('shift %.1f %.1f\nsea %.2f\n' % (cfg['to'][0] - cfg['from'][0], cfg['to'][1] - cfg['from'][1], cfg['sea']))
         f.write('arrive %.2f %.2f %.2f %.1f %.0f\n' % tuple(arrive))
         f.write('area %.1f %.1f %.1f %.1f\n' % (lo[0], lo[1], hi[0], hi[1]))
-        f.write('pieces %d\n' % len(placed))
+        f.write('pieces %d\n' % count)
+        f.write('prefix %s\n' % prefix)  # (the installer drops files with it this set no longer has)
     print('wrote %s' % out)
 
 

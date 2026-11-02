@@ -235,6 +235,8 @@ std::array g_natives = {
     // v1.7.30: map destinations (the pieces placed exactly), no dragging the
     // player out of the armoured cars and aircraft.
     NativeEntry{"CREATE_OBJECT_NO_OFFSET"}, NativeEntry{"SET_CHAR_CANT_BE_DRAGGED_OUT"},
+    // v1.7.32: the map's pieces checked after the arrival.
+    NativeEntry{"DOES_OBJECT_EXIST"}, NativeEntry{"IS_OBJECT_ON_SCREEN"},
 };
 std::mutex g_native_mutex;
 
@@ -5737,6 +5739,10 @@ struct TimeMachineState {
   float dest[3]{};
   Quat dest_q;
   std::string arrive_toast;
+  // v1.7.32: the departure plays out first (the car gone in its flash, the
+  // trails burning where it left, kGoneMs), then the screen goes dark and
+  // the car goes on ahead (v1.7.31 went dark at once: the departure cut off).
+  uint64_t veil_at = 0;
 };
 TimeMachineState g_tm;
 constexpr float kTmContact = 0.55f;  // its origin over the road on its wheels (the rear patches' depth)
@@ -5933,19 +5939,12 @@ void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
   Invoke(ctx, base, "SET_CAR_COLLISION", {m.car, 0});
   Invoke(ctx, base, "FREEZE_CAR_POSITION", {m.car, 1});
   Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 0});
-  // To a place, or home from one (v1.7.31): the car waits high over where it
-  // is going, so the world there streams in (and the city's out, making
-  // room), the screen veiled until it is back.
+  // To a place, or home from one: once the departure has played out (see
+  // TimeMachine), the car waits high over where it is going (v1.7.31), so
+  // the world there streams in and the city's out, the screen dark.
   m.moved = m.dest_set = m.unload_after = false;
+  m.veil_at = 0;
   m.arrive_toast.clear();
-  if (m.trip_map || m.going_home) {
-    std::array<float, 3> over{m.home[0], m.home[1], m.home[2]};
-    if (m.trip_map)
-      over = MapPoint(*m.trip_map, m.trip_map->arrive[0], m.trip_map->arrive[1], m.trip_map->arrive[2]);
-    PlaceCar(ctx, base, m.car, over[0], over[1], over[2] + 60.0f);
-    m.moved = true;
-    Veil(1.0f, 450);
-  }
   // The time circuits: the clock goes to the destination's time; the
   // present becomes the destination, the last time departed the old present.
   m.last = m.present;
@@ -5966,8 +5965,9 @@ void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
 // as it was, with a triple boom; frosted over, its vents steaming.
 void Arrive(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m) {
   const uint64_t away = NowMs() - m.phase_at;
-  if (m.moved || VeilLevel(NowMs()) > 0.0f)
-    Veil(0.0f, 700);
+  const bool veiled = m.moved || VeilLevel(NowMs()) > 0.0f;
+  if (veiled)
+    Veil(0.0f, 450);
   m.moved = false;
   if (!VehicleAddress(base, m.car)) {  // (v1.7.30's crash: the car was gone, its handle stale)
     Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
@@ -5994,7 +5994,7 @@ void Arrive(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
   Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {m.car, Bits(m.hover ? m.fwd : m.gone_speed * 0.92f)});
   g_tm_synth.Arrive();
   m.booms_left = 3;
-  m.next_boom = NowMs();
+  m.next_boom = NowMs() + (veiled ? 300 : 0);  // (out of the dark, the three flashes seen)
   // Frost: its stainless paint goes icy (put back in a while).
   if (const auto cols = Invoke(ctx, base, "GET_CAR_COLOURS", {m.car, 0, 0}, 1, 0, 2)) {
     m.colours[0] = int(cols->words[0]);
@@ -6302,6 +6302,7 @@ struct MapRun {
   std::vector<MapStanding> pieces;
   bool loaded = false;
   int loaded_count = 0, known_count = 0, renewals = 0, logs = 0, reports = 0;
+  uint64_t check_at = 0;  // (v1.7.32: when to look at the pieces after an arrival)
 };
 MapRun g_map;
 constexpr uint64_t kMapLoadLimitMs = 45000;  // a trip waits this long for the place, then turns back
@@ -6513,11 +6514,14 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
     if (const uint32_t mi = FindModelInfo(base, mdl.hash))
       by_info[mi] = k;
   }
+  int used = 0;
   ForEachModelInfo(base, [&](uint32_t i, uint32_t mi) {
+    ++used;
     if (const auto it = by_info.find(mi); it != by_info.end())
       g.models[it->second].index = int(i);
     return false;
   });
+  REXLOG_INFO("gta4-trainer: map {}: the model table holds {} of {}", info.name, used, kModelInfoCount);
   REXLOG_INFO("gta4-trainer: map {} requested: {} pieces, {} models ({} not in the game's images{}{}), the sea there "
               "at {:.2f} (the mod's {:.2f})",
               info.name, g.pieces.size(), g.models.size(), g.models.size() - size_t(g.known_count),
@@ -6527,7 +6531,8 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
 
 // Loading: how many models are in, the requests renewed while some are not,
 // a report of what it waits for every few seconds.
-void MapTick(PPCContext& ctx, uint8_t* base, State& s, uint64_t now) {
+void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game);
+void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
   auto& g = g_map;
   if (!g.info || now < g.next_check)
     return;
@@ -6536,6 +6541,8 @@ void MapTick(PPCContext& ctx, uint8_t* base, State& s, uint64_t now) {
     MapUnload(ctx, base, "the trip home made");
     return;
   }
+  if (g.check_at && now >= g.check_at)
+    MapCheck(ctx, base, game);
   if (g.phase != 1 || g.loaded)
     return;
   int in = 0;
@@ -6619,6 +6626,49 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
 // The place standing now, or none.
 const gta4::addons::MapInfo* MapStandingNow() { return g_map.phase == 2 ? g_map.info : nullptr; }
 
+// A look at the pieces a few seconds after an arrival (v1.7.32; v1.7.31's
+// island showed its buildings but not its terrain): how many still exist and
+// are drawn, those near the player not drawn, and the ground the game finds
+// under the arrival against the place's own.
+void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
+  auto& g = g_map;
+  g.check_at = 0;
+  if (!g.info || g.phase != 2)
+    return;
+  int exist = 0, shown = 0, listed = 0;
+  std::string near_hidden;
+  for (const auto& p : g.pieces) {
+    if (!p.object)
+      continue;
+    if (NativeKnown("DOES_OBJECT_EXIST")) {
+      const auto e = Invoke(ctx, base, "DOES_OBJECT_EXIST", {p.object});
+      if (e && !e->r0())
+        continue;
+    }
+    ++exist;
+    bool on = false;
+    if (NativeKnown("IS_OBJECT_ON_SCREEN")) {
+      const auto o = Invoke(ctx, base, "IS_OBJECT_ON_SCREEN", {p.object});
+      on = o && o->r0();
+    }
+    shown += on;
+    const float dx = p.pos[0] - game.position[0], dy = p.pos[1] - game.position[1];
+    const float d = std::sqrt(dx * dx + dy * dy);
+    if (!on && d < 150.0f && listed < 8) {
+      ++listed;
+      const std::string name = p.model >= 0 ? g.models[size_t(p.model)].name : "?";
+      near_hidden += fmt::format("{}{} {:.0f} m", near_hidden.empty() ? "" : ", ", name, d);
+    }
+  }
+  const auto& a = g.info->arrive;
+  const auto at = MapPoint(*g.info, a[0], a[1], a[2]);
+  const auto ground = GroundZ(ctx, base, at[0], at[1], at[2] + 3.0f);
+  REXLOG_INFO("gta4-trainer: map {} check: {} of {} pieces exist, {} drawn (on screen); near the player and not "
+              "drawn: {}; the ground under the arrival {} (the place's {:.2f})",
+              g.info->name, exist, g.pieces.size(), shown, near_hidden.empty() ? std::string("none") : near_hidden,
+              ground ? fmt::format("{:.2f}", *ground) : std::string("not found"), at[2]);
+}
+
 // Every frame in a time machine (a look a few times a second otherwise, and
 // while a trip's effects play out). Returns the buttons it keeps from the
 // game.
@@ -6662,12 +6712,29 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         Invoke(ctx, base, "LOAD_SCENE", {Bits(p[0]), Bits(p[1]), Bits(p[2])});
       m.scene_at = now;
     };
+    if ((m.trip_map || m.going_home) && !m.moved && !m.dest_set) {
+      // The departure plays out where it left; then dark, and on ahead.
+      if (gone < kGoneMs)
+        return held;
+      if (!m.veil_at) {
+        m.veil_at = now;
+        Veil(1.0f, 350);
+        return held;
+      }
+      if (now - m.veil_at < 380)
+        return held;
+      std::array<float, 3> over{m.home[0], m.home[1], m.home[2]};
+      if (m.trip_map)
+        over = MapPoint(*m.trip_map, m.trip_map->arrive[0], m.trip_map->arrive[1], m.trip_map->arrive[2]);
+      PlaceCar(ctx, base, m.car, over[0], over[1], over[2] + 60.0f);
+      m.moved = true;
+    }
     if (m.trip_map && !m.dest_set) {
       // To a place: away until it stands, then there.
       const auto* info = m.trip_map;
       const bool ready = g_map.info == info && g_map.loaded && MapPlace(ctx, base);
       if (!ready) {
-        MapTick(ctx, base, s, now);
+        MapTick(ctx, base, game, s, now);
         const bool turn = pressed(X_INPUT_GAMEPAD_Y) || gone > kMapLoadLimitMs || g_map.info != info;
         if (!turn) {
           if (gone > 2500 && now >= m.next_wait_toast) {
@@ -6706,7 +6773,7 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       come_back(m.home, m.home_q);
     }
     if (m.dest_set) {
-      if (gone < kGoneMs || now - m.scene_at < 700)  // (a moment for the scene after the load)
+      if (gone < kGoneMs || now - m.scene_at < 600)  // (a moment for the scene after the load)
         return held;
       for (int a = 0; a < 3; ++a)
         m.at[a] = m.dest[a];
@@ -6716,6 +6783,8 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       if (m.unload_after) {
         m.unload_after = false;
         g_map.unload_at = now + 2000;
+      } else if (MapStandingNow()) {
+        g_map.check_at = now + 3000;  // (what stands, looked at once the arrival has settled)
       }
       if (!m.arrive_toast.empty())
         Toast(s, m.arrive_toast, 3000);
@@ -8978,7 +9047,7 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     ArmouredSeat(ctx, base, game, now);
   }
   if (map_due)
-    MapTick(ctx, base, s, now);
+    MapTick(ctx, base, game, s, now);
   if (drive_due) {
     s_next_drive_look = now + 250;
     PlayerVehicle(ctx, base, game);

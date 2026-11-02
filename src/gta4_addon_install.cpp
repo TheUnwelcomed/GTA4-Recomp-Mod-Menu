@@ -498,7 +498,8 @@ struct TocEntry {
 
 bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
                    const std::vector<fs::path>& rsc_paths, bool append_missing,
-                   const std::vector<std::string>& remove_names = {}) {
+                   const std::vector<std::string>& remove_names = {},
+                   const std::vector<std::string>& owned_prefixes = {}) {
   std::ifstream in(img, std::ios::binary);
   if (!in) {
     REXLOG_WARN("gta4-addons: cannot open {}", img.string());
@@ -630,7 +631,11 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
   bool work = false;
   // Entries an earlier release added that the game never reads (PC-named
   // .wft/.wtd files) are dropped.
+  // So are a map set's files an earlier release added that this one no
+  // longer has (v1.7.32: the island's big pieces became tiles): names with a
+  // set's own prefix that no bundled file has.
   std::vector<bool> drop(count, false);
+  int stale = 0;
   for (uint32_t i = 0; i < count; ++i) {
     if (std::find(remove_names.begin(), remove_names.end(), entries[i].name) !=
         remove_names.end()) {
@@ -638,8 +643,22 @@ bool InjectIntoImg(const fs::path& img, const std::vector<uint8_t>& key,
       work = true;
       REXLOG_INFO("gta4-addons: dropping unused {} from {}", entries[i].name,
                   img.filename().string());
+      continue;
+    }
+    const bool owned = std::any_of(owned_prefixes.begin(), owned_prefixes.end(), [&](const std::string& p) {
+      return p.size() >= 3 && entries[i].name.rfind(p, 0) == 0;
+    });
+    if (owned && std::none_of(rsc_paths.begin(), rsc_paths.end(), [&](const fs::path& f) {
+          return f.filename().string() == entries[i].name;
+        })) {
+      drop[i] = true;
+      work = true;
+      ++stale;
     }
   }
+  if (stale)
+    REXLOG_INFO("gta4-addons: dropping {} map file(s) from {} that this release no longer has", stale,
+                img.filename().string());
   for (size_t f = 0; f < files.size(); ++f) {
     for (uint32_t i = 0; i < count; ++i) {
       if (entries[i].name != files[f].name)
@@ -1698,6 +1717,7 @@ struct MapSet {
   fs::path dir;
   std::vector<std::string> objs;  // its model lines
   std::vector<fs::path> files;    // its resources
+  std::string prefix;             // its files' names start with it (map.txt "prefix")
 };
 
 std::string Trimmed(std::string line) {
@@ -1749,6 +1769,8 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
                     &info.arrive[3], &info.arrive[4]);
       else if (key == "area")
         std::sscanf(value.c_str(), "%f %f %f %f", &info.area[0], &info.area[1], &info.area[2], &info.area[3]);
+      else if (key == "prefix" && value.size() >= 3 && value.back() == '_')
+        m.prefix = Lower(value);
     }
     for (const auto& raw : place.lines) {
       const std::string line = Trimmed(raw);
@@ -2374,15 +2396,19 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
   const bool maps_named = std::any_of(shadows.begin(), shadows.end(), [](const ShadowArchive& sh) {
     return sh.guest_path.rfind("game:\\", 0) == 0;
   });
+  std::vector<std::string> owned;
   if (maps_named)
-    for (const auto& m : maps)
+    for (const auto& m : maps) {
       files.insert(files.end(), m.files.begin(), m.files.end());
+      if (!m.prefix.empty())
+        owned.push_back(m.prefix);
+    }
   bool any = false;
   for (const auto& image : images) {
     REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
                 uint64_t(fs::file_size(image, ec)));
     any |= InjectIntoImg(image, key, files, /*append_missing=*/true,
-                         {"batmobile.wft", "batmobile.wtd", "fbi.wft", "fbi.wtd"});
+                         {"batmobile.wft", "batmobile.wtd", "fbi.wft", "fbi.wtd"}, owned);
   }
   if (any && ok) {
     std::string names;

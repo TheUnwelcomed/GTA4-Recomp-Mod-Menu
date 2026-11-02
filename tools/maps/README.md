@@ -29,6 +29,13 @@ uses 16 KiB pages, as the stock static collision does. `xbdcheck.py` reads a
 built dictionary back as the game does and walks rays through every tree
 against a brute-force test of every polygon.
 
+Tiles: the game seemingly neither draws nor collides with an object several
+hundred metres across (v1.7.31: the island's terrain, roads and rocks
+missing, its buildings there), so `mapset.py` cuts every model over the set's
+`tiles.radius` into tiles of `tiles.cell` metres (`mapdraw.plan_tiles`,
+`MapDrawable(tile=...)`), each a model of its own with its own collision; it
+needs `--draw` (the template and shader sources `mapdraw.py` used).
+
 Names: the game registers an image's files by the first 24 characters of the
 name, the extension among them (`sub_825127C0`), so `mapset.py` keeps every
 model and texture dictionary name within 20 characters (a set can rename

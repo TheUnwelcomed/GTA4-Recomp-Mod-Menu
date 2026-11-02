@@ -14,7 +14,6 @@
     "vc_gtrky.wpl",
     "vc_gtrky_stream0.wpl"
   ],
-  "carrier": "gtrcomm",
   "bounds": "gtxd",
   "sea": 1.0,
   "from": [
@@ -72,5 +71,11 @@
     },
     "max_polys": 6000,
     "notes": "v1.7.31: the mod's collision is its render meshes (293,000 triangles); thin rails, lamp heads, litter and small bits have none here, nor gtrpalm_col (palm trunks, 45 of its 113 under palms this set does not have); the deep sea floor goes."
+  },
+  "tiles": {
+    "radius": 100,
+    "cell": 150,
+    "below_sea": 3.0,
+    "notes": "v1.7.32: models over 100 m in radius (the terrain, roads, rocks, rails, lamps, small bits) cut into tiles of 150 m; their render triangles wholly over 3 m under the sea dropped (as the collision's are: the few huge deep-slope triangles went with them)"
   }
 }
