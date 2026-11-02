@@ -19,6 +19,7 @@ console exports and the mods' own files.
 | `missions/` | Complete Current Mission's table. `analyze.py` and `table.py` read decompiled mission scripts (not included) for each mission's pass routine, its debug pass key and the stage statics its pass needs, with a value signature to find them in memory; `gen_header.py` writes `src/gta4_mission_pass.h`: `python3 -I gen_header.py <scripts dir> <out.h>`. |
 | `maps/arx.py` | Lists or extracts any archive libarchive reads, block by block, so an archive whose checksum fails still yields what was decoded (and says so). |
 | `maps/rpf7.py` | Lists, checks and extracts a GTA V RPF7 pack (`dlc.rpf`, unencrypted), nested RPFs included: every resource must inflate to its page flags' size. For the map ports to come. |
+| `maps/boundheaders.py` | A console bound dictionary's or static bounds' headers side by side (pointers as P), and the two conventions they differ in checked: a composite's centre of gravity (the dictionaries: the volume-weighted mean of its children's; the static bounds: the plain sum) and a lone mesh's volume (the dictionaries: -FLT_MAX). |
 
 ## Game addresses the trainer relies on (360 build)
 
@@ -37,3 +38,6 @@ Found with `re/ppc_asm.py`:
 | vehicles.ide cars line | `sub_8256DC70`: game name → model info +96, frequency +148, max +152 | |
 | resource load map | `sub_8285C790`: each segment in 16-page chunks, then power-of-two chunks, largest first; its callers keep the map (u16 counts, 12-byte chunk entries) on the stack, room for 128 chunks | why no GPU buffer may cross a chunk edge (`pc2x360/chunkcheck.py`), and why the add-ons are packed in stock-sized chunks |
 | bone of a car by name | the live skeleton's data (+0x04): bone records at +0, 0xE0 bytes each, the name first; the count at +20 | the Batmobile's and the F-16's canopy pivots (`interiorlight`) |
+| bounds store (bound dictionaries) | pool `*(0x82C6C3F4)`: +0 entries, +4 a flag byte each (0x80 free), +8 count (330), +12 entry size; entry +0 the dictionary while in, +4 references, +8 the name's hash; its streaming module `*(0x82A98C1C)` | a map set's collision: the trainer finds its dictionary's slot by name and asks for it |
+| a model's bound | model info +0x04 the archetype, +0x52 (s16) its dictionary's slot, set by SetPhysics (`sub_82360060`) when the dictionary loads (the store's set callback `sub_82288E90` → `sub_82288890` per key) or from the cache's records at boot (`sub_82288AD8`); an object gets physics only with +0x52 set (`sub_82500400`) | why a map set's pieces had no collision till v1.7.34 |
+| streaming requests | `sub_821D00F0(slot, module, flags)` (0x10 priority, 0x2 kept), `sub_821CFF60(slot, module)` clears 0x2 | the trainer keeps a map set's dictionary in while the place stands |

@@ -414,10 +414,10 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
   return out;
 }
 
-// Calls a game function (not a native) with up to two arguments on the same
-// kind of scratch frame; returns its r3.
+// Calls a game function (not a native) with up to three arguments on the
+// same kind of scratch frame; returns its r3.
 std::optional<uint32_t> CallGuest(PPCContext& parent, uint8_t* base, uint32_t address, uint32_t r3,
-                                  uint32_t r4 = 0) {
+                                  uint32_t r4 = 0, uint32_t r5 = 0) {
   auto* runtime = rex::Runtime::instance();
   auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
   auto* function = dispatcher ? dispatcher->GetFunction(address) : nullptr;
@@ -431,6 +431,7 @@ std::optional<uint32_t> CallGuest(PPCContext& parent, uint8_t* base, uint32_t ad
   call.r1.u32 = frame;
   call.r3.u32 = r3;
   call.r4.u32 = r4;
+  call.r5.u32 = r5;
   call.lr = 0x82844BA0;
   function(call, base);
   return call.r3.u32;
@@ -6303,9 +6304,15 @@ struct MapRun {
   bool loaded = false;
   int loaded_count = 0, known_count = 0, renewals = 0, logs = 0, reports = 0;
   uint64_t check_at = 0;  // (v1.7.32: when to look at the pieces after an arrival)
+  // Its collision dictionary (v1.7.34): its slot in the bounds store, asked
+  // for with the models and kept in (flag 2) till the place goes.
+  int bounds_slot = -1;
+  bool bounds_in = false;
+  uint64_t bounds_in_at = 0;
 };
 MapRun g_map;
 constexpr uint64_t kMapLoadLimitMs = 45000;  // a trip waits this long for the place, then turns back
+constexpr uint64_t kMapBoundsWaitMs = 20000;  // and this long for its collision dictionary, then places it anyway
 
 // ---- the game's streaming, read for the map's log (v1.7.31) ----
 // Entries: 24 bytes each from [0x83032744]: +0 the resource's flags, +4 its
@@ -6392,6 +6399,77 @@ std::vector<uint32_t> StreamDependencies(PPCContext& parent, uint8_t* base, uint
   return out;
 }
 
+// ---- collision dictionaries: how a model gets its bound (v1.7.34) ----
+// The game links a model to its collision only when the bound dictionary
+// (.xbd) holding it loads: the bounds store's set callback (sub_82288E90)
+// walks the dictionary, and for each key that is a model's name hash
+// (sub_821CA090) makes an archetype for the bound and calls the model's
+// SetPhysics (sub_82360060: +0x04 the archetype, +0x52 the dictionary's
+// slot). An object gets collision only from a model whose +0x52 is set
+// (sub_82500400, sub_82478040 ask for that slot's dictionary; none, no
+// physics). The links outlive the dictionary (when it goes, +0x04 is cleared,
+// +0x52 kept), so at boot the game loads every dictionary once - unless its
+// cache is good (sub_82289958): then only those in images outside the cache,
+// the rest coming from the cache's records. vehicles.img is in it, so the
+// island's dictionary was never loaded: log 097's pieces all had +0x52 0xFFFF
+// (stock bm_plank01: 0x0097, rubbish.xbd's slot) and no collision. The
+// trainer asks for it with the models now.
+//   Bounds store pool [0x82C6C3F4]: +0 entries, +4 a flag byte each (0x80 a
+//   free slot), +8 the count (330), +12 an entry's size. Entry: +0 the
+//   dictionary while in, +4 references, +8 the name's hash, +16/+32 a box.
+//   Module index [0x82A98C1C]. sub_821D00F0 (slot, module, flags) asks for an
+//   object (flags 0x10 priority, 0x2 kept: not let go while set);
+//   sub_821CFF60 (slot, module) clears 0x2 again.
+constexpr uint32_t kBoundsPool = 0x82C6C3F4, kBoundsModuleIndex = 0x82A98C1C, kStreamRequest = 0x821D00F0,
+                   kStreamUnkeep = 0x821CFF60, kModelInfoArchetype = 0x04, kModelInfoBoundsSlot = 0x52;
+constexpr uint32_t kBoundsRequestFlags = 0x12;  // (as the game asks for a dictionary it needs now, sub_82289588)
+struct BoundsPool {
+  uint32_t entries = 0, flags = 0, count = 0, size = 0;
+};
+std::optional<BoundsPool> ReadBoundsPool(uint8_t* base) {
+  if (!Span(base, kBoundsPool, 4))
+    return std::nullopt;
+  const uint32_t pool = Read(base, kBoundsPool);
+  if (!pool || !Span(base, pool, 16))
+    return std::nullopt;
+  BoundsPool p{Read(base, pool), Read(base, pool + 4), Read(base, pool + 8), Read(base, pool + 12)};
+  if (p.count == 0 || p.count > 4096 || p.size < 16 || p.size > 256 || !Span(base, p.flags, p.count) ||
+      !Span(base, p.entries, p.count * p.size))
+    return std::nullopt;
+  return p;
+}
+// The slot of the dictionary named so (its name hash, as the store keeps it), or -1.
+int BoundsSlot(uint8_t* base, std::string_view name) {
+  const auto p = ReadBoundsPool(base);
+  if (!p)
+    return -1;
+  const uint32_t hash = ModelHash(name);
+  for (uint32_t i = 0; i < p->count; ++i)
+    if (!(*rex::memory::GuestPtr(base, p->flags + i) & 0x80) && Read(base, p->entries + i * p->size + 8) == hash)
+      return int(i);
+  return -1;
+}
+// A slot's entry address, or 0.
+uint32_t BoundsEntry(uint8_t* base, int slot) {
+  const auto p = ReadBoundsPool(base);
+  if (!p || slot < 0 || uint32_t(slot) >= p->count || (*rex::memory::GuestPtr(base, p->flags + uint32_t(slot)) & 0x80))
+    return 0;
+  return p->entries + uint32_t(slot) * p->size;
+}
+uint32_t BoundsModule(uint8_t* base) {
+  return Span(base, kBoundsModuleIndex, 4) ? Read(base, kBoundsModuleIndex) : 0xFFFFFFFFu;
+}
+// The slot's streaming entry, described for the log.
+std::string DescribeBoundsSlot(uint8_t* base, int slot) {
+  const uint32_t module = BoundsModule(base), entry = BoundsEntry(base, slot);
+  if (slot < 0 || !entry || module >= uint32_t(StreamModuleCount(base)))
+    return "unreadable";
+  const auto e = ReadStreamEntry(base, StreamModuleFirst(base, int(module)) + uint32_t(slot));
+  return fmt::format("slot {}: {}, dictionary {:08X}, {} references", slot,
+                     e ? DescribeEntry(base, *e) : std::string("its streaming entry unreadable"), Read(base, entry),
+                     Read(base, entry + 4));
+}
+
 const gta4::addons::MapInfo* FindMap(std::string_view name) {
   for (const auto& m : gta4::addons::InstalledMaps())
     if (m.name == name)
@@ -6461,9 +6539,64 @@ void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
   for (const auto& mdl : g.models)
     if (mdl.known)
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {mdl.hash});
-  REXLOG_INFO("gta4-trainer: map {} unloaded ({}): {} pieces deleted, {} models let go", g.info->name, why, deleted,
-              g.known_count);
+  // (its collision dictionary no longer kept: the store lets it go once the
+  // pieces' references to it are gone, the models' links staying)
+  const uint32_t module = BoundsModule(base);
+  if (g.bounds_slot >= 0 && module < uint32_t(StreamModuleCount(base)))
+    CallGuest(ctx, base, kStreamUnkeep, uint32_t(g.bounds_slot), module);
+  REXLOG_INFO("gta4-trainer: map {} unloaded ({}): {} pieces deleted, {} models let go{}", g.info->name, why, deleted,
+              g.known_count, g.bounds_slot >= 0 ? fmt::format(", {}.xbd no longer kept", g.info->bounds) : "");
   g = MapRun{};
+}
+
+// The place's collision dictionary asked for (kept in till the place goes).
+void MapRequestBounds(PPCContext& ctx, uint8_t* base) {
+  auto& g = g_map;
+  if (!g.info || g.info->bounds.empty())
+    return;
+  const uint32_t module = BoundsModule(base);
+  if (g.bounds_slot < 0)
+    g.bounds_slot = BoundsSlot(base, g.info->bounds);
+  if (g.bounds_slot < 0 || module >= uint32_t(StreamModuleCount(base))) {
+    if (g.renewals == 0)
+      REXLOG_WARN("gta4-trainer: map {}: its collision dictionary {}.xbd is not in the game's bounds store (module {}); "
+                  "its pieces will have no collision",
+                  g.info->name, g.info->bounds, int(module));
+    return;
+  }
+  CallGuest(ctx, base, kStreamRequest, uint32_t(g.bounds_slot), module, kBoundsRequestFlags);
+}
+
+// How many of the place's models with collision the game has linked to their
+// bounds (their +0x52 the dictionary's slot), of how many; and whether those
+// have their archetypes now (the dictionary in).
+struct MapLinks {
+  int models = 0, linked = 0, archetypes = 0;
+  uint32_t first_unlinked = 0;
+  uint16_t first_unlinked_slot = 0xFFFF;
+};
+MapLinks MapCountLinks(uint8_t* base) {
+  auto& g = g_map;
+  MapLinks out;
+  std::vector<bool> seen(g.models.size(), false);
+  for (const auto& p : g.pieces) {
+    if (!p.collision || p.model < 0 || size_t(p.model) >= seen.size() || seen[size_t(p.model)])
+      continue;
+    seen[size_t(p.model)] = true;
+    ++out.models;
+    const uint32_t mi = FindModelInfo(base, p.hash);
+    if (!mi || !Span(base, mi, 96))
+      continue;
+    const uint16_t slot = Read16(base, mi + kModelInfoBoundsSlot);
+    if (g.bounds_slot >= 0 && slot == uint16_t(g.bounds_slot)) {
+      ++out.linked;
+      out.archetypes += Read(base, mi + kModelInfoArchetype) != 0;
+    } else if (!out.first_unlinked) {
+      out.first_unlinked = p.hash;
+      out.first_unlinked_slot = slot;
+    }
+  }
+  return out;
 }
 
 // The place's models requested (another place deleted first). Models the
@@ -6526,6 +6659,15 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
               "at {:.2f} (the mod's {:.2f})",
               info.name, g.pieces.size(), g.models.size(), g.models.size() - size_t(g.known_count),
               unknown.empty() ? "" : ": ", unknown, info.sea_dst, info.sea_src);
+  MapRequestBounds(ctx, base);
+  if (g.bounds_slot >= 0) {
+    const auto links = MapCountLinks(base);
+    REXLOG_INFO("gta4-trainer: map {}: collision dictionary {}.xbd asked for ({}); {} of its {} models with collision "
+                "linked to it already",
+                info.name, info.bounds, DescribeBoundsSlot(base, g.bounds_slot), links.linked, links.models);
+  } else if (info.bounds.empty()) {
+    REXLOG_INFO("gta4-trainer: map {} has no collision dictionary", info.name);
+  }
   return true;
 }
 
@@ -6556,6 +6698,25 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     else if (now >= g.next_renew)
       Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
   }
+  // Its collision dictionary: in once the store holds it (its set callback
+  // has linked the models then); asked for again while it is not.
+  if (g.bounds_slot >= 0 && !g.bounds_in) {
+    const uint32_t entry = BoundsEntry(base, g.bounds_slot);
+    if (entry && Read(base, entry) != 0) {
+      g.bounds_in = true;
+      g.bounds_in_at = now;
+      const auto links = MapCountLinks(base);
+      REXLOG_INFO("gta4-trainer: map {}: collision dictionary {}.xbd in after {} ms ({}): {} of {} models with "
+                  "collision linked, {} with their bounds{}",
+                  g.info->name, g.info->bounds, now - g.requested_at, DescribeBoundsSlot(base, g.bounds_slot),
+                  links.linked, links.models, links.archetypes,
+                  links.first_unlinked ? fmt::format(" (not: {:08X}, its +0x52 {:04X})", links.first_unlinked,
+                                                     links.first_unlinked_slot)
+                                       : std::string());
+    } else if (now >= g.next_renew) {
+      MapRequestBounds(ctx, base);
+    }
+  }
   if (now >= g.next_renew) {
     g.next_renew = now + 6000;
     ++g.renewals;
@@ -6566,7 +6727,20 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
                 now - g.requested_at);
   }
   g.loaded_count = in;
-  if (g.known_count > 0 && in == g.known_count) {
+  // (the pieces wait for the dictionary: one made before it is in gets no
+  // collision of its own till the game looks again; 20 s at most, then on
+  // without it, logged)
+  const bool bounds_ready = g.bounds_slot < 0 || g.bounds_in || now - g.requested_at > kMapBoundsWaitMs;
+  if (g.known_count > 0 && in == g.known_count && !bounds_ready && now >= g.next_report && g.reports < 8) {
+    g.next_report = now + 5000;
+    ++g.reports;
+    REXLOG_INFO("gta4-trainer: map {}: models in, waiting for {}.xbd ({})", g.info->name, g.info->bounds,
+                DescribeBoundsSlot(base, g.bounds_slot));
+  }
+  if (g.known_count > 0 && in == g.known_count && bounds_ready) {
+    if (g.bounds_slot >= 0 && !g.bounds_in)
+      REXLOG_WARN("gta4-trainer: map {}: {}.xbd not in after {} ms ({}); placing the pieces without waiting longer",
+                  g.info->name, g.info->bounds, now - g.requested_at, DescribeBoundsSlot(base, g.bounds_slot));
     g.loaded = true;
     g.loaded_at = now;
     if (!g_tm.in_car || g_tm.phase == 0)
@@ -6615,8 +6789,12 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
     }
     ++made;
   }
-  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not, {} left out (models the game hasn't) ({})",
-              g.info->name, made, failed, left_out, exact ? "exactly" : "CREATE_OBJECT, then moved");
+  const auto links = MapCountLinks(base);
+  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not, {} left out (models the game hasn't) ({}); {} of "
+              "{} models with collision linked to {} ({} with their bounds)",
+              g.info->name, made, failed, left_out, exact ? "exactly" : "CREATE_OBJECT, then moved", links.linked,
+              links.models, g.bounds_slot >= 0 ? g.info->bounds + ".xbd" : std::string("no dictionary"),
+              links.archetypes);
   if (failed)
     return false;
   g.phase = 2;
@@ -6675,6 +6853,11 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
               g.info->name, exist, g.pieces.size(), shown, near_hidden.empty() ? std::string("none") : near_hidden,
               ground ? fmt::format("{:.2f}", *ground) : std::string("not found"), at[2], car, game.position[0],
               game.position[1], game.position[2]);
+  if (g.bounds_slot >= 0) {
+    const auto links = MapCountLinks(base);
+    REXLOG_INFO("gta4-trainer:   collision {}.xbd: {}; {} of {} models linked, {} with their bounds", g.info->bounds,
+                DescribeBoundsSlot(base, g.bounds_slot), links.linked, links.models, links.archetypes);
+  }
   // The model under the arrival (one with collision) and one without, as the
   // game holds them: its model info's first 24 words and the streaming
   // entries it needs (its collision dictionary among them or not), beside a
@@ -6793,9 +6976,11 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
         if (!turn) {
           if (gone > 2500 && now >= m.next_wait_toast) {
             m.next_wait_toast = now + 1500;
-            Toast(s, fmt::format("Arriving at {}... ({} of {} loaded)  Y: turn back", info->label,
-                                 g_map.loaded_count, g_map.known_count),
-                  1600);
+            const bool models_in = g_map.known_count > 0 && g_map.loaded_count == g_map.known_count;
+            const std::string what = models_in && g_map.bounds_slot >= 0 && !g_map.bounds_in
+                                         ? std::string("its ground loading")
+                                         : fmt::format("{} of {} loaded", g_map.loaded_count, g_map.known_count);
+            Toast(s, fmt::format("Arriving at {}... ({})  Y: turn back", info->label, what), 1600);
           }
           return held;
         }
@@ -8475,8 +8660,10 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
             text = !g_map.info          ? std::string("Unload Map Destination (none loaded)")
                    : g_map.phase == 2   ? "Unload " + g_map.info->label + " (despawn)"
                    : g_map.loaded       ? "Unload " + g_map.info->label + " (loaded, not placed)"
-                                        : fmt::format("Unload {} (loading {} of {})", g_map.info->label,
-                                                      g_map.loaded_count, g_map.known_count);
+                   : g_map.known_count > 0 && g_map.loaded_count == g_map.known_count
+                       ? "Unload " + g_map.info->label + " (loading its ground)"
+                       : fmt::format("Unload {} (loading {} of {})", g_map.info->label, g_map.loaded_count,
+                                     g_map.known_count);
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }

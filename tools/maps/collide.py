@@ -21,11 +21,16 @@ against the mod's PC files and the console's nj_01_4.xbn):
              headers (min x3, max x3, first node, end) for each subtree of at
              most 128 nodes whose parent's is bigger (Bullet's rule), or the
              whole tree's when it is that small.
-  header     margin 0.005 (a composite: 0.04); +0x50 the centroid of the
-             mesh's volume and +0x6C the volume (the stock static bounds carry
-             it signed; kept positive here, as these are objects with mass;
-             a composite: the sum of its children's volume times centroid at
-             +0x50).
+  header     margin 0.005 (a composite: 0.04); +0x50 the centre of gravity,
+             +0x6C the volume, as the stock bound dictionaries (props: objects
+             with mass) have them: a mesh in a composite its volume (positive)
+             and its volume's centroid, the composite the volume-weighted mean
+             of its children's (normalized; nj_01.xbd, rubbish.xbd), a mesh on
+             its own -FLT_MAX for its volume (the game works it out) and its
+             centroid. (The static bounds, .xbn, differ: signed volumes, and a
+             composite's +0x50 the plain sum of volume times centroid; v1.7.33
+             wrote that, its one composite's centre 28 km out.) A centroid
+             outside the mesh's box (an open surface's) is the box's centre.
 """
 import heapq
 import math
@@ -506,6 +511,8 @@ def build_bvh(v, t, m, quads=True):
     box = float(np.prod(hi - lo))
     vol = abs(vol) if abs(vol) >= 1.0 else max(box, 1.0)
     centroid = (lo + hi) / 2
+    if not ((vcen >= lo - 0.01).all() and (vcen <= hi + 0.01).all()):
+        vcen = centroid  # (an open surface's "volume" centroid can land anywhere)
     radius = float(np.linalg.norm(vq - centroid, axis=1).max()) + BOX_SLACK
     return dict(type=10, radius=radius, max=hi.tolist(), min=lo.tolist(), centroid=centroid.tolist(),
                 cg=[0.0, 0.0, 0.0], dist=vcen.tolist(), margin=[BVH_MARGIN] * 3, volume=vol,
@@ -554,7 +561,8 @@ def composite(children, identity):
     """A type-12 bound holding the meshes (in its own space)."""
     lo = np.min([c['min'] for c in children], axis=0)
     hi = np.max([c['max'] for c in children], axis=0)
-    weighted = np.sum([np.array(c['dist']) * c['volume'] for c in children], axis=0)
+    total = float(sum(c['volume'] for c in children))
+    weighted = np.sum([np.array(c['dist']) * c['volume'] for c in children], axis=0) / total
     return dict(type=12, radius=float(np.linalg.norm(hi - lo) / 2), max=hi.tolist(), min=lo.tolist(),
                 centroid=((lo + hi) / 2).tolist(), cg=[0.0, 0.0, 0.0], dist=weighted.tolist(),
                 margin=[COMPOSITE_MARGIN] * 3, children=children, matrices=[identity] * len(children),
@@ -565,7 +573,10 @@ def bound_for(v, t, m, identity, most=MAX_POLYS):
     """One BVH, or a composite of several when the mesh is big."""
     parts = split(v, t, m, most)
     kids = [build_bvh(*p) for p in parts]
-    return kids[0] if len(kids) == 1 else composite(kids, identity)
+    if len(kids) == 1:
+        kids[0]['volume'] = None  # (on its own: -FLT_MAX, as the stock dictionaries' lone meshes)
+        return kids[0]
+    return composite(kids, identity)
 
 
 # ------------------------------------------------------------------ checking

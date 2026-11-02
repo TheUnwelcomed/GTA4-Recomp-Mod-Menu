@@ -186,6 +186,20 @@ network session.
 
 ## Changes
 
+- **v1.7.34**: the island **still had no collision**: v1.7.33's log showed
+  every piece's model info with `+0x52` (its bound dictionary's slot) unset,
+  stock `bm_plank01`'s `0x0097`. The game links a model to its bound only
+  when the dictionary holding it loads (the bounds store's set callback,
+  `sub_82288E90`, calling each keyed model's SetPhysics, `sub_82360060`), and
+  loads them all at boot only without a good cache (`sub_82289958`); the
+  cache predates the island, so its dictionary was never loaded. The trainer
+  now asks for the set's dictionary with its models (`sub_821D00F0`, kept in
+  with flag 2 till the place goes) and places the pieces once it is in,
+  logging how many models it linked. Each set's dictionary is its own,
+  `<prefix>col.xbd` (`map.txt` `bounds`); the installer drops v1.7.33's
+  `gtxd.xbd` from `vehicles.img`. Bound headers now follow the stock
+  dictionaries rather than the static bounds: the one composite's centre of
+  gravity normalized (it was 28 km out), lone meshes' volume `-FLT_MAX`.
 - **v1.7.33**: v1.7.32's island was there, its pieces drawn, but **with no
   collision**: the car fell through its road into the sea under the island
   and everything was seen from below. An object gets its bound from its

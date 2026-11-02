@@ -1772,6 +1772,8 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
         std::sscanf(value.c_str(), "%f %f %f %f", &info.area[0], &info.area[1], &info.area[2], &info.area[3]);
       else if (key == "prefix" && value.size() >= 3 && value.back() == '_')
         m.prefix = Lower(value);
+      else if (key == "bounds")
+        info.bounds = Lower(value);
     }
     for (const auto& raw : place.lines) {
       const std::string line = Trimmed(raw);
@@ -1795,8 +1797,13 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     // Only the files its model lines name (<model>.xdr, <txd>.xtd) and its
     // collision dictionary: copying a release over the last leaves the last
     // one's files in the folder (v1.7.32's log: 192 files for 176; the
-    // island's old untiled pieces went into vehicles.img again).
+    // island's old untiled pieces went into vehicles.img again). The
+    // dictionary is the one map.txt names ("bounds"; v1.7.34 on, <prefix>col,
+    // so sets don't share one), else (an earlier release's set) the folder's
+    // only .xbd.
     std::set<std::string> named;
+    if (!info.bounds.empty())
+      named.insert(info.bounds + ".xbd");
     for (const auto& line : m.objs) {
       const size_t c1 = line.find(','), c2 = c1 == std::string::npos ? c1 : line.find(',', c1 + 1);
       if (c2 == std::string::npos)
@@ -1805,14 +1812,18 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
       named.insert(Lower(Trimmed(line.substr(c1 + 1, c2 - c1 - 1))) + ".xtd");
     }
     int unnamed = 0;
+    std::vector<std::string> dictionaries;
     for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
       const std::string ext = Lower(it->path().extension().string());
       if (!it->is_regular_file(ec) || (ext != ".xdr" && ext != ".xtd" && ext != ".xbd"))
         continue;
-      if (ext != ".xbd" && !named.count(Lower(it->path().filename().string()))) {
+      const bool any_dictionary = ext == ".xbd" && info.bounds.empty();
+      if (!any_dictionary && !named.count(Lower(it->path().filename().string()))) {
         ++unnamed;
         continue;
       }
+      if (any_dictionary)
+        dictionaries.push_back(Lower(it->path().stem().string()));
       // The game registers an image's files by the first 24 characters of
       // the name (with the extension; sub_825127C0): a longer one is never
       // registered (v1.7.30: gk_gtr_deco_polgrnda018, "1 unknown to the game").
@@ -1826,6 +1837,20 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     }
     ec.clear();
     std::sort(m.files.begin(), m.files.end());
+    if (info.bounds.empty() && dictionaries.size() == 1)
+      info.bounds = dictionaries.front();
+    else if (info.bounds.empty() && dictionaries.size() > 1)
+      REXLOG_WARN("gta4-addons: map set {} has {} collision dictionaries and map.txt names none; its pieces "
+                  "will have no collision",
+                  dir.filename().string(), dictionaries.size());
+    else if (!info.bounds.empty() && std::none_of(m.files.begin(), m.files.end(), [&](const fs::path& f) {
+               return Lower(f.filename().string()) == info.bounds + ".xbd";
+             })) {
+      REXLOG_WARN("gta4-addons: map set {}: its collision dictionary {}.xbd is missing; its pieces will have no "
+                  "collision",
+                  dir.filename().string(), info.bounds);
+      info.bounds.clear();
+    }
     if (unnamed)
       REXLOG_INFO("gta4-addons: map set {}: {} file(s) in its folder no model line names (an earlier release's); "
                   "left out",
@@ -2425,12 +2450,16 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
       if (!m.prefix.empty())
         owned.push_back(m.prefix);
     }
+  // (v1.7.33's island collision was gtxd.xbd, named after the .ide; from
+  // v1.7.34 each set's is its own, <prefix>col.xbd, and the old one goes)
+  std::vector<std::string> unused = {"batmobile.wft", "batmobile.wtd", "fbi.wft", "fbi.wtd"};
+  if (std::none_of(files.begin(), files.end(), [](const fs::path& f) { return Lower(f.filename().string()) == "gtxd.xbd"; }))
+    unused.push_back("gtxd.xbd");
   bool any = false;
   for (const auto& image : images) {
     REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
                 uint64_t(fs::file_size(image, ec)));
-    any |= InjectIntoImg(image, key, files, /*append_missing=*/true,
-                         {"batmobile.wft", "batmobile.wtd", "fbi.wft", "fbi.wtd"}, owned);
+    any |= InjectIntoImg(image, key, files, /*append_missing=*/true, unused, owned);
   }
   if (any && ok) {
     std::string names;

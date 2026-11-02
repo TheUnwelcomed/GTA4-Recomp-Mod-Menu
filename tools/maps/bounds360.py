@@ -2,11 +2,13 @@
 
 A map mod's collision is one .wbn per model, in world space: a 0x20-byte
 container pointing at a composite (type 12) of BVH meshes (type 10). The
-console's props get their collision from a bound dictionary named after
-their .ide (rubbish.ide / rubbish.xbd), keyed by model-name hash (sorted),
-each value a bound in the model's own space. So each piece here is moved
-into its model's space (the model's instance position subtracted: the
-pieces this is for are placed unrotated) and written big-endian.
+console's props get their collision from bound dictionaries keyed by
+model-name hash (sorted), each value a bound in the model's own space; the
+game links a model to its bound when a dictionary holding it loads, whatever
+the dictionary's name (the stock ones are named after their .ide: rubbish.ide,
+rubbish.xbd). So each piece here is moved into its model's space (the
+model's instance position subtracted: the pieces this is for are placed
+unrotated) and written big-endian.
 
 Layouts (checked against nj_01_4.xbn, rubbish.xbd and nj_01.xbd):
   dictionary   0x20: vtable, block map ptr, parent 0, usage 1,
@@ -211,8 +213,9 @@ def write_bound(a, b):
         th[0x58:0x60] = b'\xCD' * 8
         tree = a.put(bytes(th))
         size = [b['max'][i] - b['min'][i] for i in range(3)]
-        # (+0x6C: the mesh's volume where it is known - collide.py works out the
-        # signed volume the stock files carry - else its box's)
+        # (+0x6C: the mesh's volume - collide.py's, positive, for one in a
+        # composite; None, -FLT_MAX, for one on its own, as the stock
+        # dictionaries have it; a PC mesh read here without one: its box's)
         h = header(b, VT_BVH, b'\x0A\x01\x01\x00', NAN_A, NAN_A, b.get('volume', size[0] * size[1] * size[2]))
         body = bytearray(0x70)
         struct.pack_into('>12x I', body, 0, ptr(polys))

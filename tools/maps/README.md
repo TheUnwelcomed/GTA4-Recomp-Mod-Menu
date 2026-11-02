@@ -29,6 +29,22 @@ uses 16 KiB pages, as the stock static collision does. `xbdcheck.py` reads a
 built dictionary back as the game does and walks rays through every tree
 against a brute-force test of every polygon.
 
+How a piece gets its collision (v1.7.34): the game links a model to its bound
+only when a bound dictionary holding it loads. The bounds store's set
+callback (`sub_82288E90`) walks the dictionary and, for each key that is a
+model's name hash, makes an archetype and calls the model's SetPhysics
+(`sub_82360060`: model info `+0x04` the archetype, `+0x52` the dictionary's
+slot); an object gets collision only from a model whose `+0x52` is set. At
+boot the game loads every dictionary once for this, unless its cache is good
+(`sub_82289958`), when it loads only those in images outside the cache, so a
+set's dictionary in `vehicles.img` is never loaded by the game itself: the
+trainer asks for it (`sub_821D00F0`, kept in with flag 2) with the models and
+places the pieces once it is in. Its name does not matter, so each set's is
+`<prefix>col.xbd` (`map.txt`'s `bounds`). Header values follow the stock
+dictionaries (props, objects with mass), not the static bounds: a lone
+mesh's volume `-FLT_MAX`, a composite's centre of gravity the
+volume-weighted mean of its children's.
+
 Tiles: the game seemingly neither draws nor collides with an object several
 hundred metres across (v1.7.31: the island's terrain, roads and rocks
 missing, its buildings there), so `mapset.py` cuts every model over the set's

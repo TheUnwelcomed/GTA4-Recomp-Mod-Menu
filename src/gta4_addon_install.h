@@ -36,10 +36,11 @@ bool ShadowsActive();
 // Map sets (addons/maps/<name>, made by the repo's tools/maps/mapset.py):
 // places for the DeLorean's time travel. Their models, textures and
 // collision go into vehicles.img with the cars; their model lines into
-// common.rpf's gtxd.ide (the shadow; gta.dat already loads it, so its name is
-// their collision dictionary's, gtxd.xbd); water under them into water.dat
-// when the stock sea does not reach there. The trainer places the pieces as
-// frozen objects when the destination is chosen and deletes them again.
+// common.rpf's gtxd.ide (the shadow; gta.dat already loads it); water under
+// them into water.dat when the stock sea does not reach there. The trainer
+// places the pieces as frozen objects when the destination is chosen (its
+// collision dictionary asked for with the models: the game links a model to
+// its bound only when the dictionary holding it loads) and deletes them again.
 struct MapPiece {
   std::string model;
   float q[4]{};    // its rotation (x, y, z, w)
@@ -54,6 +55,7 @@ struct MapInfo {
   float sea_dst = 0.0f;      // the game's, where it is put (from water.dat)
   float arrive[5]{};         // x, y, z (the mod's), heading (degrees), clear run ahead (m)
   float area[4]{};           // min x, min y, max x, max y (the mod's)
+  std::string bounds;        // its collision dictionary's name (<bounds>.xbd), or empty
   std::vector<MapPiece> pieces;
   bool installed = false;    // in vehicles.img and gtxd.ide this launch
 };

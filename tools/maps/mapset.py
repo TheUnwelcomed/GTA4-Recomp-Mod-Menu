@@ -19,17 +19,22 @@ usage: python3 -I mapset.py <set.json> <source dir> <xdr dir> <template.xtd.bin:
 
 Writes to <out dir>:
   <prefix><model>.xdr, <prefix><txd>.xtd   models and texture dictionaries
-  gtxd.xbd     the collision: a bound dictionary named after the .ide the
-               installer adds the models to (common.rpf's gtxd.ide, which
-               gta.dat already loads), keyed by model name (collide.py: the
-               mod's meshes welded, cut below the shallows, decimated and
-               split into BVH meshes with trees of their own; 16 KiB pages)
+  <prefix>col.xbd   the collision: a bound dictionary keyed by model name
+               (collide.py: the mod's meshes welded, cut below the shallows,
+               decimated and split into BVH meshes with trees of their own;
+               16 KiB pages). The game links a model to its bound only when
+               the dictionary holding it loads (its key the model's name
+               hash), whatever the dictionary is called; at boot it loads
+               them all only without a good cache, so the trainer asks for
+               the set's with its models (v1.7.34; v1.7.33's was gtxd.xbd,
+               named after the .ide, on the wrong idea that the .ide's name
+               picks it)
   objs.ide     the models' lines for that .ide
   place.txt    one line per piece for the trainer
   map.txt      the destination: label, date, the shift from the mod's
                coordinates, its sea level, the arrival, its area, the
                prefix (the installer drops image files with it that the set
-               no longer has)
+               no longer has), its collision dictionary's name
 
 Every model is renamed <prefix><name> (no clash with the game's own names),
 shortened where that is over 20 characters: the game registers an image's
@@ -70,7 +75,7 @@ import maptex  # noqa: E402
 import rsc5  # noqa: E402
 
 XTD_TYPE, XDR_TYPE, XBD_TYPE = 7, 109, 32
-DYNAMIC_FLAG = 0x20000  # (an IDE flag: the object's bound from its IDE's dictionary)
+DYNAMIC_FLAG = 0x20000  # (an IDE flag: a movable object's archetype for the model's bound)
 NAME_LIMIT = 20  # a file's name with its 4-character extension within the game's 24
 
 
@@ -380,6 +385,8 @@ def main():
     set_path, src, xdr_dir, tmpl_arg, xlzx, out = args[:6]
     cfg = json.load(open(set_path))
     prefix = cfg['prefix']
+    bounds_name = cfg.get('bounds') or prefix + 'col'  # (within the 24 characters an image name may have)
+    assert len(bounds_name) + 4 <= 24, bounds_name
     os.makedirs(out, exist_ok=True)
     tmpl_path, tmpl_flags = tmpl_arg.rsplit(':', 1)
     tmpl = maptex.Template(rsc5.Resource(open(tmpl_path, 'rb').read(), int(tmpl_flags, 16), True, XTD_TYPE, tmpl_path))
@@ -567,16 +574,19 @@ def main():
         entries.append((key, bound))
     body, xflags = build_dictionary(entries)
     n = bounds360.check(body, xflags, entries)
-    pack(xlzx, XBD_TYPE, xflags, body, os.path.join(out, cfg['bounds'] + '.xbd'))
+    pack(xlzx, XBD_TYPE, xflags, body, os.path.join(out, bounds_name + '.xbd'))
     print('collision: %d bounds, %d triangles from %d (no collision: %s), %.2f MiB, flags %08X, trees walked: '
           'worst %.4f m' % (n, tri_out, tri_in, ', '.join(dropped), len(body) / 1048576.0, xflags, worst))
     with_bounds = {name for name, _ in entries}
 
     # ---- the models' lines, the pieces, the destination
-    # (flag 0x20000 on a model with collision: the game gives an object its
-    # IDE's dictionary bound only when it is set, as the stock props have it -
-    # rubbish.ide's BM_plank01 0xC20000 - while map buildings, 0xC00000 like
-    # the mod's, get theirs from static bounds; v1.7.32's island had none)
+    # (flag 0x20000 on a model with collision, as the stock props with
+    # dictionary bounds have it - rubbish.ide's BM_plank01 0xC20000: the game
+    # makes its archetype a movable object's, its mass from the bound's
+    # volume (SetPhysics, sub_82360060), where without it a fixed one; the
+    # pieces are frozen either way. It does not get a model its bound: the
+    # dictionary's loading does (see bounds above; v1.7.33's island had the
+    # flag and still no collision, its dictionary never loaded)
     with_flag = 0
     with open(os.path.join(out, 'objs.ide'), 'w', newline='\r\n') as f:
         def write(line, name):
@@ -599,7 +609,7 @@ def main():
                     write(line, mname[t['key']])
                 continue
             write(line, mname[m])
-    print('model lines: %d with flag 0x%X (their collision from %s.xbd)' % (with_flag, DYNAMIC_FLAG, cfg['bounds']))
+    print('model lines: %d with flag 0x%X (their collision from %s.xbd)' % (with_flag, DYNAMIC_FLAG, bounds_name))
     with open(os.path.join(out, 'place.txt'), 'w') as f:
         f.write('# model qx qy qz qw x y z collision (the mod\'s coordinates)\n')
         count = 0
@@ -627,6 +637,7 @@ def main():
         f.write('area %.1f %.1f %.1f %.1f\n' % (lo[0], lo[1], hi[0], hi[1]))
         f.write('pieces %d\n' % count)
         f.write('prefix %s\n' % prefix)  # (the installer drops files with it this set no longer has)
+        f.write('bounds %s\n' % bounds_name)  # (the trainer asks for it with the models)
     print('wrote %s' % out)
 
 
