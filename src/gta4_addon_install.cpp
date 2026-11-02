@@ -1771,8 +1771,18 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     }
     for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
       const std::string ext = Lower(it->path().extension().string());
-      if (it->is_regular_file(ec) && (ext == ".xdr" || ext == ".xtd" || ext == ".xbd"))
-        m.files.push_back(it->path());
+      if (!it->is_regular_file(ec) || (ext != ".xdr" && ext != ".xtd" && ext != ".xbd"))
+        continue;
+      // The game registers an image's files by the first 24 characters of
+      // the name (with the extension; sub_825127C0): a longer one is never
+      // registered (v1.7.30: gk_gtr_deco_polgrnda018, "1 unknown to the game").
+      if (it->path().filename().string().size() > 24) {
+        REXLOG_WARN("gta4-addons: map set {}: {} has a name over 24 characters, which the game can't register; "
+                    "left out",
+                    dir.filename().string(), it->path().filename().string());
+        continue;
+      }
+      m.files.push_back(it->path());
     }
     ec.clear();
     std::sort(m.files.begin(), m.files.end());

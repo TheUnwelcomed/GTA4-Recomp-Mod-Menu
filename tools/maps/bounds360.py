@@ -211,7 +211,9 @@ def write_bound(a, b):
         th[0x58:0x60] = b'\xCD' * 8
         tree = a.put(bytes(th))
         size = [b['max'][i] - b['min'][i] for i in range(3)]
-        h = header(b, VT_BVH, b'\x0A\x01\x01\x00', NAN_A, NAN_A, size[0] * size[1] * size[2])
+        # (+0x6C: the mesh's volume where it is known - collide.py works out the
+        # signed volume the stock files carry - else its box's)
+        h = header(b, VT_BVH, b'\x0A\x01\x01\x00', NAN_A, NAN_A, b.get('volume', size[0] * size[1] * size[2]))
         body = bytearray(0x70)
         struct.pack_into('>12x I', body, 0, ptr(polys))
         body[0x10:0x20] = vec4(b['quantum'], NAN_A)

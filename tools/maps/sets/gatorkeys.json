@@ -49,5 +49,28 @@
       255
     ]
   },
-  "notes": "The Gator Keys 0.3.5 (a map for GTA Vice City Nextgen Edition): its own pieces only; the 111 Vice City palms it places from VCNE's files are not in it. Textures VCNE supplied stand in from the island's own (substitutes) or flat (stand_ins)."
+  "notes": "The Gator Keys 0.3.5 (a map for GTA Vice City Nextgen Edition): its own pieces only; the 111 Vice City palms it places from VCNE's files are not in it. Textures VCNE supplied stand in from the island's own (substitutes) or flat (stand_ins).",
+  "rename": {
+    "gtr_deco_polgrnda018": "deco_polgrnda018"
+  },
+  "collision": {
+    "drop": [
+      "handrail*",
+      "gtrlamp*",
+      "gtrtrash",
+      "gtrbits3",
+      "gtrbits",
+      "gtrpalm_col"
+    ],
+    "seabed": 3.0,
+    "weld": 0.02,
+    "error": {
+      "vc_gtrky*": 0.4,
+      "gtrrock*": 0.6,
+      "gtrpalm1": 0.3,
+      "*": 0.2
+    },
+    "max_polys": 6000,
+    "notes": "v1.7.31: the mod's collision is its render meshes (293,000 triangles); thin rails, lamp heads, litter and small bits have none here, nor gtrpalm_col (palm trunks, 45 of its 113 under palms this set does not have); the deep sea floor goes."
+  }
 }

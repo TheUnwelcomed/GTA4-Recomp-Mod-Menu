@@ -299,7 +299,9 @@ constexpr HandleUse kHandleUses[] = {
     {"SET_CAR_VISIBLE", 0}, {"SET_HELI_BLADES_FULL_SPEED", 0}, {"SET_VEHICLE_QUATERNION", 0},
     {"TURN_OFF_VEHICLE_EXTRA", 0}, {"CREATE_CHAR_INSIDE_CAR", 0}, {"CREATE_CHAR_AS_PASSENGER", 0},
     {"SET_CAN_BURST_CAR_TYRES", 0}, {"HAS_CAR_BEEN_DAMAGED_BY_CAR", 0}, {"CLEAR_CAR_LAST_DAMAGE_ENTITY", 0},
-    {"BURST_CAR_TYRE", 0},
+    {"BURST_CAR_TYRE", 0}, {"SET_CAR_COORDINATES_NO_OFFSET", 0}, {"START_PTFX_ON_VEH", 1},
+    {"TRIGGER_PTFX_ON_VEH", 1}, {"HAS_CAR_BEEN_DAMAGED_BY_CHAR", 0, 1},
+    {"WARP_CHAR_FROM_CAR_TO_COORD", -1, 0},
     {"IS_CAR_DEAD", 0}, {"DELETE_CAR", 0, -1, true}, {"MARK_CAR_AS_NO_LONGER_NEEDED", 0, -1, true},
     {"ADD_ARMOUR_TO_CHAR", -1, 0}, {"CLEAR_CHAR_TASKS", -1, 0}, {"CLEAR_CHAR_TASKS_IMMEDIATELY", -1, 0},
     {"FREEZE_CHAR_POSITION", -1, 0}, {"GET_CAR_CHAR_IS_USING", -1, 0}, {"GIVE_WEAPON_TO_CHAR", -1, 0},
@@ -5726,6 +5728,15 @@ struct TimeMachineState {
   float home[3]{};
   Quat home_q;
   uint64_t next_wait_toast = 0, scene_at = 0;
+  // v1.7.31: on a trip to a place or home from one the car waits (hidden,
+  // still) over where it is going, so the world there streams in and the
+  // city's streams out (in v1.7.30 it waited in the city: the place's models
+  // never got in); where it comes back to, once known, with the scene there
+  // asked for first.
+  bool moved = false, dest_set = false, unload_after = false;
+  float dest[3]{};
+  Quat dest_q;
+  std::string arrive_toast;
 };
 TimeMachineState g_tm;
 constexpr float kTmContact = 0.55f;  // its origin over the road on its wheels (the rear patches' depth)
@@ -5737,11 +5748,26 @@ struct TcdModel {
   TcdDate dest, present, last;
   int mph = 0;
   float flash = 0.0f;  // 0..1, a white flash over the screen
+  float veil = 0.0f;   // 0..1, black over the screen (a trip's wait for a place)
 };
 std::mutex g_tcd_mutex;
 TcdModel g_tcd;
 std::atomic<bool> g_tcd_active{false};
 uint64_t g_flash_until = 0, g_flash_start = 0;
+// The veil: from one level to another over a time (v1.7.31).
+float g_veil_from = 0.0f, g_veil_to = 0.0f;
+uint64_t g_veil_start = 0, g_veil_ms = 1;
+float VeilLevel(uint64_t now) {
+  const float t = std::clamp(float(now - g_veil_start) / float(std::max<uint64_t>(g_veil_ms, 1)), 0.0f, 1.0f);
+  return g_veil_from + (g_veil_to - g_veil_from) * t;
+}
+void Veil(float to, uint64_t ms) {
+  const uint64_t now = NowMs();
+  g_veil_from = VeilLevel(now);
+  g_veil_to = to;
+  g_veil_start = now;
+  g_veil_ms = std::max<uint64_t>(ms, 1);
+}
 
 // Puts a car exactly there (its own origin), or as SET_CAR_COORDINATES puts it.
 void PlaceCar(PPCContext& ctx, uint8_t* base, uint32_t car, float x, float y, float z) {
@@ -5835,6 +5861,7 @@ void StopVents(PPCContext& ctx, uint8_t* base, TimeMachineState& m) {
 const gta4::addons::MapInfo* FindMap(std::string_view name);
 bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info);
 bool OnMap(const gta4::addons::MapInfo& m, const std::array<float, 3>& p, float margin);
+std::array<float, 3> MapPoint(const gta4::addons::MapInfo& m, float x, float y, float z);
 struct MapRun;
 const gta4::addons::MapInfo* MapStandingNow();
 void PlanTrip(PPCContext& ctx, uint8_t* base, TimeMachineState& m, State& s) {
@@ -5906,6 +5933,19 @@ void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
   Invoke(ctx, base, "SET_CAR_COLLISION", {m.car, 0});
   Invoke(ctx, base, "FREEZE_CAR_POSITION", {m.car, 1});
   Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 0});
+  // To a place, or home from one (v1.7.31): the car waits high over where it
+  // is going, so the world there streams in (and the city's out, making
+  // room), the screen veiled until it is back.
+  m.moved = m.dest_set = m.unload_after = false;
+  m.arrive_toast.clear();
+  if (m.trip_map || m.going_home) {
+    std::array<float, 3> over{m.home[0], m.home[1], m.home[2]};
+    if (m.trip_map)
+      over = MapPoint(*m.trip_map, m.trip_map->arrive[0], m.trip_map->arrive[1], m.trip_map->arrive[2]);
+    PlaceCar(ctx, base, m.car, over[0], over[1], over[2] + 60.0f);
+    m.moved = true;
+    Veil(1.0f, 450);
+  }
   // The time circuits: the clock goes to the destination's time; the
   // present becomes the destination, the last time departed the old present.
   m.last = m.present;
@@ -5926,6 +5966,15 @@ void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
 // as it was, with a triple boom; frosted over, its vents steaming.
 void Arrive(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m) {
   const uint64_t away = NowMs() - m.phase_at;
+  if (m.moved || VeilLevel(NowMs()) > 0.0f)
+    Veil(0.0f, 700);
+  m.moved = false;
+  if (!VehicleAddress(base, m.car)) {  // (v1.7.30's crash: the car was gone, its handle stale)
+    Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
+    m.phase = 0;
+    REXLOG_WARN("gta4-trainer: time machine: the car was gone after {} ms away; no arrival", away);
+    return;
+  }
   float p[3] = {m.at[0], m.at[1], m.at[2]};
   // a little further along its line
   const float fx = 2.0f * (m.q.x * m.q.y - m.q.w * m.q.z), fy = 1.0f - 2.0f * (m.q.x * m.q.x + m.q.z * m.q.z);
@@ -5956,6 +6005,25 @@ void Arrive(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
   m.phase = 2;
   m.phase_at = NowMs();
   REXLOG_INFO("gta4-trainer: time machine back after {} ms ({:.1f}, {:.1f}, {:.1f})", away, p[0], p[1], p[2]);
+}
+
+// The car gone while away (v1.7.30: its driver got out during a long wait,
+// and the world, which a spawned car is handed to, took the hidden car at
+// once): no arrival to make. The driver is seen again; if the car had gone on
+// ahead to where it was going, he is put back where it left.
+void TripLost(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m, State& s) {
+  REXLOG_WARN("gta4-trainer: time machine: the car was gone after {} ms away; the trip ended there",
+              NowMs() - m.phase_at);
+  Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, 1});
+  if (m.moved)
+    Teleport(ctx, base, game, m.at[0], m.at[1], m.at[2], s);
+  if (VeilLevel(NowMs()) > 0.0f)
+    Veil(0.0f, 500);
+  m.moved = m.dest_set = m.unload_after = m.going_home = false;
+  m.trip_map = nullptr;
+  m.arrive_toast.clear();
+  m.phase = 0;
+  Toast(s, "The time machine was lost on the way.", 3000);
 }
 
 // The cold vents and the frost after a trip; the trails going out.
@@ -6216,20 +6284,112 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
 // ---------------------------------------------------------------------------
 struct MapStanding {
   uint32_t hash = 0, object = 0;
+  int model = -1;  // in MapRun::models
   bool collision = false;
   float pos[3]{}, q[4]{};
+};
+struct MapModel {
+  std::string name;
+  uint32_t hash = 0;
+  bool known = true, loaded = false;
+  int index = -1;  // in the model table (its streaming entry: the model module's first entry + this)
 };
 struct MapRun {
   const gta4::addons::MapInfo* info = nullptr;
   int phase = 0;  // 0 nothing; 1 loading (requested); 2 standing
-  uint64_t requested_at = 0, loaded_at = 0, next_check = 0, next_renew = 0, unload_at = 0;
-  std::vector<uint32_t> models;
+  uint64_t requested_at = 0, loaded_at = 0, next_check = 0, next_renew = 0, unload_at = 0, next_report = 0;
+  std::vector<MapModel> models;
   std::vector<MapStanding> pieces;
   bool loaded = false;
-  int loaded_count = 0, renewals = 0, logs = 0;
+  int loaded_count = 0, known_count = 0, renewals = 0, logs = 0, reports = 0;
 };
 MapRun g_map;
 constexpr uint64_t kMapLoadLimitMs = 45000;  // a trip waits this long for the place, then turns back
+
+// ---- the game's streaming, read for the map's log (v1.7.31) ----
+// Entries: 24 bytes each from [0x83032744]: +0 the resource's flags, +4 its
+// image (top byte) and place, +8 its state (the top two bits: 0 out, 1 in,
+// 2 asked for, 3 loading) and size, +23 its module. Modules: 100 bytes each
+// from 0x82D515B8 (their count at +2500): +84 the file extension, +88 the
+// first entry. sub_8250D328 (the table, an entry, an array) lists the entries
+// an object needs in first, as the game's own requests do. Models are module
+// [0x82B58604], their entries in the model table's order. A file whose name
+// is over 24 characters with its extension is not registered at all
+// (sub_825127C0 copies 24 and looks for the extension's dot in them).
+constexpr uint32_t kStreamEntries = 0x83032744, kStreamModules = 0x82D515B8, kModelModuleIndex = 0x82B58604,
+                   kStreamDependencies = 0x8250D328, kStreamManager = 0x82A9AA7C;
+struct StreamEntry {
+  uint32_t index = 0, flags = 0, where = 0, packed = 0;
+  int module = -1;
+  int state() const { return int(packed >> 30); }
+  uint32_t size() const { return packed & 0x3FFFFFFF; }
+};
+int StreamModuleCount(uint8_t* base) {
+  const uint32_t n = Span(base, kStreamModules + 2500, 4) ? Read(base, kStreamModules + 2500) : 0;
+  return n <= 25 ? int(n) : 0;  // (room for 25: the count sits where a 26th would start)
+}
+std::optional<StreamEntry> ReadStreamEntry(uint8_t* base, uint32_t index) {
+  if (index >= 0xFFFF || !Span(base, kStreamEntries, 4))
+    return std::nullopt;
+  const uint32_t table = Read(base, kStreamEntries), e = table + index * 24;
+  if (!table || !Span(base, e, 24))
+    return std::nullopt;
+  StreamEntry out;
+  out.index = index;
+  out.flags = Read(base, e);
+  out.where = Read(base, e + 4);
+  out.packed = Read(base, e + 8);
+  const int module = *rex::memory::GuestPtr(base, e + 23);
+  out.module = module < StreamModuleCount(base) ? module : -1;
+  return out;
+}
+std::string StreamModuleName(uint8_t* base, int module) {
+  if (module < 0 || module >= StreamModuleCount(base))
+    return "?";
+  const uint32_t at = kStreamModules + uint32_t(module) * 100 + 84;
+  std::string name;
+  for (uint32_t i = 0; i < 4 && Span(base, at + i, 1); ++i) {
+    const char c = char(*rex::memory::GuestPtr(base, at + i));
+    if (c < 0x20 || c > 0x7E)
+      break;
+    name += c;
+  }
+  return name.empty() ? "?" : name;
+}
+uint32_t StreamModuleFirst(uint8_t* base, int module) {
+  const uint32_t at = kStreamModules + uint32_t(module) * 100 + 88;
+  return module >= 0 && Span(base, at, 4) ? Read(base, at) : 0;
+}
+std::string DescribeEntry(uint8_t* base, const StreamEntry& e) {
+  static constexpr const char* kStates[4] = {"out", "in", "asked", "loading"};
+  return fmt::format("{}#{} {} {} B (flags {:08X}, image {})", StreamModuleName(base, e.module),
+                     e.index - StreamModuleFirst(base, e.module), kStates[e.state()], e.size(), e.flags,
+                     e.where >> 24);
+}
+// The entries one needs in first (the game's own list).
+std::vector<uint32_t> StreamDependencies(PPCContext& parent, uint8_t* base, uint32_t index) {
+  auto* runtime = rex::Runtime::instance();
+  auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
+  auto* function = dispatcher ? dispatcher->GetFunction(kStreamDependencies) : nullptr;
+  if (!function || parent.r1.u32 < 0x200)
+    return {};
+  const uint32_t frame = (parent.r1.u32 - 0x200u) & ~15u, list = frame + 0x100;
+  if (!Span(base, frame, 0x200, true))
+    return {};
+  Write(base, frame, parent.r1.u32);
+  PPCContext call = parent;
+  call.r1.u32 = frame;
+  call.r3.u32 = kStreamModules;
+  call.r4.u32 = index;
+  call.r5.u32 = list;
+  call.lr = 0x82844BA0;
+  function(call, base);
+  const uint32_t n = std::min<uint32_t>(call.r3.u32, 64);
+  std::vector<uint32_t> out;
+  for (uint32_t i = 0; i < n; ++i)
+    out.push_back(Read(base, list + i * 4));
+  return out;
+}
 
 const gta4::addons::MapInfo* FindMap(std::string_view name) {
   for (const auto& m : gta4::addons::InstalledMaps())
@@ -6248,6 +6408,45 @@ bool OnMap(const gta4::addons::MapInfo& m, const std::array<float, 3>& p, float 
          p[1] >= m.area[1] + m.shift[1] - margin && p[1] <= m.area[3] + m.shift[1] + margin;
 }
 
+// What the place's loading is waiting for: each model not in yet, its own
+// streaming entry and those it needs first (v1.7.31; v1.7.30's log showed
+// none of the 56 in after two minutes and nothing more).
+void MapReport(PPCContext& ctx, uint8_t* base, const char* why) {
+  auto& g = g_map;
+  if (!g.info)
+    return;
+  ++g.reports;
+  const uint32_t mm = Span(base, kModelModuleIndex, 4) ? Read(base, kModelModuleIndex) : 0xFF;
+  const uint32_t first = StreamModuleFirst(base, int(mm));
+  std::string budget;
+  if (Span(base, kStreamManager, 64))
+    for (uint32_t w = 8; w < 16; ++w)
+      budget += fmt::format(" {:X}", Read(base, kStreamManager + w * 4));
+  REXLOG_INFO("gta4-trainer: map {} report ({}): {} of {} models in after {} ms; model module {} ({}), streaming "
+              "manager words 8-15:{}",
+              g.info->name, why, g.loaded_count, g.known_count, NowMs() - g.requested_at, mm,
+              StreamModuleName(base, int(mm)), budget);
+  int shown = 0;
+  for (const auto& mdl : g.models) {
+    if (!mdl.known || mdl.loaded || mdl.index < 0)
+      continue;
+    if (++shown > 4)
+      break;
+    const uint32_t index = first + uint32_t(mdl.index);
+    const auto e = ReadStreamEntry(base, index);
+    if (!e) {
+      REXLOG_INFO("gta4-trainer:   {} (model {}): its streaming entry not readable", mdl.name, mdl.index);
+      continue;
+    }
+    std::string needs;
+    for (const uint32_t d : StreamDependencies(ctx, base, index))
+      if (const auto de = ReadStreamEntry(base, d))
+        needs += "; " + DescribeEntry(base, *de);
+    REXLOG_INFO("gta4-trainer:   {} (model {}): {}{}", mdl.name, mdl.index, DescribeEntry(base, *e),
+                needs.empty() ? std::string("; needs nothing listed") : needs);
+  }
+}
+
 void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
   auto& g = g_map;
   if (!g.info)
@@ -6258,14 +6457,16 @@ void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
       DeleteObject(ctx, base, p.object);
       ++deleted;
     }
-  for (const uint32_t h : g.models)
-    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {h});
+  for (const auto& mdl : g.models)
+    if (mdl.known)
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {mdl.hash});
   REXLOG_INFO("gta4-trainer: map {} unloaded ({}): {} pieces deleted, {} models let go", g.info->name, why, deleted,
-              g.models.size());
+              g.known_count);
   g = MapRun{};
 }
 
-// The place's models requested (another place deleted first).
+// The place's models requested (another place deleted first). Models the
+// game does not have (not in its images) are left out, their pieces with them.
 bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info) {
   auto& g = g_map;
   if (g.info == &info && g.phase != 0)
@@ -6276,6 +6477,7 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
   g.phase = 1;
   g.requested_at = NowMs();
   g.next_renew = g.requested_at + 6000;
+  g.next_report = g.requested_at + 5000;
   for (const auto& p : info.pieces) {
     MapStanding s;
     s.hash = ModelHash(p.model);
@@ -6285,24 +6487,46 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
       s.pos[a] = at[size_t(a)];
     for (int a = 0; a < 4; ++a)
       s.q[a] = p.q[a];
+    auto it = std::find_if(g.models.begin(), g.models.end(), [&](const MapModel& m) { return m.hash == s.hash; });
+    if (it == g.models.end()) {
+      MapModel mdl;
+      mdl.name = p.model;
+      mdl.hash = s.hash;
+      g.models.push_back(mdl);
+      it = g.models.end() - 1;
+    }
+    s.model = int(it - g.models.begin());
     g.pieces.push_back(s);
-    if (std::find(g.models.begin(), g.models.end(), s.hash) == g.models.end())
-      g.models.push_back(s.hash);
   }
-  int unknown = 0;
-  for (const uint32_t h : g.models) {
-    const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {h});
-    if (known && !known->r0())
-      ++unknown;
-    Invoke(ctx, base, "REQUEST_MODEL", {h});
+  std::string unknown;
+  std::unordered_map<uint32_t, size_t> by_info;
+  for (size_t k = 0; k < g.models.size(); ++k) {
+    auto& mdl = g.models[k];
+    const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {mdl.hash});
+    mdl.known = !known || known->r0();
+    if (!mdl.known) {
+      unknown += (unknown.empty() ? "" : ", ") + mdl.name;
+      continue;
+    }
+    ++g.known_count;
+    Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
+    if (const uint32_t mi = FindModelInfo(base, mdl.hash))
+      by_info[mi] = k;
   }
-  REXLOG_INFO("gta4-trainer: map {} requested: {} pieces, {} models ({} unknown to the game), the sea there at "
-              "{:.2f} (the mod's {:.2f})",
-              info.name, g.pieces.size(), g.models.size(), unknown, info.sea_dst, info.sea_src);
+  ForEachModelInfo(base, [&](uint32_t i, uint32_t mi) {
+    if (const auto it = by_info.find(mi); it != by_info.end())
+      g.models[it->second].index = int(i);
+    return false;
+  });
+  REXLOG_INFO("gta4-trainer: map {} requested: {} pieces, {} models ({} not in the game's images{}{}), the sea there "
+              "at {:.2f} (the mod's {:.2f})",
+              info.name, g.pieces.size(), g.models.size(), g.models.size() - size_t(g.known_count),
+              unknown.empty() ? "" : ": ", unknown, info.sea_dst, info.sea_src);
   return true;
 }
 
-// Loading: how many models are in, the requests renewed while some are not.
+// Loading: how many models are in, the requests renewed while some are not,
+// a report of what it waits for every few seconds.
 void MapTick(PPCContext& ctx, uint8_t* base, State& s, uint64_t now) {
   auto& g = g_map;
   if (!g.info || now < g.next_check)
@@ -6315,32 +6539,40 @@ void MapTick(PPCContext& ctx, uint8_t* base, State& s, uint64_t now) {
   if (g.phase != 1 || g.loaded)
     return;
   int in = 0;
-  for (const uint32_t h : g.models) {
-    const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {h});
-    if (loaded && loaded->r0())
+  for (auto& mdl : g.models) {
+    if (!mdl.known)
+      continue;
+    const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {mdl.hash});
+    mdl.loaded = loaded && loaded->r0();
+    if (mdl.loaded)
       ++in;
     else if (now >= g.next_renew)
-      Invoke(ctx, base, "REQUEST_MODEL", {h});
+      Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
   }
   if (now >= g.next_renew) {
     g.next_renew = now + 6000;
     ++g.renewals;
   }
-  if (in != g.loaded_count && g.logs < 12 && (in == int(g.models.size()) || now - g.requested_at > 3000)) {
+  if (in != g.loaded_count && g.logs < 12 && (in == g.known_count || now - g.requested_at > 3000)) {
     ++g.logs;
-    REXLOG_INFO("gta4-trainer: map {}: {} of {} models loaded after {} ms", g.info->name, in, g.models.size(),
+    REXLOG_INFO("gta4-trainer: map {}: {} of {} models loaded after {} ms", g.info->name, in, g.known_count,
                 now - g.requested_at);
   }
   g.loaded_count = in;
-  if (in == int(g.models.size())) {
+  if (g.known_count > 0 && in == g.known_count) {
     g.loaded = true;
     g.loaded_at = now;
     if (!g_tm.in_car || g_tm.phase == 0)
       Toast(s, g.info->label + std::string(" is ready: 88 mph to go."), 2500);
+    return;
+  }
+  if (now >= g.next_report && g.reports < 8) {
+    g.next_report = now + (g.reports < 3 ? 5000 : 15000);
+    MapReport(ctx, base, "still loading");
   }
 }
 
-// The pieces placed (all of them, the models in). False while a model is not.
+// The pieces placed (those of the models the game has; all their models in).
 bool MapPlace(PPCContext& ctx, uint8_t* base) {
   auto& g = g_map;
   if (!g.info || !g.loaded)
@@ -6348,10 +6580,14 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
   if (g.phase == 2)
     return true;
   const bool exact = NativeKnown("CREATE_OBJECT_NO_OFFSET");
-  int made = 0, failed = 0;
+  int made = 0, failed = 0, left_out = 0;
   for (auto& p : g.pieces) {
     if (p.object)
       continue;
+    if (p.model < 0 || !g.models[size_t(p.model)].known) {
+      ++left_out;
+      continue;
+    }
     const auto obj = Invoke(ctx, base, exact ? "CREATE_OBJECT_NO_OFFSET" : "CREATE_OBJECT",
                             {p.hash, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2]), 0, 1}, 4);
     if (!obj || !obj->words[0]) {
@@ -6372,8 +6608,8 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
     }
     ++made;
   }
-  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not ({})", g.info->name, made, failed,
-              exact ? "exactly" : "CREATE_OBJECT, then moved");
+  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not, {} left out (models the game hasn't) ({})",
+              g.info->name, made, failed, left_out, exact ? "exactly" : "CREATE_OBJECT, then moved");
   if (failed)
     return false;
   g.phase = 2;
@@ -6401,71 +6637,92 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   auto pressed = [&](uint16_t b) { return (buttons & b) && !(prev & b) && !s.open; };
   const auto& vehicle = PlayerVehicle(ctx, base, game);
   const int film = vehicle.car ? TimeMachineFilm(vehicle.model) : 0;
-  // A trip under way carries on whatever happens (the car is ours till it is back).
+  // A trip under way carries on whatever happens (the car is ours till it is
+  // back). Y is kept from the game too (v1.7.31): getting out of the car while
+  // it was away left it to the world, which took it at once, unseen, and the
+  // arrival then moved a car that was gone (v1.7.30's crash); Y turns a wait
+  // for a place back.
   if (m.phase == 1) {
     const uint32_t held = film ? uint32_t(X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_DPAD_RIGHT |
-                                          X_INPUT_GAMEPAD_LEFT_SHOULDER)
+                                          X_INPUT_GAMEPAD_LEFT_SHOULDER | X_INPUT_GAMEPAD_Y)
                                : 0;
     const uint64_t gone = now - m.phase_at;
-    if (m.trip_map) {
-      // To a place: gone until it stands, then there.
+    if (!VehicleAddress(base, m.car)) {
+      TripLost(ctx, base, game, m, s);
+      return held;
+    }
+    // Where it comes back to, once known: the scene there asked for first.
+    auto come_back = [&](const float* p, const Quat& q) {
+      for (int a = 0; a < 3; ++a)
+        m.dest[a] = p[a];
+      m.dest_q = q;
+      m.dest_set = true;
+      Invoke(ctx, base, "REQUEST_COLLISION_AT_POSN", {Bits(p[0]), Bits(p[1]), Bits(p[2])});
+      if (NativeKnown("LOAD_SCENE"))
+        Invoke(ctx, base, "LOAD_SCENE", {Bits(p[0]), Bits(p[1]), Bits(p[2])});
+      m.scene_at = now;
+    };
+    if (m.trip_map && !m.dest_set) {
+      // To a place: away until it stands, then there.
       const auto* info = m.trip_map;
       const bool ready = g_map.info == info && g_map.loaded && MapPlace(ctx, base);
       if (!ready) {
         MapTick(ctx, base, s, now);
-        if (gone > kMapLoadLimitMs || !VehicleAddress(base, m.car)) {
-          REXLOG_WARN("gta4-trainer: time machine: {} not ready after {} ms ({} of {} models); back where it left",
-                      info->name, gone, g_map.loaded_count, g_map.models.size());
-          Toast(s, info->label + std::string(" didn't load in time: back where you left."), 3500);
-          m.trip_map = nullptr;
-          Arrive(ctx, base, game, m);
-        } else if (gone > 2500 && now >= m.next_wait_toast) {
-          m.next_wait_toast = now + 1500;
-          Toast(s, fmt::format("Arriving at {}... ({} of {} loaded)", info->label, g_map.loaded_count,
-                               g_map.models.size()),
-                1600);
+        const bool turn = pressed(X_INPUT_GAMEPAD_Y) || gone > kMapLoadLimitMs || g_map.info != info;
+        if (!turn) {
+          if (gone > 2500 && now >= m.next_wait_toast) {
+            m.next_wait_toast = now + 1500;
+            Toast(s, fmt::format("Arriving at {}... ({} of {} loaded)  Y: turn back", info->label,
+                                 g_map.loaded_count, g_map.known_count),
+                  1600);
+          }
+          return held;
         }
-        return held;
+        REXLOG_WARN("gta4-trainer: time machine: {} not ready after {} ms ({} of {} models){}; back where it left",
+                    info->name, gone, g_map.loaded_count, g_map.known_count,
+                    gone > kMapLoadLimitMs ? "" : " (turned back)");
+        MapReport(ctx, base, "the trip turned back");
+        m.arrive_toast = info->label + std::string(gone > kMapLoadLimitMs ? " didn't load in time" : " not reached") +
+                         ": back where you left.";
+        m.trip_map = nullptr;
+        come_back(m.at, m.q);  // (the city there streamed in again first)
+      } else {
+        // On its road, facing along it; in the air (Part II flying) well over it.
+        const auto at = MapPoint(*info, info->arrive[0], info->arrive[1], info->arrive[2]);
+        const float lift = m.flying ? std::max(30.0f, m.altitude) : kTmContact;
+        const float p[3] = {at[0], at[1], at[2] + lift};
+        const float run = std::max(info->arrive[4] - 25.0f, 10.0f);
+        m.gone_speed = std::min(m.gone_speed, std::sqrt(2.0f * 6.0f * run));
+        REXLOG_INFO("gta4-trainer: time machine arriving at {} ({:.1f}, {:.1f}, {:.1f}), heading {:.0f}, after {} ms",
+                    info->name, p[0], p[1], p[2], info->arrive[3], gone);
+        m.arrive_toast = info->label;
+        m.trip_map = nullptr;
+        come_back(p, QAxis(0, 0, 1, info->arrive[3] * 3.14159265f / 180.0f));
       }
-      const auto at = MapPoint(*info, info->arrive[0], info->arrive[1], info->arrive[2]);
-      if (!m.scene_loaded) {  // (the world around it streamed in while the car is away)
-        m.scene_loaded = true;
-        Invoke(ctx, base, "REQUEST_COLLISION_AT_POSN", {Bits(at[0]), Bits(at[1]), Bits(at[2])});
-        if (NativeKnown("LOAD_SCENE"))
-          Invoke(ctx, base, "LOAD_SCENE", {Bits(at[0]), Bits(at[1]), Bits(at[2])});
-        m.scene_at = now;
-        return held;
-      }
-      if (gone < kGoneMs || now - m.scene_at < 600)  // (a moment for the scene after the load)
-        return held;
-      // On its road, facing along it; in the air (Part II flying) well over it.
-      const float lift = m.flying ? std::max(30.0f, m.altitude) : kTmContact;
-      m.at[0] = at[0];
-      m.at[1] = at[1];
-      m.at[2] = at[2] + lift;
-      m.q = QAxis(0, 0, 1, info->arrive[3] * 3.14159265f / 180.0f);
-      const float run = std::max(info->arrive[4] - 25.0f, 10.0f);
-      m.gone_speed = std::min(m.gone_speed, std::sqrt(2.0f * 6.0f * run));
-      REXLOG_INFO("gta4-trainer: time machine arriving at {} ({:.1f}, {:.1f}, {:.1f}), heading {:.0f}, after {} ms",
-                  info->name, m.at[0], m.at[1], m.at[2], info->arrive[3], gone);
-      m.trip_map = nullptr;
-      Arrive(ctx, base, game, m);
-      Toast(s, info->label, 3000);
-      return held;
-    }
-    if (m.going_home) {
+    } else if (m.going_home && !m.dest_set) {
       // Back to where it left the city; the place deleted behind it.
-      if (gone >= kGoneMs || !VehicleAddress(base, m.car)) {
-        for (int a = 0; a < 3; ++a)
-          m.at[a] = m.home[a];
-        m.q = m.home_q;
-        m.going_home = false;
-        Arrive(ctx, base, game, m);
+      m.going_home = false;
+      m.unload_after = true;
+      come_back(m.home, m.home_q);
+    }
+    if (m.dest_set) {
+      if (gone < kGoneMs || now - m.scene_at < 700)  // (a moment for the scene after the load)
+        return held;
+      for (int a = 0; a < 3; ++a)
+        m.at[a] = m.dest[a];
+      m.q = m.dest_q;
+      m.dest_set = false;
+      Arrive(ctx, base, game, m);
+      if (m.unload_after) {
+        m.unload_after = false;
         g_map.unload_at = now + 2000;
       }
+      if (!m.arrive_toast.empty())
+        Toast(s, m.arrive_toast, 3000);
+      m.arrive_toast.clear();
       return held;
     }
-    if (gone >= kGoneMs || !VehicleAddress(base, m.car))
+    if (gone >= kGoneMs)  // (through time only: back where it left)
       Arrive(ctx, base, game, m);
     return held;
   }
@@ -6668,7 +6925,8 @@ void PublishTcd(const State& s) {
   const uint64_t now = NowMs();
   if (now < g_flash_until && g_flash_until > g_flash_start)
     t.flash = float(g_flash_until - now) / float(g_flash_until - g_flash_start);
-  const bool active = t.visible || t.flash > 0.0f;
+  t.veil = VeilLevel(now);
+  const bool active = t.visible || t.flash > 0.0f || t.veil > 0.0f;
   {
     std::lock_guard lock(g_tcd_mutex);
     g_tcd = t;
@@ -8095,7 +8353,7 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
                    : g_map.phase == 2   ? "Unload " + g_map.info->label + " (despawn)"
                    : g_map.loaded       ? "Unload " + g_map.info->label + " (loaded, not placed)"
                                         : fmt::format("Unload {} (loading {} of {})", g_map.info->label,
-                                                      g_map.loaded_count, g_map.models.size());
+                                                      g_map.loaded_count, g_map.known_count);
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }
@@ -8603,7 +8861,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool lazar_ramps_due = g_have_lazar && (CanopyBusy(g_lazar_ramps) || now >= g_lazar_ramps.next_probe);
   const bool lazar_due = g_have_lazar && (g_lazar.in_car || LazarShellsLive() || now >= g_lazar.next_probe);
   const bool tm_due = HaveTimeMachines() && (g_tm.in_car || g_tm.phase != 0 || g_tm.fires_out || g_tm.vents_out ||
-                                             g_tm.frost_until || now >= g_tm.next_probe || g_flash_until > now);
+                                             g_tm.frost_until || now >= g_tm.next_probe || g_flash_until > now ||
+                                             VeilLevel(now) > 0.0f);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
                                                    now >= g_bat_engine.next_probe);
   const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
@@ -8975,6 +9234,8 @@ void DrawTcd(ImGuiIO& io) {
     t = g_tcd;
   }
   ImDrawList* dl = ImGui::GetForegroundDrawList();
+  if (t.veil > 0.0f)
+    dl->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, int(255 * std::min(1.0f, t.veil))));
   if (t.flash > 0.0f)
     dl->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(235, 245, 255, int(230 * std::min(1.0f, t.flash))));
   if (!t.visible)

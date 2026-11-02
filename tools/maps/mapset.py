@@ -18,19 +18,25 @@ Writes to <out dir>:
   <prefix><model>.xdr, <prefix><txd>.xtd   models and texture dictionaries
   gtxd.xbd     the collision: a bound dictionary named after the .ide the
                installer adds the models to (common.rpf's gtxd.ide, which
-               gta.dat already loads), keyed by model name
+               gta.dat already loads), keyed by model name (collide.py: the
+               mod's meshes welded, cut below the shallows, decimated and
+               split into BVH meshes with trees of their own; 16 KiB pages)
   objs.ide     the models' lines for that .ide
   place.txt    one line per piece for the trainer
   map.txt      the destination: label, date, the shift from the mod's
                coordinates, its sea level, the arrival, its area
 
-Every model is renamed <prefix><name> (no clash with the game's own names).
+Every model is renamed <prefix><name> (no clash with the game's own names),
+shortened where that is over 20 characters: the game registers an image's
+files by the first 24 characters of the name, the extension among them (a
+longer one is never registered: v1.7.30's gk_gtr_deco_polgrnda018).
 WPL rotations are stored inverted (checked: Gator Keys' rotated pad lines up
 with its collision only that way), so place.txt carries the true rotation.
 Collision comes in world space, one .wbn per model; a piece whose model is
 placed unrotated moves into the model's space, the rest (rotated pieces,
 collision with no model) join the set's carrier model's composite.
 """
+import fnmatch
 import json
 import math
 import os
@@ -46,10 +52,30 @@ sys.path.insert(0, os.path.join(HERE, '..', 'pc2x360'))
 sys.path.insert(0, HERE)
 import batconv  # noqa: E402
 import bounds360  # noqa: E402
+import collide  # noqa: E402
 import maptex  # noqa: E402
 import rsc5  # noqa: E402
 
 XTD_TYPE, XDR_TYPE, XBD_TYPE = 7, 109, 32
+NAME_LIMIT = 20  # a file's name with its 4-character extension within the game's 24
+
+
+def short_names(names, prefix, rename=None):
+    """Each name with the prefix, within NAME_LIMIT: the set's own renames
+    first, then without underscores, then cut with three characters of its
+    hash; never two the same."""
+    rename = {k.lower(): v.lower() for k, v in (rename or {}).items()}
+    out, taken = {}, set()
+    for n in sorted(names):
+        full = prefix + rename.get(n, n)
+        if len(full) > NAME_LIMIT:
+            full = prefix + rename.get(n, n).replace('_', '')
+        if len(full) > NAME_LIMIT:
+            full = full[:NAME_LIMIT - 3] + '%03x' % (batconv.joaat(n) & 0xFFF)
+        assert len(full) <= NAME_LIMIT and full not in taken, (n, full)
+        taken.add(full)
+        out[n] = full
+    return out
 
 
 # ------------------------------------------------------------------ sources
@@ -129,36 +155,15 @@ def mesh_points(b):
     return v * np.array(b['quantum']) + np.array(b['offset'])
 
 
-def merge(carrier, extra):
-    """The carrier's composite with `extra` bounds (already in its space) as
-    more children, its box, centroid and radius grown to hold them."""
-    if carrier['type'] != 12:
-        carrier = dict(type=12, radius=carrier['radius'], max=list(carrier['max']), min=list(carrier['min']),
-                       centroid=list(carrier['centroid']), cg=list(carrier['cg']), dist=list(carrier['dist']),
-                       margin=list(carrier['margin']), children=[carrier],
-                       matrices=[identity_matrix()], boxes=[(list(carrier['min']), list(carrier['max']))])
-    for e in extra:
-        kids = e['children'] if e['type'] == 12 else [e]
-        for k in kids:
-            carrier['children'].append(k)
-            carrier['matrices'].append(identity_matrix())
-            carrier['boxes'].append((list(k['min']), list(k['max'])))
-    lo = [min(b[0][i] for b in carrier['boxes']) for i in range(3)]
-    hi = [max(b[1][i] for b in carrier['boxes']) for i in range(3)]
-    carrier['min'], carrier['max'] = lo, hi
-    carrier['centroid'] = [(lo[i] + hi[i]) / 2 for i in range(3)]
-    carrier['cg'] = list(carrier['centroid'])
-    carrier['radius'] = math.sqrt(sum((hi[i] - lo[i]) ** 2 for i in range(3))) / 2
-    return carrier
-
-
 def identity_matrix():
     return struct.pack('<16f', 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
 
 
 def build_dictionary(entries):
-    """bounds360.build_dictionary with pages sized for big meshes: every
-    array inside one 16-page load chunk, no more than 100 chunks."""
+    """bounds360.build_dictionary with pages sized for big meshes: 16 KiB, as
+    the stock static collision (.xbn) has them, so the game loads it in chunks
+    of 256 KiB (v1.7.30's 15 MiB in 512 KiB chunks never loaded), bigger only
+    if an array would not fit in one chunk; no more than 100 chunks."""
     entries = sorted(entries, key=lambda e: bounds360.joaat(e[0]))
     biggest = 0
     total = 0
@@ -174,7 +179,7 @@ def build_dictionary(entries):
                 total += len(x[k])
             biggest = max(biggest, len(x['tree']['nodes']))
             total += len(x['tree']['nodes']) + len(x['tree']['subtrees'])
-    shift = 4
+    shift = 6
     while 16 * (256 << shift) < biggest + 4096 or (total * 1.1) / (256 << shift) > 1500:
         shift += 1
     page = 256 << shift
@@ -318,6 +323,12 @@ def main():
                 placed.append(dict(inst, model=by_hash[inst['hash']]))
     print('%d models, %d pieces placed (%s)' % (len(models), len(placed), ', '.join(cfg['wpl'])))
     where = {p['model']: p for p in placed}
+    # the game's names for the models and the texture dictionaries
+    mname = short_names(models, prefix, cfg.get('rename'))
+    tname = short_names({f[1].lower() for f in models.values()}, prefix, cfg.get('rename'))
+    for k in sorted(set(mname) | set(tname)):
+        if mname.get(k, prefix + k) != prefix + k or tname.get(k, prefix + k) != prefix + k:
+            print('renamed %s -> model %s, dictionary %s' % (k, mname.get(k, '-'), tname.get(k, '-')))
 
     # ---- textures: each dictionary holds what its models reference
     pc_dicts = {}
@@ -367,7 +378,7 @@ def main():
                                            detail=cfg.get('detail', maptex.DETAIL_SIDE))
         verdict, worst = maptex.check(body, flags, chosen)
         assert worst < 12.0, (txd, worst)
-        name = prefix + txd
+        name = tname[txd]
         pack(xlzx, XTD_TYPE, flags, body, os.path.join(out, name + '.xtd'))
         total_tex += len(body)
         tex_report.append('%s.xtd: %s, %d KiB%s' % (name, verdict, len(body) >> 10,
@@ -386,51 +397,73 @@ def main():
         if 'models' in skip:
             break
         body = open(os.path.join(xdr_dir, m + '.xdr.bin'), 'rb').read()
-        pack(xlzx, XDR_TYPE, flags_of[m], body, os.path.join(out, prefix + m + '.xdr'))
+        pack(xlzx, XDR_TYPE, flags_of[m], body, os.path.join(out, mname[m] + '.xdr'))
         total_xdr += len(body)
     print('models: %.1f MiB, %d drawables' % (total_xdr / 1048576.0, len(models)))
 
-    # ---- collision
+    # ---- collision: each .wbn (world space) welded, cut below the shallows,
+    # decimated within the set's error and split into BVH meshes (collide.py);
+    # a piece whose model is placed unrotated in that model's space, the rest
+    # (rotated pieces, collision with no model) in the carrier's
+    col = cfg.get('collision', {})
     carrier = cfg['carrier']
-    entries, joined, pieces_world = [], [], []
+    cpos = where[carrier]['pos']
+    assert abs(where[carrier]['q'][3]) > 0.99999, 'the carrier must be placed unrotated'
+    floor_z = cfg['sea'] - col.get('seabed', 3.0)
+
+    def error_for(name):
+        for pat, e in col.get('error', {}).items():
+            if pat != '*' and fnmatch.fnmatch(name, pat):
+                return e
+        return col.get('error', {}).get('*', 0.2)
+
+    gathered, pieces_world, dropped, joined = {}, [], [], []
+    tri_in = tri_out = 0
     for f in sorted(os.listdir(src)):
         if not f.endswith('.wbn'):
             continue
         name = f[:-4].lower()
         b = read_piece(os.path.join(src, f))
-        pieces_world.append(read_piece(os.path.join(src, f)))
+        pieces_world.append(b)
+        if any(fnmatch.fnmatch(name, pat) for pat in col.get('drop', [])):
+            dropped.append(name)
+            continue
+        v, t, m = collide.soup(b)
+        tri_in += len(t)
+        v, t, m = collide.weld(v, t, m, col.get('weld', 0.02))
+        v, t, m = collide.cut_below(v, t, m, floor_z)
+        v, t, m = collide.decimate(v, t, m, error_for(name))
+        tri_out += len(t)
         p = where.get(name)
         if p and abs(p['q'][3]) > 0.99999 and name != carrier:
-            if b['type'] == 12 and len(b['children']) == 1:
-                b = b['children'][0]
-            bounds360.translate(b, [-v for v in p['pos']])
-            entries.append((prefix + name, b))
-        elif name == carrier:
-            entries.append((prefix + name, ('carrier', b)))
+            key, shift = mname[name], p['pos']
         else:
-            joined.append((name, b))
-    cpos = where[carrier]['pos']
-    assert abs(where[carrier]['q'][3]) > 0.99999, 'the carrier must be placed unrotated'
-    for i, (name, b) in enumerate(entries):
-        if isinstance(b, tuple):
-            cb = b[1]
-            extra = [x for _, x in joined]
-            cb = merge(cb, extra)
-            bounds360.translate(cb, [-v for v in cpos])
-            entries[i] = (name, cb)
+            key, shift = mname[carrier], cpos
+            if name != carrier:
+                joined.append(name)
+        gathered.setdefault(key, []).append((v - np.array(shift), t, m))
+    entries = []
+    worst = 0.0
+    for key in sorted(gathered):
+        v, t, m = collide.join(gathered[key])
+        bound = collide.bound_for(v, t, m, identity_matrix(), col.get('max_polys', collide.MAX_POLYS))
+        for mesh in (bound['children'] if bound['type'] == 12 else [bound]):
+            worst = max(worst, collide.check_bvh(mesh, rays=40))
+        entries.append((key, bound))
     body, xflags = build_dictionary(entries)
     n = bounds360.check(body, xflags, entries)
     pack(xlzx, XBD_TYPE, xflags, body, os.path.join(out, cfg['bounds'] + '.xbd'))
-    print('collision: %d bounds (%s joined to %s), %.1f MiB, flags %08X' % (
-        n, ', '.join(nm for nm, _ in joined), carrier, len(body) / 1048576.0, xflags))
+    print('collision: %d bounds, %d triangles from %d (%s joined to %s; no collision: %s), %.2f MiB, flags %08X, '
+          'trees walked: worst %.4f m' % (n, tri_out, tri_in, ', '.join(joined), carrier, ', '.join(dropped),
+                                         len(body) / 1048576.0, xflags, worst))
     with_bounds = {name for name, _ in entries}
 
     # ---- the models' lines, the pieces, the destination
     with open(os.path.join(out, 'objs.ide'), 'w', newline='\r\n') as f:
         for m, fields in sorted(models.items()):
             line = list(fields)
-            line[0] = prefix + m
-            line[1] = prefix + fields[1].lower()
+            line[0] = mname[m]
+            line[1] = tname[fields[1].lower()]
             line[-1] = 'null'
             f.write(', '.join(line) + '\n')
     with open(os.path.join(out, 'place.txt'), 'w') as f:
@@ -438,8 +471,8 @@ def main():
         for p in placed:
             q, pos = p['q'], p['pos']
             f.write('%s %.6f %.6f %.6f %.6f %.3f %.3f %.3f %d\n' % (
-                prefix + p['model'], q[0], q[1], q[2], q[3], pos[0], pos[1], pos[2],
-                1 if prefix + p['model'] in with_bounds else 0))
+                mname[p['model']], q[0], q[1], q[2], q[3], pos[0], pos[1], pos[2],
+                1 if mname[p['model']] in with_bounds else 0))
     allpts = np.concatenate([mesh_points(b) for b in pieces_world])
     lo, hi = allpts[:, :2].min(0), allpts[:, :2].max(0)
     hm, hlo, cell = height_map(pieces_world)

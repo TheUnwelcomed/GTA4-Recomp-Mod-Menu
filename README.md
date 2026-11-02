@@ -186,6 +186,24 @@ network session.
 
 ## Changes
 
+- **v1.7.31**: the Gator Keys trip **crashed**: waiting for an island that
+  never loaded, the player got out; the world took the hidden car (a spawned
+  car is handed to it), and the arrival moved a car that was gone
+  (`SET_CAR_COORDINATES_NO_OFFSET` was not among the natives guarded against
+  stale handles). Y is now held from the game during a trip (and turns a wait
+  back), a lost car ends the trip on foot, and the stale-handle guard covers
+  that native and four more. **The island never loaded** (none of its 56
+  models in two minutes): every model needs the collision dictionary first,
+  and it was the mod's render meshes, 15 MiB in 512 KiB chunks; it is rebuilt
+  by `tools/maps/collide.py` (welded, cut, decimated, split, quads, its own
+  BVH trees by the rules `treerules.py` checks on stock files) to 2.7 MiB in
+  256 KiB chunks. One model was never registered: the game keeps 24 characters
+  of an image file's name (`sub_825127C0`); names are kept within 20 plus the
+  extension and the installer skips longer ones. On a trip to a place the car
+  now waits (hidden, frozen) over the place, under a black veil with a count,
+  so the place streams in and the city out; turning back loads the city scene
+  first. The map's log reports what loading waits for: each missing model's
+  streaming entry and its dependencies (`sub_8250D328`) with their states.
 - **v1.7.30**: **time travel to a place**: the DeLorean's destinations can
   carry a map set (`tools/maps/mapset.py`): a PC map mod's models, texture
   dictionaries (built fresh with their mip chains, the Xenos mip layout
