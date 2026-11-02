@@ -1,0 +1,53 @@
+{
+  "name": "gatorkeys",
+  "label": "Oct 26, 1984 (Gator Keys)",
+  "date": [
+    1984,
+    10,
+    26,
+    10,
+    0
+  ],
+  "prefix": "gk_",
+  "ide": "vc_gtrky.ide",
+  "wpl": [
+    "vc_gtrky.wpl",
+    "vc_gtrky_stream0.wpl"
+  ],
+  "carrier": "gtrcomm",
+  "bounds": "gtxd",
+  "sea": 1.0,
+  "from": [
+    -432.0,
+    -1421.0
+  ],
+  "to": [
+    2250.0,
+    -2300.0
+  ],
+  "tex": 256,
+  "detail": 128,
+  "substitutes": {
+    "concrete_texture01_d": "concrete_texture01_t",
+    "t_concroadslab_256_bc": "t_concretedust2_256128_bc",
+    "t_blankwall1_256_bc": "t_wallwhitetinge256_bc",
+    "road_highway_solid": "t_road2_256_bc",
+    "mainla50": "t_wallwhitetinge256_bc",
+    "255-255-255-255": "t_white_128_bc"
+  },
+  "stand_ins": {
+    "*": [
+      128,
+      128,
+      128,
+      255
+    ],
+    "*_bump": [
+      128,
+      128,
+      255,
+      255
+    ]
+  },
+  "notes": "The Gator Keys 0.3.5 (a map for GTA Vice City Nextgen Edition): its own pieces only; the 111 Vice City palms it places from VCNE's files are not in it. Textures VCNE supplied stand in from the island's own (substitutes) or flat (stand_ins)."
+}

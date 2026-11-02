@@ -77,6 +77,27 @@ def encode_dxt5(bgra, w, h):
     return out.tobytes()
 
 
+def decode_dxt1(data, w, h):
+    """-> (h, w, 4) uint8 RGBA (BC1, its 1-bit alpha mode included)."""
+    bw, bh = max(1, (w + 3) // 4), max(1, (h + 3) // 4)
+    b = np.frombuffer(data, np.uint8)[:bw * bh * 8].reshape(-1, 8)
+    c0 = b[:, 0].astype(np.int32) | (b[:, 1].astype(np.int32) << 8)
+    c1 = b[:, 2].astype(np.int32) | (b[:, 3].astype(np.int32) << 8)
+    e0, e1 = _from565(c0), _from565(c1)
+    four = (c0 > c1)[:, None, None]
+    cpal = np.where(four, np.stack([e0, e1, (2 * e0 + e1) / 3, (e0 + 2 * e1) / 3], 1),
+                    np.stack([e0, e1, (e0 + e1) / 2, np.zeros_like(e0)], 1))
+    apal = np.where(four[:, :, 0], np.full((len(b), 4), 255.0), np.array([[255.0, 255.0, 255.0, 0.0]]))
+    cb = np.zeros(len(b), np.uint32)
+    for k in range(4):
+        cb |= b[:, 4 + k].astype(np.uint32) << np.uint32(8 * k)
+    cidx = np.stack([(cb >> np.uint32(2 * k)) & np.uint32(3) for k in range(16)], 1).astype(np.int64)
+    rgb = np.take_along_axis(cpal, cidx[:, :, None].repeat(3, 2), 1)
+    alpha = np.take_along_axis(apal, cidx, 1)
+    px = np.concatenate([rgb, alpha[:, :, None]], 2)
+    return np.clip(np.rint(px), 0, 255).astype(np.uint8).reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
+
+
 def decode_dxt5(data, w, h):
     """-> (h, w, 4) uint8 RGBA, for checking the encoder."""
     bw, bh = max(1, w // 4), max(1, h // 4)

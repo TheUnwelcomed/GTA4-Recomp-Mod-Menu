@@ -232,6 +232,9 @@ std::array g_natives = {
     NativeEntry{"SET_CAN_BURST_CAR_TYRES"}, NativeEntry{"BURST_CAR_TYRE"},
     NativeEntry{"CLEAR_CAR_LAST_DAMAGE_ENTITY"},
     NativeEntry{"GET_CAM_FOV"}, NativeEntry{"CREATE_CHAR_INSIDE_CAR"}, NativeEntry{"CREATE_CHAR_AS_PASSENGER"}, NativeEntry{"TASK_HELI_MISSION"}, NativeEntry{"TASK_COMBAT"}, NativeEntry{"SET_HELI_BLADES_FULL_SPEED"}, NativeEntry{"SET_CHAR_WILL_DO_DRIVEBYS"}, NativeEntry{"SET_CHAR_KEEP_TASK"}, NativeEntry{"DELETE_CHAR"}, NativeEntry{"MARK_CHAR_AS_NO_LONGER_NEEDED"}, NativeEntry{"SET_CHAR_ACCURACY"}, NativeEntry{"IS_CHAR_INJURED"}, NativeEntry{"SET_CHAR_HEADING"},
+    // v1.7.30: map destinations (the pieces placed exactly), no dragging the
+    // player out of the armoured cars and aircraft.
+    NativeEntry{"CREATE_OBJECT_NO_OFFSET"}, NativeEntry{"SET_CHAR_CANT_BE_DRAGGED_OUT"},
 };
 std::mutex g_native_mutex;
 
@@ -308,7 +311,7 @@ constexpr HandleUse kHandleUses[] = {
     {"SET_CHAR_HEADING", -1, 0}, {"TASK_COMBAT", -1, 0}, {"TASK_HELI_MISSION", 1, 0},
     {"TASK_LEAVE_CAR_IMMEDIATELY", 1, 0}, {"WARP_CHAR_INTO_CAR", 1, 0},
     {"WARP_CHAR_INTO_CAR_AS_PASSENGER", 1, 0}, {"DELETE_CHAR", -1, 0, true},
-    {"MARK_CHAR_AS_NO_LONGER_NEEDED", -1, 0, true},
+    {"MARK_CHAR_AS_NO_LONGER_NEEDED", -1, 0, true}, {"SET_CHAR_CANT_BE_DRAGGED_OUT", -1, 0},
 };
 
 // Whether the call must not go ahead: a handle in it the game no longer has.
@@ -976,6 +979,7 @@ enum class Action {
   kGiveLoadout, kRemoveWeapons,
   kOpenTimeMachine, kTmPreset, kTmField, kTmCircuits, kTmRefuel, kTmHover,
   kOpenSpawnStandard, kCompleteMission, kTogglePerformance, kJetRoute,
+  kTmUnloadMap, kJetLandMode,
 };
 struct Item {
   std::string_view label;
@@ -991,6 +995,7 @@ struct TcdDate {
 struct TcdPreset {
   std::string_view name;
   TcdDate date;
+  std::string_view map;  // a place it takes the car to (an installed map set), or none
 };
 constexpr std::array kTcdPresets = {
     TcdPreset{"Today", {}},
@@ -1001,6 +1006,8 @@ constexpr std::array kTcdPresets = {
     TcdPreset{"Sep 2, 1885 (the Old West)", {1885, 9, 2, 8, 0}},
     TcdPreset{"Jul 4, 1776 (Independence)", {1776, 7, 4, 12, 0}},
     TcdPreset{"Dec 25, 0000", {0, 12, 25, 0, 0}},
+    // (a place as well as a time: the map set's own island, out to sea)
+    TcdPreset{"Oct 26, 1984 (Gator Keys)", {1984, 10, 26, 10, 0}, "gatorkeys"},
 };
 
 // Shared trainer state: written on the game thread, drawn on the UI thread.
@@ -1021,6 +1028,7 @@ struct State {
   bool raining = false, gravity_off = false;
   bool any_ride = false;     // Bring Your Own Ride: missions take the player's vehicle
   bool jet_route = false;    // the jet's autopilot asked (menu) to fly to the airport and land
+  int jet_land_mode = 0;     // holding d-pad down lands: 0 on open ground nearby, 1 straight ahead, 2 at the airport
   bool performance = false;  // 60 FPS Mode
   bool popup_auto = false;   // Deimos pop-ups: d-pad left (false) or up with the lights (true)
   bool car_lights = true;    // any car's headlights on d-pad left (the one option on by default)
@@ -1030,6 +1038,7 @@ struct State {
   // and the menu's requests the time machine acts on in the car.
   TcdDate tm_dest;
   int tm_preset = 1;
+  std::string tm_map;  // the destination's place (a map set's name), or none: the city
   bool tm_toggle_circuits = false, tm_refuel = false, tm_toggle_hover = false;
   // Async vehicle spawn.
   int pending_model = -1;
@@ -1218,7 +1227,11 @@ std::vector<Item> PageItems(const State& s) {
                 Action::kToggleCarLights},
                {s.any_ride ? "Bring Your Own Ride: ON" : "Bring Your Own Ride: OFF",
                 Action::kToggleAnyRide},
-               {"Jet Autopilot: Fly to Francis Intl and Land", Action::kJetRoute}};
+               {"Jet Autopilot: Fly to Francis Intl and Land", Action::kJetRoute},
+               {s.jet_land_mode == 0   ? "Autopilot Landing (hold d-pad down): Open Ground Nearby"
+                : s.jet_land_mode == 1 ? "Autopilot Landing (hold d-pad down): Straight Ahead"
+                                       : "Autopilot Landing (hold d-pad down): Francis Intl",
+                Action::kJetLandMode}};
       break;
     case Page::kSpawn:
       // The add-ons, and the game's own vehicles a page further.
@@ -1256,7 +1269,8 @@ std::vector<Item> PageItems(const State& s) {
                {"Minute", Action::kTmField},
                {"Time Circuits On/Off (d-pad down in the car)", Action::kTmCircuits},
                {"Refuel: Plutonium / Mr. Fusion (L1 in the car)", Action::kTmRefuel},
-               {"Part II: Fly / Land (d-pad right in the car)", Action::kTmHover}};
+               {"Part II: Fly / Land (d-pad right in the car)", Action::kTmHover},
+               {"Unload Map Destination", Action::kTmUnloadMap}};  // (label filled in by PublishDraw)
       break;
     case Page::kWeapons:
       items = {{"Give Weapon Loadout", Action::kGiveLoadout},
@@ -2582,6 +2596,21 @@ struct JetState {
   // road, or on its side or back (then it is stood back on its wheels)
   uint64_t stuck_since = 0;
   int stuck_logs = 0;
+  // v1.7.30: the autopilot's search for open ground to land on
+  struct Site {
+    float x = 0, y = 0, yaw = 0, score = 0;
+  };
+  struct Search {
+    bool active = false;
+    uint64_t started = 0, next_scan = 0;
+    float sea = 0.0f;
+    std::vector<Site> sites;  // to try, nearest first
+    size_t next = 0;
+    bool found = false;
+    Site best;
+    float best_z = 0.0f;
+    int probes = 0, tried = 0, scans = 0;
+  } search;
 };
 JetState g_jet;
 // Flight, after GTA V's jets: the engine's thrust (the throttle, the
@@ -2640,7 +2669,11 @@ struct JetSpec {
   int slot;      // where the pose of its gear (and canopy) is kept
   int voice;     // its engine's voicing (gta4_jet_engine.h)
   float stand;   // its origin's height over the ground standing on its wheels (m)
+  // where its wheels touch the ground (its own space: the nose gear, then the
+  // left and right mains), kept out of the ground on its wheels (v1.7.30)
+  const float (*contacts)[3] = nullptr;
 };
+constexpr float kBatwingContacts[3][3] = {{0.0f, 1.48f, -1.74f}, {-1.37f, -1.49f, -1.74f}, {1.37f, -1.49f, -1.74f}};
 constexpr JetSpec kF16Jet{"F16", "F-16",
                           {{0.74f, 3.29f, 0.55f}, {-0.74f, 3.29f, 0.55f}},  // both sides, as asked
                           {{-2.5f, -3.0f, -0.3f}, {2.5f, -3.0f, -0.3f}},
@@ -2654,7 +2687,8 @@ constexpr JetSpec kBatwingJet{"BATWING", "Batwing",
                               {{-2.4f, -1.6f, -0.95f}, {2.4f, -1.6f, -0.95f}},
                               {{1.2f, -4.25f, -0.26f}, {-1.2f, -4.25f, -0.26f}}, 2, true, 0.85f,
                               &gta4::flight::kBatwing,
-                              {{{1, 0, -95.0f}, {5, 0, -95.0f}, {6, 0, -95.0f}}}, kPoseBatwing, 1, 1.65f};
+                              {{{1, 0, -95.0f}, {5, 0, -95.0f}, {6, 0, -95.0f}}}, kPoseBatwing, 1, 1.65f,
+                              kBatwingContacts};
 const JetSpec* g_jet_spec = &kF16Jet;
 const JetSpec* JetSpecOf(uint32_t model) {
   static const uint32_t f16 = ModelHash("F16"), batwing = ModelHash("BATWING");
@@ -5682,8 +5716,16 @@ struct TimeMachineState {
   // low), and the car, placed lower each frame, went through them.
   float floor_z = -1e9f, floor_x = 0.0f, floor_y = 0.0f;
   float placed_z = 0.0f, placed_vz = 0.0f, landing_for = 0.0f;
+  float hold_z = 0.0f;  // the height it holds in the air (v1.7.30)
   bool placed = false;
   int floor_log = 0;
+  // v1.7.30: a trip to a place (a map set) or back to the city from one;
+  // home is where the car left the city.
+  const gta4::addons::MapInfo* trip_map = nullptr;
+  bool going_home = false, have_home = false, scene_loaded = false;
+  float home[3]{};
+  Quat home_q;
+  uint64_t next_wait_toast = 0, scene_at = 0;
 };
 TimeMachineState g_tm;
 constexpr float kTmContact = 0.55f;  // its origin over the road on its wheels (the rear patches' depth)
@@ -5787,6 +5829,45 @@ void StopVents(PPCContext& ctx, uint8_t* base, TimeMachineState& m) {
   m.vents_out = 0;
 }
 
+// Where a trip goes (v1.7.30): to a place (the destination's map set,
+// loaded now if it is not yet), back to the city from one (the destination
+// not that place), or only through time (the car comes back where it left).
+const gta4::addons::MapInfo* FindMap(std::string_view name);
+bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info);
+bool OnMap(const gta4::addons::MapInfo& m, const std::array<float, 3>& p, float margin);
+struct MapRun;
+const gta4::addons::MapInfo* MapStandingNow();
+void PlanTrip(PPCContext& ctx, uint8_t* base, TimeMachineState& m, State& s) {
+  m.trip_map = nullptr;
+  m.going_home = false;
+  m.scene_loaded = false;
+  const auto* dest = s.tm_map.empty() ? nullptr : FindMap(s.tm_map);
+  const auto* here = MapStandingNow();
+  const std::array<float, 3> at{m.at[0], m.at[1], m.at[2]};
+  const bool on_here = here && OnMap(*here, at, 120.0f);
+  if (!s.tm_map.empty() && (!dest || !dest->installed)) {
+    Toast(s, "That place isn't installed in this launch: a trip through time only.", 3000);
+    REXLOG_WARN("gta4-trainer: time machine: the place {} is not installed ({}); time only", s.tm_map,
+                dest ? "its files or lines were not added this launch" : "no such map set");
+    dest = nullptr;
+  }
+  if (dest && dest != (on_here ? here : nullptr)) {
+    if (!on_here) {  // (from the city: home is here)
+      for (int a = 0; a < 3; ++a)
+        m.home[a] = m.at[a];
+      m.home_q = m.q;
+      m.have_home = true;
+    }
+    m.trip_map = dest;
+    MapRequest(ctx, base, *dest);
+  } else if (!dest && on_here) {
+    m.going_home = m.have_home;
+  }
+  REXLOG_INFO("gta4-trainer: time machine trip: {}", m.trip_map ? "to " + m.trip_map->name
+                                                     : m.going_home ? std::string("home from ") + here->name
+                                                     : std::string("through time only"));
+}
+
 // 88 mph: the car is gone, its trails burning behind it.
 void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachineState& m, State& s) {
   const auto c = CarPosition(ctx, base, m.car);
@@ -5798,6 +5879,7 @@ void Depart(PPCContext& ctx, uint8_t* base, const GameContext& game, TimeMachine
   m.q = {q->f(0), q->f(1), q->f(2), q->f(3)};
   m.gone_speed = std::max(m.speed, kMph88);
   m.flying = m.hover;
+  PlanTrip(ctx, base, m, s);
   g_tm_synth.SetCharge(0.0f);
   g_tm_synth.Depart(m.flying);
   if (const auto nose = CarPoint(ctx, base, m.car, kNose))
@@ -6033,8 +6115,11 @@ void FoldWheels(PPCContext& ctx, uint8_t* base, TimeMachineState& m, float fold)
 // Part II in the air: the left stick drives and turns, R2 climbs, L2 sinks;
 // it hovers where it is with nothing pressed. Its attitude (the heading, a
 // lean into the turn and the acceleration) and its speed along the nose
-// are set every frame as the F-16's are; the height is held by moving it
-// up or down a little each frame.
+// are set every frame as the F-16's are; its height is a held target, moved
+// only by R2 / L2 (and the ground under it). v1.7.29 took each frame's height
+// from where the physics had left it: leaning forward to speed up pointed
+// its speed down, and it sank to the ground and stuck there unless R2 was
+// held as well.
 void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& pad, float dt) {
   const auto c = CarPosition(ctx, base, m.car);
   if (!c)
@@ -6048,9 +6133,15 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
   const float want_climb = m.landing ? -4.0f : up * 8.0f;
   m.climb += std::clamp(want_climb - m.climb, -14.0f * dt, 14.0f * dt);
   m.bank += (lx * 0.35f - m.bank) * std::min(1.0f, 4.0f * dt);
-  m.pitch += (std::clamp(-accel / std::max(dt, 1e-3f) * 0.012f + m.climb * 0.02f, -0.25f, 0.25f) - m.pitch) *
+  m.pitch += (std::clamp(-accel / std::max(dt, 1e-3f) * 0.004f + m.climb * 0.02f, -0.25f, 0.25f) - m.pitch) *
              std::min(1.0f, 3.0f * dt);
-  float z = (*c)[2] + m.climb * dt;
+  if (!m.placed)
+    m.hold_z = (*c)[2];
+  // (pushed up by something it met: it stays up)
+  if ((*c)[2] > m.hold_z + 0.6f)
+    m.hold_z = (*c)[2];
+  m.hold_z += m.climb * dt;
+  float z = m.hold_z;
   // The ground under it, and where it will be in half a second (a kerb, a
   // slope, a wall's foot): kept 1.2 m clear of the higher, looked for from
   // well above, so a car that has sunk in still finds the surface over it.
@@ -6086,6 +6177,7 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
   constexpr float kHoverClear = 1.2f;
   if (gz && z < *gz + kHoverClear) {
     z = *gz + kHoverClear;
+    m.hold_z = z;
     m.climb = std::max(m.climb, 0.0f);
   }
   m.altitude = gz ? z - *gz : 99.0f;
@@ -6112,6 +6204,185 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Map destinations (v1.7.30): places the DeLorean travels to, the installer's
+// map sets (gta4_addon_install.h). Chosen and confirmed in the Time Machine
+// page, a place loads in the background (its models requested). At 88 mph the
+// car is gone until the place stands (its pieces as frozen objects, as the mod
+// placed them, moved out to sea past the city, its sea level matched to the
+// game's) and arrives on it. A trip from there to anywhere else brings the car
+// back to where it left the city and deletes the place; Unload deletes it any
+// time (taking the player home first if he is on it). One place at a time.
+// ---------------------------------------------------------------------------
+struct MapStanding {
+  uint32_t hash = 0, object = 0;
+  bool collision = false;
+  float pos[3]{}, q[4]{};
+};
+struct MapRun {
+  const gta4::addons::MapInfo* info = nullptr;
+  int phase = 0;  // 0 nothing; 1 loading (requested); 2 standing
+  uint64_t requested_at = 0, loaded_at = 0, next_check = 0, next_renew = 0, unload_at = 0;
+  std::vector<uint32_t> models;
+  std::vector<MapStanding> pieces;
+  bool loaded = false;
+  int loaded_count = 0, renewals = 0, logs = 0;
+};
+MapRun g_map;
+constexpr uint64_t kMapLoadLimitMs = 45000;  // a trip waits this long for the place, then turns back
+
+const gta4::addons::MapInfo* FindMap(std::string_view name) {
+  for (const auto& m : gta4::addons::InstalledMaps())
+    if (m.name == name)
+      return &m;
+  return nullptr;
+}
+// The mod's coordinates to the game's.
+float MapDz(const gta4::addons::MapInfo& m) { return m.sea_dst - m.sea_src; }
+std::array<float, 3> MapPoint(const gta4::addons::MapInfo& m, float x, float y, float z) {
+  return {x + m.shift[0], y + m.shift[1], z + MapDz(m)};
+}
+// Whether a point (the game's coordinates) is over the place.
+bool OnMap(const gta4::addons::MapInfo& m, const std::array<float, 3>& p, float margin = 120.0f) {
+  return p[0] >= m.area[0] + m.shift[0] - margin && p[0] <= m.area[2] + m.shift[0] + margin &&
+         p[1] >= m.area[1] + m.shift[1] - margin && p[1] <= m.area[3] + m.shift[1] + margin;
+}
+
+void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
+  auto& g = g_map;
+  if (!g.info)
+    return;
+  int deleted = 0;
+  for (auto& p : g.pieces)
+    if (p.object) {
+      DeleteObject(ctx, base, p.object);
+      ++deleted;
+    }
+  for (const uint32_t h : g.models)
+    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {h});
+  REXLOG_INFO("gta4-trainer: map {} unloaded ({}): {} pieces deleted, {} models let go", g.info->name, why, deleted,
+              g.models.size());
+  g = MapRun{};
+}
+
+// The place's models requested (another place deleted first).
+bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info) {
+  auto& g = g_map;
+  if (g.info == &info && g.phase != 0)
+    return true;
+  if (g.info)
+    MapUnload(ctx, base, "another place chosen");
+  g.info = &info;
+  g.phase = 1;
+  g.requested_at = NowMs();
+  g.next_renew = g.requested_at + 6000;
+  for (const auto& p : info.pieces) {
+    MapStanding s;
+    s.hash = ModelHash(p.model);
+    s.collision = p.collision;
+    const auto at = MapPoint(info, p.pos[0], p.pos[1], p.pos[2]);
+    for (int a = 0; a < 3; ++a)
+      s.pos[a] = at[size_t(a)];
+    for (int a = 0; a < 4; ++a)
+      s.q[a] = p.q[a];
+    g.pieces.push_back(s);
+    if (std::find(g.models.begin(), g.models.end(), s.hash) == g.models.end())
+      g.models.push_back(s.hash);
+  }
+  int unknown = 0;
+  for (const uint32_t h : g.models) {
+    const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {h});
+    if (known && !known->r0())
+      ++unknown;
+    Invoke(ctx, base, "REQUEST_MODEL", {h});
+  }
+  REXLOG_INFO("gta4-trainer: map {} requested: {} pieces, {} models ({} unknown to the game), the sea there at "
+              "{:.2f} (the mod's {:.2f})",
+              info.name, g.pieces.size(), g.models.size(), unknown, info.sea_dst, info.sea_src);
+  return true;
+}
+
+// Loading: how many models are in, the requests renewed while some are not.
+void MapTick(PPCContext& ctx, uint8_t* base, State& s, uint64_t now) {
+  auto& g = g_map;
+  if (!g.info || now < g.next_check)
+    return;
+  g.next_check = now + 250;
+  if (g.unload_at && now >= g.unload_at) {
+    MapUnload(ctx, base, "the trip home made");
+    return;
+  }
+  if (g.phase != 1 || g.loaded)
+    return;
+  int in = 0;
+  for (const uint32_t h : g.models) {
+    const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {h});
+    if (loaded && loaded->r0())
+      ++in;
+    else if (now >= g.next_renew)
+      Invoke(ctx, base, "REQUEST_MODEL", {h});
+  }
+  if (now >= g.next_renew) {
+    g.next_renew = now + 6000;
+    ++g.renewals;
+  }
+  if (in != g.loaded_count && g.logs < 12 && (in == int(g.models.size()) || now - g.requested_at > 3000)) {
+    ++g.logs;
+    REXLOG_INFO("gta4-trainer: map {}: {} of {} models loaded after {} ms", g.info->name, in, g.models.size(),
+                now - g.requested_at);
+  }
+  g.loaded_count = in;
+  if (in == int(g.models.size())) {
+    g.loaded = true;
+    g.loaded_at = now;
+    if (!g_tm.in_car || g_tm.phase == 0)
+      Toast(s, g.info->label + std::string(" is ready: 88 mph to go."), 2500);
+  }
+}
+
+// The pieces placed (all of them, the models in). False while a model is not.
+bool MapPlace(PPCContext& ctx, uint8_t* base) {
+  auto& g = g_map;
+  if (!g.info || !g.loaded)
+    return false;
+  if (g.phase == 2)
+    return true;
+  const bool exact = NativeKnown("CREATE_OBJECT_NO_OFFSET");
+  int made = 0, failed = 0;
+  for (auto& p : g.pieces) {
+    if (p.object)
+      continue;
+    const auto obj = Invoke(ctx, base, exact ? "CREATE_OBJECT_NO_OFFSET" : "CREATE_OBJECT",
+                            {p.hash, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2]), 0, 1}, 4);
+    if (!obj || !obj->words[0]) {
+      ++failed;
+      continue;
+    }
+    p.object = obj->words[0];
+    Invoke(ctx, base, "SET_OBJECT_QUATERNION", {p.object, Bits(p.q[0]), Bits(p.q[1]), Bits(p.q[2]), Bits(p.q[3])});
+    if (!exact)
+      Invoke(ctx, base, "SET_OBJECT_COORDINATES", {p.object, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2])});
+    Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {p.object, 1});
+    Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {p.object, 1});
+    Invoke(ctx, base, "SET_OBJECT_COLLISION", {p.object, p.collision ? 1u : 0u});
+    if (made < 3) {  // (where the game put the first few, for the log)
+      if (const auto c = Invoke(ctx, base, "GET_OBJECT_COORDINATES", {p.object, 0, 0, 0}, 1, 0, 3))
+        REXLOG_INFO("gta4-trainer: map piece {:08X} at ({:.2f}, {:.2f}, {:.2f}), asked ({:.2f}, {:.2f}, {:.2f})",
+                    p.hash, c->f(0), c->f(1), c->f(2), p.pos[0], p.pos[1], p.pos[2]);
+    }
+    ++made;
+  }
+  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not ({})", g.info->name, made, failed,
+              exact ? "exactly" : "CREATE_OBJECT, then moved");
+  if (failed)
+    return false;
+  g.phase = 2;
+  return true;
+}
+
+// The place standing now, or none.
+const gta4::addons::MapInfo* MapStandingNow() { return g_map.phase == 2 ? g_map.info : nullptr; }
+
 // Every frame in a time machine (a look a few times a second otherwise, and
 // while a trip's effects play out). Returns the buttons it keeps from the
 // game.
@@ -6132,9 +6403,71 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   const int film = vehicle.car ? TimeMachineFilm(vehicle.model) : 0;
   // A trip under way carries on whatever happens (the car is ours till it is back).
   if (m.phase == 1) {
-    if (now - m.phase_at >= kGoneMs || !VehicleAddress(base, m.car))
+    const uint32_t held = film ? uint32_t(X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_DPAD_RIGHT |
+                                          X_INPUT_GAMEPAD_LEFT_SHOULDER)
+                               : 0;
+    const uint64_t gone = now - m.phase_at;
+    if (m.trip_map) {
+      // To a place: gone until it stands, then there.
+      const auto* info = m.trip_map;
+      const bool ready = g_map.info == info && g_map.loaded && MapPlace(ctx, base);
+      if (!ready) {
+        MapTick(ctx, base, s, now);
+        if (gone > kMapLoadLimitMs || !VehicleAddress(base, m.car)) {
+          REXLOG_WARN("gta4-trainer: time machine: {} not ready after {} ms ({} of {} models); back where it left",
+                      info->name, gone, g_map.loaded_count, g_map.models.size());
+          Toast(s, info->label + std::string(" didn't load in time: back where you left."), 3500);
+          m.trip_map = nullptr;
+          Arrive(ctx, base, game, m);
+        } else if (gone > 2500 && now >= m.next_wait_toast) {
+          m.next_wait_toast = now + 1500;
+          Toast(s, fmt::format("Arriving at {}... ({} of {} loaded)", info->label, g_map.loaded_count,
+                               g_map.models.size()),
+                1600);
+        }
+        return held;
+      }
+      const auto at = MapPoint(*info, info->arrive[0], info->arrive[1], info->arrive[2]);
+      if (!m.scene_loaded) {  // (the world around it streamed in while the car is away)
+        m.scene_loaded = true;
+        Invoke(ctx, base, "REQUEST_COLLISION_AT_POSN", {Bits(at[0]), Bits(at[1]), Bits(at[2])});
+        if (NativeKnown("LOAD_SCENE"))
+          Invoke(ctx, base, "LOAD_SCENE", {Bits(at[0]), Bits(at[1]), Bits(at[2])});
+        m.scene_at = now;
+        return held;
+      }
+      if (gone < kGoneMs || now - m.scene_at < 600)  // (a moment for the scene after the load)
+        return held;
+      // On its road, facing along it; in the air (Part II flying) well over it.
+      const float lift = m.flying ? std::max(30.0f, m.altitude) : kTmContact;
+      m.at[0] = at[0];
+      m.at[1] = at[1];
+      m.at[2] = at[2] + lift;
+      m.q = QAxis(0, 0, 1, info->arrive[3] * 3.14159265f / 180.0f);
+      const float run = std::max(info->arrive[4] - 25.0f, 10.0f);
+      m.gone_speed = std::min(m.gone_speed, std::sqrt(2.0f * 6.0f * run));
+      REXLOG_INFO("gta4-trainer: time machine arriving at {} ({:.1f}, {:.1f}, {:.1f}), heading {:.0f}, after {} ms",
+                  info->name, m.at[0], m.at[1], m.at[2], info->arrive[3], gone);
+      m.trip_map = nullptr;
       Arrive(ctx, base, game, m);
-    return film ? uint32_t(X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_DPAD_RIGHT | X_INPUT_GAMEPAD_LEFT_SHOULDER) : 0;
+      Toast(s, info->label, 3000);
+      return held;
+    }
+    if (m.going_home) {
+      // Back to where it left the city; the place deleted behind it.
+      if (gone >= kGoneMs || !VehicleAddress(base, m.car)) {
+        for (int a = 0; a < 3; ++a)
+          m.at[a] = m.home[a];
+        m.q = m.home_q;
+        m.going_home = false;
+        Arrive(ctx, base, game, m);
+        g_map.unload_at = now + 2000;
+      }
+      return held;
+    }
+    if (gone >= kGoneMs || !VehicleAddress(base, m.car))
+      Arrive(ctx, base, game, m);
+    return held;
   }
   if (effects && VehicleAddress(base, m.car)) {
     AfterTrip(ctx, base, m, now);
@@ -6439,7 +6772,7 @@ std::string AutopilotText(const gta4::flight::Pilot& p) {
     case Mode::kLand:
     case Mode::kRoute:
       switch (p.phase) {
-        case Phase::kToFix: return "AUTOPILOT  TO FRANCIS INTL";
+        case Phase::kToFix: return std::string("AUTOPILOT  TO ") + p.where;
         case Phase::kIntercept: return "AUTOPILOT  JOINING THE APPROACH";
         case Phase::kFinal: return "AUTOPILOT  ON FINAL";
         case Phase::kFlare: return "AUTOPILOT  FLARE";
@@ -6674,6 +7007,138 @@ bool StandOnWheels(PPCContext& ctx, uint8_t* base, uint32_t car, float stand) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// The autopilot's landing on open ground (v1.7.30; d-pad down held in the
+// air, the menu's Autopilot Landing: Open Ground Nearby). Strips around the
+// jet are tried with the ground probe, a few dozen probes a frame: each 500 m
+// along its heading (from 75 m before its touchdown point), flat (no step
+// over 0.6 m between probes 25 m apart, within 2.5 m of the touchdown point's
+// height), 18 m wide (its sides probed every 80 m), over the sea, its roofs
+// counting (probes from 450 m up), and its approach (3 km back, under a 3.5
+// degree glide) clear by 12 m. The best (nearest, least turning) is flown to
+// as Francis International's runway is; none, and the jet holds its course
+// while the ground ahead is tried again every few seconds, for half a minute,
+// then it flies to the airport.
+// ---------------------------------------------------------------------------
+std::optional<float> TrySite(PPCContext& ctx, uint8_t* base, const JetState::Search& ls, const JetState::Site& site,
+                             int& probes) {
+  const float dx = -std::sin(site.yaw), dy = std::cos(site.yaw), px = std::cos(site.yaw), py = std::sin(site.yaw);
+  constexpr float kTop = 450.0f;
+  auto g = [&](float x, float y) {
+    ++probes;
+    return GroundZ(ctx, base, x, y, kTop);
+  };
+  const auto z0 = g(site.x, site.y);
+  if (!z0 || *z0 < ls.sea + 1.0f || *z0 > kTop - 50.0f)
+    return std::nullopt;
+  float prev = *z0;
+  for (float d = 25.0f; d <= 425.0f; d += 25.0f) {  // (the rollout)
+    const auto z = g(site.x + dx * d, site.y + dy * d);
+    if (!z || std::fabs(*z - prev) > 0.6f || std::fabs(*z - *z0) > 2.5f || *z < ls.sea + 1.0f)
+      return std::nullopt;
+    prev = *z;
+  }
+  prev = *z0;
+  for (float d = -25.0f; d >= -75.0f; d -= 25.0f) {  // (a little before the touchdown point)
+    const auto z = g(site.x + dx * d, site.y + dy * d);
+    if (!z || std::fabs(*z - prev) > 0.6f || std::fabs(*z - *z0) > 2.5f)
+      return std::nullopt;
+    prev = *z;
+  }
+  for (float d = 0.0f; d <= 400.0f; d += 80.0f)
+    for (const float side : {-9.0f, 9.0f}) {
+      const auto z = g(site.x + dx * d + px * side, site.y + dy * d + py * side);
+      if (!z || std::fabs(*z - *z0) > 2.5f)
+        return std::nullopt;
+    }
+  for (const float d : {150.0f, 300.0f, 500.0f, 800.0f, 1200.0f, 1700.0f, 2300.0f, 3000.0f}) {
+    const auto z = g(site.x - dx * d, site.y - dy * d);
+    if (z && *z > *z0 + d * gta4::flight::kGlide - 12.0f)
+      return std::nullopt;
+  }
+  return *z0;
+}
+
+// The strips to try around (x, y), the jet heading `heading`: touchdown
+// points out to 2.5 km in eleven directions, each strip along twelve
+// headings; ordered by how good a landing it would make (near, little turning).
+void PlanSites(JetState::Search& ls, float x, float y, float heading) {
+  ls.sites.clear();
+  ls.next = 0;
+  for (const float dist : {700.0f, 1100.0f, 1600.0f, 2200.0f})
+    for (const float bearing_deg : {0.0f, 30.0f, -30.0f, 60.0f, -60.0f, 95.0f, -95.0f, 135.0f, -135.0f, 180.0f}) {
+      const float b = heading + bearing_deg * 3.14159265f / 180.0f;
+      const float ax = x - std::sin(b) * dist, ay = y + std::cos(b) * dist;
+      for (int k = 0; k < 12; ++k) {
+        const float yaw = gta4::flight::Wrap(heading + float(k) * 3.14159265f / 6.0f);
+        JetState::Site site;
+        site.x = ax;
+        site.y = ay;
+        site.yaw = yaw;
+        site.score = dist / 1000.0f + std::fabs(bearing_deg) / 90.0f +
+                     0.6f * std::fabs(gta4::flight::Wrap(yaw - heading)) / 3.14159265f;
+        ls.sites.push_back(site);
+      }
+    }
+  std::sort(ls.sites.begin(), ls.sites.end(),
+            [](const JetState::Site& a, const JetState::Site& b) { return a.score < b.score; });
+}
+
+// On its wheels, not in the ground (v1.7.30): the Batwing's collision is the
+// stock SUV's it was built on, a metre above its wheels. Braking after a
+// landing dipped the nose; the trainer's push along the nose then drove it
+// down, the nose gear's probe started under the runway, and the nose sank
+// in until the body's collision held it: stuck, wheels in the ground (the
+// v1.7.27 check looks only under its middle). Each frame on the ground the
+// three gear contacts are probed: one more than 0.22 m into the surface puts
+// it back on its wheels along the ground's slope; the nose pointing more than
+// 2 degrees below the slope while it rolls is lifted to it (its push then
+// along the ground, not into it). True when it was set.
+bool GearGuard(PPCContext& ctx, uint8_t* base, uint32_t car, const JetSpec& spec, JetState& j, float speed) {
+  namespace fl = gta4::flight;
+  const auto c = CarPosition(ctx, base, car);
+  const auto qr = Invoke(ctx, base, "GET_VEHICLE_QUATERNION", {car, 0, 0, 0, 0}, 1, 0, 4);
+  if (!c || !qr)
+    return false;
+  const fl::Q q = fl::Norm({qr->f(0), qr->f(1), qr->f(2), qr->f(3)});
+  float ground[3], depth[3];
+  for (int k = 0; k < 3; ++k) {
+    const fl::V3 p = fl::Rot(q, {spec.contacts[k][0], spec.contacts[k][1], spec.contacts[k][2]});
+    const float x = (*c)[0] + p.x, y = (*c)[1] + p.y, z = (*c)[2] + p.z;
+    const auto gz = GroundZ(ctx, base, x, y, z + 2.5f);
+    if (!gz)
+      return false;
+    ground[k] = *gz;
+    depth[k] = *gz - z;
+  }
+  const float length = spec.contacts[0][1] - spec.contacts[1][1];
+  const float width = spec.contacts[2][0] - spec.contacts[1][0];
+  const float mains = 0.5f * (ground[1] + ground[2]);
+  const float slope = std::atan2(ground[0] - mains, length);
+  const float roll = std::atan2(ground[1] - ground[2], width);  // (right side lower: right wing down)
+  const fl::Attitude a = fl::Look(q);
+  const float deepest = std::max({depth[0], depth[1], depth[2]});
+  const bool dug_in = deepest > 0.22f;
+  const bool nose_low = speed > 3.0f && a.gamma < slope - 0.035f;
+  if (!dug_in && !nose_low)
+    return false;
+  const fl::Q level = fl::Norm(fl::Mul(fl::Facing(a.yaw, slope), fl::Axis({0, 1, 0}, dug_in ? roll : a.bank)));
+  if (dug_in) {
+    // its origin over the ground's plane at its own point, at its standing height
+    const float t = (0.0f - spec.contacts[1][1]) / length;
+    PlaceCar(ctx, base, car, (*c)[0], (*c)[1], mains + (ground[0] - mains) * t + spec.stand + 0.05f);
+  }
+  Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {car, Bits(level.x), Bits(level.y), Bits(level.z), Bits(level.w)});
+  if (j.stuck_logs < 12) {
+    ++j.stuck_logs;
+    REXLOG_INFO("gta4-trainer: {} {}: wheels {:.2f} {:.2f} {:.2f} m into the ground, nose {:.1f} degrees (the "
+                "ground's {:.1f}), {:.1f} m/s",
+                std::string(spec.label), dug_in ? "back on its wheels" : "nose lifted to the ground's slope",
+                depth[0], depth[1], depth[2], a.gamma * 57.2958f, slope * 57.2958f, speed);
+  }
+  return true;
+}
+
 uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, const DrivePad& pad) {
   auto& j = g_jet;
   const uint64_t now = NowMs();
@@ -6815,6 +7280,8 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
       ap_tap = ap_land = false;
     }
     const float rpm = g_jet_synth.Rpm();
+    if (!j.flying && g_jet_spec->contacts && at)
+      GearGuard(ctx, base, *car, *g_jet_spec, j, std::fabs(forward_speed));
     if (!j.flying) {
       // ---- Down on its body with its wheels under the road, or on its side
       // or back: stood back on its wheels. (Its collision is the stock car's
@@ -6949,32 +7416,104 @@ uint32_t JetControls(PPCContext& ctx, uint8_t* base, const GameContext& game, St
           Toast(s, "Autopilot off: you have control.", 1500);
         }
       }
-      if (ap_land || ap_route) {
+      // Francis International's runway that the planes in the episodes' end
+      // credits take off from: its line through (2392, -62) and (2607, 219),
+      // heading north-east; down at its south-west end.
+      auto fly_to_airport = [&](const char* toast) {
         fl::Runway r;
-        if (ap_route) {
-          // Francis International's runway that the planes in the episodes'
-          // end credits take off from: its line through (2392, -62) and
-          // (2607, 219), heading north-east; down at its south-west end.
-          r.aim = {2392.4f, -62.0f, 5.8f};
-          r.yaw = std::atan2(-(2607.4f - 2392.4f), 218.6f - -62.0f);
-          j.runway_checked = false;
-        } else {
-          const float hx = att.f.x, hy = att.f.y, hl = std::sqrt(hx * hx + hy * hy);
-          const float out = std::max(700.0f, std::max(sit.radar, 0.0f) / fl::kGlide);
-          r.aim = {sit.pos.x + (hl > 0.1f ? hx / hl : 0.0f) * out, sit.pos.y + (hl > 0.1f ? hy / hl : 1.0f) * out,
-                   sit.pos.z - clearance};
-          if (const auto gz = GroundZ(ctx, base, r.aim.x, r.aim.y, sit.pos.z + 50.0f))
-            r.aim.z = *gz;
-          r.yaw = att.yaw;
-          j.runway_checked = true;
+        r.aim = {2392.4f, -62.0f, 5.8f};
+        r.yaw = std::atan2(-(2607.4f - 2392.4f), 218.6f - -62.0f);
+        j.runway_checked = false;
+        fl::Engage(j.pilot, fl::Mode::kRoute, fl::Look(j.fs.q), sit, &r);
+        j.pilot.where = "FRANCIS INTL";
+        Toast(s, toast, 4000);
+        REXLOG_INFO("gta4-trainer: {} autopilot to the airport: aim ({:.0f}, {:.0f}, {:.1f}), heading {:.0f}", label,
+                    r.aim.x, r.aim.y, r.aim.z, r.yaw * 57.2958f);
+      };
+      const int land_mode = s.jet_land_mode;
+      if (ap_land && land_mode == 0 && !ap_route) {
+        // Open ground nearby: looked for over the next frames, the course
+        // held meanwhile (the stick still takes over).
+        auto& ls = j.search;
+        ls = JetState::Search{};
+        ls.active = true;
+        ls.started = now;
+        ls.next_scan = now + 3000;
+        ls.sea = gta4::addons::SeaLevel();
+        PlanSites(ls, sit.pos.x, sit.pos.y, att.yaw);
+        if (j.pilot.mode == fl::Mode::kOff)
+          fl::Engage(j.pilot, fl::Mode::kHold, att, sit);
+        Toast(s, "Autopilot: looking for open ground to land on...", 3000);
+        REXLOG_INFO("gta4-trainer: {} autopilot: looking for open ground from ({:.0f}, {:.0f}), {:.0f} m up, the sea "
+                    "at {:.1f}",
+                    label, sit.pos.x, sit.pos.y, sit.radar, ls.sea);
+      } else if (ap_route || (ap_land && land_mode == 2)) {
+        j.search.active = false;
+        fly_to_airport("Autopilot: flying to Francis International, then landing on its runway. The stick takes "
+                       "over at any time.");
+      } else if (ap_land) {
+        j.search.active = false;
+        fl::Runway r;
+        const float hx = att.f.x, hy = att.f.y, hl = std::sqrt(hx * hx + hy * hy);
+        const float out = std::max(700.0f, std::max(sit.radar, 0.0f) / fl::kGlide);
+        r.aim = {sit.pos.x + (hl > 0.1f ? hx / hl : 0.0f) * out, sit.pos.y + (hl > 0.1f ? hy / hl : 1.0f) * out,
+                 sit.pos.z - clearance};
+        if (const auto gz = GroundZ(ctx, base, r.aim.x, r.aim.y, sit.pos.z + 50.0f))
+          r.aim.z = *gz;
+        r.yaw = att.yaw;
+        j.runway_checked = true;
+        fl::Engage(j.pilot, fl::Mode::kLand, att, sit, &r);
+        Toast(s, "Autopilot: landing straight ahead. The stick takes over at any time.", 4000);
+        REXLOG_INFO("gta4-trainer: {} autopilot landing ahead: aim ({:.0f}, {:.0f}, {:.1f}), heading {:.0f}", label,
+                    r.aim.x, r.aim.y, r.aim.z, r.yaw * 57.2958f);
+      }
+      // The search for open ground, a few dozen probes a frame.
+      if (j.search.active) {
+        auto& ls = j.search;
+        int probes = 0;
+        while (!ls.found && ls.next < ls.sites.size() && probes < 90) {
+          const auto& site = ls.sites[ls.next++];
+          ++ls.tried;
+          if (const auto z = TrySite(ctx, base, ls, site, probes)) {
+            ls.found = true;
+            ls.best = site;
+            ls.best_z = *z;
+          }
         }
-        fl::Engage(j.pilot, ap_route ? fl::Mode::kRoute : fl::Mode::kLand, att, sit, &r);
-        Toast(s, ap_route ? "Autopilot: flying to Francis International, then landing on its runway. The stick takes "
-                            "over at any time."
-                          : "Autopilot: landing straight ahead. The stick takes over at any time.",
-              4000);
-        REXLOG_INFO("gta4-trainer: {} autopilot {}: aim ({:.0f}, {:.0f}, {:.1f}), heading {:.0f}", label,
-                    ap_route ? "to the airport" : "landing ahead", r.aim.x, r.aim.y, r.aim.z, r.yaw * 57.2958f);
+        ls.probes += probes;
+        if (ls.found) {
+          ls.active = false;
+          fl::Runway r;
+          r.aim = {ls.best.x, ls.best.y, ls.best_z};
+          r.yaw = ls.best.yaw;
+          j.runway_checked = false;
+          fl::Engage(j.pilot, fl::Mode::kRoute, fl::Look(j.fs.q), sit, &r);
+          j.pilot.where = "LANDING SITE";
+          const float away = std::hypot(ls.best.x - sit.pos.x, ls.best.y - sit.pos.y);
+          Toast(s, fmt::format("Autopilot: open ground {:.1f} km away. Landing there; the stick takes over at any "
+                               "time.",
+                               away / 1000.0f),
+                4000);
+          REXLOG_INFO("gta4-trainer: {} autopilot: landing site ({:.0f}, {:.0f}, {:.1f}) heading {:.0f}, {:.0f} m away: "
+                      "{} strips tried, {} probes, {} scans, {} ms",
+                      label, ls.best.x, ls.best.y, ls.best_z, ls.best.yaw * 57.2958f, away, ls.tried, ls.probes,
+                      ls.scans + 1, now - ls.started);
+        } else if (ls.next >= ls.sites.size()) {
+          if (now - ls.started > 30000) {
+            ls.active = false;
+            REXLOG_INFO("gta4-trainer: {} autopilot: no open ground found in {} strips ({} probes); to the airport",
+                        label, ls.tried, ls.probes);
+            fly_to_airport("Autopilot: no open ground big enough nearby. Flying to Francis International instead.");
+          } else if (now >= ls.next_scan) {
+            ++ls.scans;
+            ls.next_scan = now + 3000;
+            PlanSites(ls, sit.pos.x, sit.pos.y, fl::Look(j.fs.q).yaw);
+          }
+        }
+        if (j.pilot.mode == fl::Mode::kOff && ls.active) {
+          // (the stick took over: the search stops too)
+          ls.active = false;
+        }
       }
       // The stick takes over from the autopilot.
       if (j.pilot.mode != fl::Mode::kOff && (std::fabs(lx) > 0.6f || std::fabs(ly) > 0.6f)) {
@@ -7177,8 +7716,39 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     case Action::kTmPreset:
     case Action::kTmField:
       g_tm_synth.Enter();
-      Toast(s, "Destination set.", 1000);
+      if (!s.tm_map.empty()) {
+        // A place: its pieces start loading now, in the background.
+        const auto* info = FindMap(s.tm_map);
+        if (info && info->installed) {
+          MapRequest(ctx, base, *info);
+          Toast(s, g_map.loaded ? "Destination set: " + info->label + ". Ready: 88 mph to go."
+                                : "Destination set: " + info->label + ". Loading it in the background...",
+                2500);
+        } else {
+          Toast(s, "Destination set. (That place isn't installed in this launch: time travel only.)", 3000);
+        }
+      } else {
+        Toast(s, "Destination set.", 1000);
+      }
       break;
+    case Action::kTmUnloadMap: {
+      if (!g_map.info) {
+        Toast(s, "No map destination is loaded.", 1500);
+        break;
+      }
+      // The player on the place: taken home first (where the car left the city).
+      const std::array<float, 3> at{game.position[0], game.position[1], game.position[2]};
+      if (g_map.phase == 2 && OnMap(*g_map.info, at, 150.0f)) {
+        if (g_tm.have_home)
+          Teleport(ctx, base, game, g_tm.home[0], g_tm.home[1], g_tm.home[2], s);
+        else
+          Teleport(ctx, base, game, 2392.4f, -62.0f, std::nullopt, s);  // (Francis International)
+      }
+      const std::string label = g_map.info->label;
+      MapUnload(ctx, base, "the menu");
+      Toast(s, label + " unloaded.", 2000);
+      break;
+    }
     case Action::kTmCircuits:
       if (g_tm.in_car)
         s.tm_toggle_circuits = true;
@@ -7303,6 +7873,13 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
         s.open = false;  // (hands off: the autopilot flies)
       }
       break;
+    case Action::kJetLandMode:
+      s.jet_land_mode = (s.jet_land_mode + 1) % 3;
+      Toast(s, s.jet_land_mode == 0   ? "Holding d-pad down in the air: the autopilot finds open ground nearby and lands."
+               : s.jet_land_mode == 1 ? "Holding d-pad down in the air: the autopilot lands straight ahead."
+                                      : "Holding d-pad down in the air: the autopilot flies to Francis Intl and lands.",
+            3000);
+      break;
     case Action::kTogglePerformance:
       s.performance = !s.performance;
       PerformanceMode(s.performance);
@@ -7411,6 +7988,7 @@ void Adjust(State& s, int direction) {
         case 0:
           s.tm_preset = (s.tm_preset + direction + int(kTcdPresets.size())) % int(kTcdPresets.size());
           d = s.tm_preset == 0 ? TodaysDate() : kTcdPresets[size_t(s.tm_preset)].date;
+          s.tm_map = std::string(kTcdPresets[size_t(s.tm_preset)].map);  // (loaded once confirmed, or at 88)
           digit = 10;
           break;
         case 1: d.month = (d.month - 1 + direction + 12) % 12 + 1; digit = d.month % 10; break;
@@ -7512,6 +8090,12 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
           if (i == 3) text = fmt::format("Year: {:04d}", d.year);
           if (i == 4) text = fmt::format("Hour: {:02d} {}", (d.hour + 11) % 12 + 1, d.hour < 12 ? "AM" : "PM");
           if (i == 5) text = fmt::format("Minute: {:02d}", d.minute);
+          if (i == 9)
+            text = !g_map.info          ? std::string("Unload Map Destination (none loaded)")
+                   : g_map.phase == 2   ? "Unload " + g_map.info->label + " (despawn)"
+                   : g_map.loaded       ? "Unload " + g_map.info->label + " (loaded, not placed)"
+                                        : fmt::format("Unload {} (loading {} of {})", g_map.info->label,
+                                                      g_map.loaded_count, g_map.models.size());
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }
@@ -7961,6 +8545,26 @@ void PerformanceTick(State& s) {
   (void)s;
 }
 
+// v1.7.30: nobody drags the player out of the armoured cars or the aircraft
+// (a cop pulled him out of the Lazar 3 with the game's own jacking move):
+// the game's flag for it, kept set while he sits in one, cleared after.
+bool g_cant_drag = false;
+uint64_t g_cant_drag_renew = 0;
+void ArmouredSeat(PPCContext& ctx, uint8_t* base, const GameContext& game, uint64_t now) {
+  static const std::array<uint32_t, 4> kModels = {ModelHash("LAZAR3"), ModelHash("BATMOBILE"), ModelHash("F16"),
+                                                  ModelHash("BATWING")};
+  const auto& v = PlayerVehicle(ctx, base, game);
+  const bool in = v.car && std::find(kModels.begin(), kModels.end(), v.model) != kModels.end();
+  if (in == g_cant_drag && !(in && now >= g_cant_drag_renew))
+    return;
+  g_cant_drag_renew = now + 2000;  // (set again now and then: a respawn clears it)
+  if (Invoke(ctx, base, "SET_CHAR_CANT_BE_DRAGGED_OUT", {game.ped, in ? 1u : 0u})) {
+    if (in != g_cant_drag)
+      REXLOG_INFO("gta4-trainer: the player {} be dragged out of his vehicle", in ? "can no longer" : "can again");
+    g_cant_drag = in;
+  }
+}
+
 void RunActions(PPCContext& ctx, uint8_t* base) {
   if (!REXCVAR_GET(gta4_trainer))
     return;
@@ -8022,11 +8626,14 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   const bool heat_due = g_heat_pending > 0.0f;
+  static uint64_t s_next_seat_look = 0;
+  const bool seat_due = (g_have_lazar || g_have_batmobile || g_have_f16 || g_have_batwing) && now >= s_next_seat_look;
+  const bool map_due = g_map.info != nullptr && now >= g_map.next_check;
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due && !heat_due &&
       !jet_canopy_due && !batwing_canopy_due && !complete_due && !perf_due && !teleport_due && !any_engine_due &&
       s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
-      !tm_due && g_addons_probed)
+      !tm_due && !seat_due && !map_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -8107,6 +8714,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   FinishSpawn(ctx, base, game, s);
   if (teleport_due)
     TeleportTick(ctx, base, game, s);
+  if (seat_due) {
+    s_next_seat_look = now + 400;
+    ArmouredSeat(ctx, base, game, now);
+  }
+  if (map_due)
+    MapTick(ctx, base, s, now);
   if (drive_due) {
     s_next_drive_look = now + 250;
     PlayerVehicle(ctx, base, game);
@@ -8947,6 +9560,28 @@ extern "C" void sub_82381FA0(PPCContext& ctx, uint8_t* base) {
   __imp__sub_82381FA0(ctx, base);
   if (REXCVAR_GET(gta4_trainer))
     gta4::trainer::ReapplyPoses(ctx, base, vehicle);
+}
+
+// The base model store (sub_821C8110: CBaseModelInfo, 96 bytes each, every
+// .ide's "objs" lines) is sized the same way and filled by an adder that does
+// not check either: the map sets' models (v1.7.30, in gta4_addon_install's
+// gtxd.ide) get room past the stock ones (1024 more entries, 96 KB).
+extern "C" void sub_821C8110(PPCContext& ctx, uint8_t* base) {
+  using namespace gta4::trainer;
+  constexpr uint32_t kBaseModelStore = 0x82A9302C, kExtraBaseModels = 1024;
+  static bool s_raised = false;
+  if (ctx.r3.u32 == kBaseModelStore && !s_raised && Span(base, kBaseModelStore, 12, true)) {
+    const uint32_t capacity = Read(base, kBaseModelStore);
+    if (capacity >= 1000 && capacity <= 200000) {
+      s_raised = true;
+      Write(base, kBaseModelStore, capacity + kExtraBaseModels);
+      REXLOG_INFO("gta4-trainer: base model store raised from {} to {} entries", capacity,
+                  capacity + kExtraBaseModels);
+    } else {
+      REXLOG_WARN("gta4-trainer: base model store capacity {} looks wrong; left alone", capacity);
+    }
+  }
+  __imp__sub_821C8110(ctx, base);
 }
 
 extern "C" void sub_821C83C0(PPCContext& ctx, uint8_t* base) {

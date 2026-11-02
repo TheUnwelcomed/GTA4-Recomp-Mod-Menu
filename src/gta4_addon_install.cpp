@@ -21,6 +21,7 @@
 #include <map>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -1682,6 +1683,256 @@ bool EditDataFile(const fs::path& file, const std::vector<Addon>& addons) {
 }
 
 // ---------------------------------------------------------------------------
+// Map sets: places for the DeLorean's time travel (see the header). Each is a
+// folder addons/maps/<name> holding its resources (.xdr models, .xtd texture
+// dictionaries, the collision dictionary gtxd.xbd), objs.ide (its model
+// lines), place.txt (one line per piece: model, rotation x y z w, position,
+// whether it has collision) and map.txt (its name, label, date, the shift
+// from the mod's coordinates, its sea level, the arrival, its area).
+// ---------------------------------------------------------------------------
+std::vector<MapInfo> g_maps;
+float g_sea_level = 0.0f;
+
+struct MapSet {
+  MapInfo info;
+  fs::path dir;
+  std::vector<std::string> objs;  // its model lines
+  std::vector<fs::path> files;    // its resources
+};
+
+std::string Trimmed(std::string line) {
+  while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+    line.pop_back();
+  size_t start = 0;
+  while (start < line.size() && (line[start] == ' ' || line[start] == '\t'))
+    ++start;
+  return line.substr(start);
+}
+
+std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
+  std::vector<MapSet> out;
+  std::error_code ec;
+  std::vector<fs::path> dirs;
+  for (auto it = fs::directory_iterator(maps_dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+    if (it->is_directory(ec))
+      dirs.push_back(it->path());
+  std::sort(dirs.begin(), dirs.end());
+  for (const auto& dir : dirs) {
+    TextLines meta, place, objs;
+    if (!LoadText(dir / "map.txt", meta) || !LoadText(dir / "place.txt", place) ||
+        !LoadText(dir / "objs.ide", objs)) {
+      REXLOG_WARN("gta4-addons: map set {} is incomplete; left out", dir.string());
+      continue;
+    }
+    MapSet m;
+    m.dir = dir;
+    MapInfo& info = m.info;
+    for (const auto& raw : meta.lines) {
+      const std::string line = Trimmed(raw);
+      const size_t space = line.find(' ');
+      if (line.empty() || line[0] == '#' || space == std::string::npos)
+        continue;
+      const std::string key = line.substr(0, space), value = Trimmed(line.substr(space + 1));
+      if (key == "name")
+        info.name = Lower(value);
+      else if (key == "label")
+        info.label = value;
+      else if (key == "date")
+        std::sscanf(value.c_str(), "%d %d %d %d %d", &info.date[0], &info.date[1], &info.date[2], &info.date[3],
+                    &info.date[4]);
+      else if (key == "shift")
+        std::sscanf(value.c_str(), "%f %f", &info.shift[0], &info.shift[1]);
+      else if (key == "sea")
+        std::sscanf(value.c_str(), "%f", &info.sea_src);
+      else if (key == "arrive")
+        std::sscanf(value.c_str(), "%f %f %f %f %f", &info.arrive[0], &info.arrive[1], &info.arrive[2],
+                    &info.arrive[3], &info.arrive[4]);
+      else if (key == "area")
+        std::sscanf(value.c_str(), "%f %f %f %f", &info.area[0], &info.area[1], &info.area[2], &info.area[3]);
+    }
+    for (const auto& raw : place.lines) {
+      const std::string line = Trimmed(raw);
+      if (line.empty() || line[0] == '#')
+        continue;
+      char model[64] = {};
+      MapPiece p;
+      int collision = 0;
+      if (std::sscanf(line.c_str(), "%63s %f %f %f %f %f %f %f %d", model, &p.q[0], &p.q[1], &p.q[2], &p.q[3],
+                      &p.pos[0], &p.pos[1], &p.pos[2], &collision) == 9) {
+        p.model = Lower(model);
+        p.collision = collision != 0;
+        info.pieces.push_back(std::move(p));
+      }
+    }
+    for (const auto& raw : objs.lines) {
+      const std::string line = Trimmed(raw);
+      if (!line.empty() && line[0] != '#')
+        m.objs.push_back(line);
+    }
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      const std::string ext = Lower(it->path().extension().string());
+      if (it->is_regular_file(ec) && (ext == ".xdr" || ext == ".xtd" || ext == ".xbd"))
+        m.files.push_back(it->path());
+    }
+    ec.clear();
+    std::sort(m.files.begin(), m.files.end());
+    if (info.name.empty() || info.pieces.empty() || m.files.empty() || m.objs.empty()) {
+      REXLOG_WARN("gta4-addons: map set {} has no name, pieces, models or files; left out", dir.string());
+      continue;
+    }
+    REXLOG_INFO("gta4-addons: map set {} (\"{}\"): {} pieces, {} models, {} files", info.name, info.label,
+                info.pieces.size(), m.objs.size(), m.files.size());
+    out.push_back(std::move(m));
+  }
+  return out;
+}
+
+// gtxd.ide (the global texture dictionaries' parents, loaded by gta.dat
+// before everything else) with the map sets' models in a section of their own.
+std::vector<uint8_t> WithMapModels(const std::vector<uint8_t>& original, const std::vector<MapSet>& maps) {
+  std::string text(original.begin(), original.end());
+  const std::string nl = text.find("\r\n") != std::string::npos || text.empty() ? "\r\n" : "\n";
+  if (!text.empty() && text.back() != '\n')
+    text += nl;
+  text += "# LibertyRecomp: the DeLorean's destinations (map sets)" + nl + "objs" + nl;
+  for (const auto& m : maps)
+    for (const auto& line : m.objs)
+      text += line + nl;
+  text += "end" + nl;
+  return std::vector<uint8_t>(text.begin(), text.end());
+}
+
+// water.dat with water under each map set where the stock sea does not reach
+// (a quad over its area, at the level of the stock water nearest it); each
+// map set's sea level noted for the trainer. A quad line: four corners of
+// seven numbers (x, y, z and four more), then two; the new one copies the
+// first such line, corners moved.
+std::vector<uint8_t> WithMapWater(const std::vector<uint8_t>& original, std::vector<MapSet>& maps) {
+  struct Quad {
+    float x0, y0, x1, y1, z;
+  };
+  std::string text(original.begin(), original.end());
+  std::vector<std::string> lines;
+  for (size_t pos = 0; pos < text.size();) {
+    const size_t eol = text.find('\n', pos);
+    lines.push_back(text.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos));
+    pos = eol == std::string::npos ? text.size() : eol + 1;
+  }
+  std::vector<Quad> quads;
+  std::vector<float> template_values;
+  for (const auto& raw : lines) {
+    std::vector<float> v;
+    const char* p = raw.c_str();
+    char* end = nullptr;
+    while (*p) {
+      const float f = std::strtof(p, &end);
+      if (end == p)
+        break;
+      v.push_back(f);
+      p = end;
+    }
+    if (v.size() != 30)
+      continue;
+    Quad q{1e9f, 1e9f, -1e9f, -1e9f, v[2]};
+    for (int c = 0; c < 4; ++c) {
+      q.x0 = std::min(q.x0, v[size_t(7 * c)]);
+      q.x1 = std::max(q.x1, v[size_t(7 * c)]);
+      q.y0 = std::min(q.y0, v[size_t(7 * c + 1)]);
+      q.y1 = std::max(q.y1, v[size_t(7 * c + 1)]);
+    }
+    quads.push_back(q);
+    if (template_values.empty())
+      template_values = v;
+  }
+  const std::string nl = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+  bool added = false;
+  // (the level most of the stock sea is at: the trainer's look-out for water)
+  if (!quads.empty()) {
+    std::map<int, int> votes;
+    for (const auto& q : quads)
+      ++votes[int(std::lround(q.z * 10.0f))];
+    g_sea_level = float(std::max_element(votes.begin(), votes.end(), [](const auto& a, const auto& b) {
+                          return a.second < b.second;
+                        })->first) / 10.0f;
+    REXLOG_INFO("gta4-addons: water.dat: {} quads, most at {:.1f}", quads.size(), g_sea_level);
+  }
+  for (auto& m : maps) {
+    MapInfo& info = m.info;
+    // (the check over the place itself; new water a good way past it)
+    constexpr float kMargin = 250.0f, kCheck = 30.0f;
+    const float x0 = info.area[0] + info.shift[0] - kMargin, y0 = info.area[1] + info.shift[1] - kMargin;
+    const float x1 = info.area[2] + info.shift[0] + kMargin, y1 = info.area[3] + info.shift[1] + kMargin;
+    const float cx0 = x0 + kMargin - kCheck, cy0 = y0 + kMargin - kCheck;
+    const float cx1 = x1 - kMargin + kCheck, cy1 = y1 - kMargin + kCheck;
+    int covered = 0, samples = 0;
+    std::vector<float> levels;
+    for (int i = 0; i <= 14; ++i)
+      for (int j = 0; j <= 14; ++j) {
+        const float x = cx0 + (cx1 - cx0) * float(i) / 14.0f, y = cy0 + (cy1 - cy0) * float(j) / 14.0f;
+        ++samples;
+        for (const auto& q : quads)
+          if (x >= q.x0 && x <= q.x1 && y >= q.y0 && y <= q.y1) {
+            ++covered;
+            levels.push_back(q.z);
+            break;
+          }
+      }
+    float sea = 0.0f;
+    if (!levels.empty()) {
+      std::sort(levels.begin(), levels.end());
+      sea = levels[levels.size() / 2];
+    } else if (!quads.empty()) {
+      // (none near: the level most of the stock sea is at)
+      std::map<int, int> votes;
+      for (const auto& q : quads)
+        ++votes[int(std::lround(q.z * 10.0f))];
+      sea = float(std::max_element(votes.begin(), votes.end(), [](const auto& a, const auto& b) {
+                    return a.second < b.second;
+                  })->first) / 10.0f;
+    }
+    info.sea_dst = sea;
+    if (covered >= samples * 98 / 100) {
+      REXLOG_INFO("gta4-addons: map set {}: the stock sea covers it (level {:.2f})", info.name, sea);
+      continue;
+    }
+    if (template_values.empty()) {
+      REXLOG_WARN("gta4-addons: map set {}: water.dat has no quad line to copy; no water added", info.name);
+      continue;
+    }
+    // The template's corners, each moved to the new area's matching corner.
+    float tx0 = 1e9f, tx1 = -1e9f, ty0 = 1e9f, ty1 = -1e9f;
+    for (int c = 0; c < 4; ++c) {
+      tx0 = std::min(tx0, template_values[size_t(7 * c)]);
+      tx1 = std::max(tx1, template_values[size_t(7 * c)]);
+      ty0 = std::min(ty0, template_values[size_t(7 * c + 1)]);
+      ty1 = std::max(ty1, template_values[size_t(7 * c + 1)]);
+    }
+    std::vector<float> v = template_values;
+    for (int c = 0; c < 4; ++c) {
+      v[size_t(7 * c)] = v[size_t(7 * c)] >= (tx0 + tx1) / 2 ? x1 : x0;
+      v[size_t(7 * c + 1)] = v[size_t(7 * c + 1)] >= (ty0 + ty1) / 2 ? y1 : y0;
+      v[size_t(7 * c + 2)] = sea;
+    }
+    std::string line;
+    for (size_t k = 0; k < v.size(); ++k) {
+      char num[32];
+      std::snprintf(num, sizeof(num), k + 2 >= v.size() && k + 2 == v.size() ? "%.0f" : "%.3f", v[k]);
+      line += (k ? (k % 7 == 0 && k < 28 ? "   " : " ") : "") + std::string(num);
+    }
+    if (!text.empty() && text.back() != '\n')
+      text += nl;
+    text += line + nl;
+    added = true;
+    REXLOG_INFO("gta4-addons: map set {}: water added over ({:.0f}, {:.0f})-({:.0f}, {:.0f}) at {:.2f} ({} of {} "
+                "points had stock water)",
+                info.name, x0, y0, x1, y1, sea, covered, samples);
+  }
+  if (!added)
+    return original;
+  return std::vector<uint8_t>(text.begin(), text.end());
+}
+
+// ---------------------------------------------------------------------------
 // The game reads vehicles.ide, handling.dat, carcols.dat and vehOff.csv from
 // common.rpf (default.dat names them on the common: device, which is the
 // archive), not from the copy the port's installer unpacked beside it:
@@ -1793,8 +2044,8 @@ bool ShadowHolds(const fs::path& shadow, const std::vector<uint8_t>& key,
 
 std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& archive,
                                            const std::vector<uint8_t>& key,
-                                           const std::vector<Addon>& addons, const fs::path& cache,
-                                           const std::string& label) {
+                                           const std::vector<Addon>& addons, std::vector<MapSet>& maps,
+                                           const fs::path& cache, const std::string& label) {
   std::error_code ec;
   const Rpf* rpf = &archive;
   const fs::path work = cache / "work" / label;
@@ -1823,6 +2074,44 @@ std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& ar
     fingerprint = Fnv1a(fingerprint, now.data(), now.size());
     if (now != original)
       edited.emplace_back(inner, std::move(now));
+  }
+  // The map sets' models (gtxd.ide) and the sea under them (water.dat); and
+  // gta.dat made to load gtxd.ide should it not (every copy seen does).
+  if (!maps.empty()) {
+    if (const RpfFile* f = rpf->Find("/data/gta.dat")) {
+      std::vector<uint8_t> original;
+      if (ReadRpfData(source, *f, original)) {
+        const std::string text = Lower(std::string(original.begin(), original.end()));
+        if (text.find("gtxd.ide") == std::string::npos) {
+          std::string now(original.begin(), original.end());
+          const std::string nl = now.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+          if (!now.empty() && now.back() != '\n')
+            now += nl;
+          now += "IDE common:/DATA/gtxd.IDE" + nl;
+          REXLOG_WARN("gta4-addons: {}'s gta.dat does not load gtxd.ide; added", source.string());
+          std::vector<uint8_t> bytes(now.begin(), now.end());
+          fingerprint = Fnv1a(fingerprint, bytes.data(), bytes.size());
+          edited.emplace_back("/data/gta.dat", std::move(bytes));
+        } else {
+          REXLOG_INFO("gta4-addons: gta.dat loads gtxd.ide (the map sets' models go there)");
+        }
+      }
+    }
+    for (const std::string inner : {"/data/gtxd.ide", "/data/water.dat"}) {
+      const RpfFile* f = rpf->Find(inner);
+      std::vector<uint8_t> original;
+      if (!f || !ReadRpfData(source, *f, original)) {
+        REXLOG_WARN("gta4-addons: {} has no readable {}; the map sets {}", source.string(), inner,
+                    inner == "/data/gtxd.ide" ? "stay out" : "get no water of their own");
+        continue;
+      }
+      std::vector<uint8_t> now = inner == "/data/gtxd.ide" ? WithMapModels(original, maps)
+                                                             : WithMapWater(original, maps);
+      fingerprint = Fnv1a(fingerprint, inner.data(), inner.size());
+      fingerprint = Fnv1a(fingerprint, now.data(), now.size());
+      if (now != original)
+        edited.emplace_back(inner, std::move(now));
+    }
   }
   if (edited.empty()) {
     REXLOG_INFO("gta4-addons: {} needs no change", source.string());
@@ -1866,7 +2155,8 @@ std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& ar
 // (update:\...) should it carry its own copy. Each that holds any of the
 // data files gets a shadow.
 std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<uint8_t>& key,
-                                        const std::vector<Addon>& addons, const fs::path& cache) {
+                                        const std::vector<Addon>& addons, std::vector<MapSet>& maps,
+                                        const fs::path& cache) {
   std::vector<ShadowArchive> out;
   std::error_code ec;
   fs::create_directories(cache, ec);
@@ -1890,7 +2180,10 @@ std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<
         continue;
       const std::string name = source.filename().string();
       const std::string label = place.label + "-" + Lower(source.stem().string());
-      if (const auto shadow = BuildShadowArchive(source, *rpf, key, addons, cache, label))
+      // (the map sets' lines only in the base game's archive, the one gta.dat's gtxd.ide is in)
+      std::vector<MapSet> none;
+      std::vector<MapSet>& these = place.label == "game" ? maps : none;
+      if (const auto shadow = BuildShadowArchive(source, *rpf, key, addons, these, cache, label))
         out.push_back({place.guest + name, *shadow});
     }
   }
@@ -1905,6 +2198,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
   if (!fs::exists(app_addons, ec)) return {};  // nothing bundled
   const std::vector<Addon> addons = FindAddons(app_addons);
   if (addons.empty()) return {};
+  std::vector<MapSet> maps = FindMaps(app_addons / "maps");
   const fs::path game = FindGameRoot(user_data_root);
   if (game.empty()) {
     REXLOG_INFO("gta4-addons: no installed game yet; add-ons wait for the next boot");
@@ -1981,7 +2275,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
   // The data files the game actually reads: in common.rpf. (Not this launch
   // if the last two that used them never reached the city.)
   const fs::path cache = game.parent_path() / "addon_cache";
-  std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, cache);
+  std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, maps, cache);
   if (!shadows.empty()) {
     // The marker counts the launches in a row that mounted the shadows and
     // never got to the city. One alone proves nothing (the game closed at
@@ -2065,6 +2359,14 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
     files.push_back(a.dir / (a.model + ".xft"));
     files.push_back(a.dir / (a.model + ".xtd"));
   }
+  // The map sets' resources too, while their models are in this launch's
+  // gtxd.ide (without the shadow they would be files nothing names).
+  const bool maps_named = std::any_of(shadows.begin(), shadows.end(), [](const ShadowArchive& sh) {
+    return sh.guest_path.rfind("game:\\", 0) == 0;
+  });
+  if (maps_named)
+    for (const auto& m : maps)
+      files.insert(files.end(), m.files.begin(), m.files.end());
   bool any = false;
   for (const auto& image : images) {
     REXLOG_INFO("gta4-addons: vehicles.img at {} ({} bytes)", image.string(),
@@ -2077,8 +2379,18 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
     for (const auto& a : addons) names += (names.empty() ? "" : ", ") + a.model;
     REXLOG_INFO("gta4-addons: installed as their own vehicles: {}", names);
   }
+  g_maps.clear();
+  for (auto& m : maps) {
+    m.info.installed = any && maps_named;
+    REXLOG_INFO("gta4-addons: map set {} {} (sea level there {:.2f})", m.info.name,
+                m.info.installed ? "installed" : "not installed this launch", m.info.sea_dst);
+    g_maps.push_back(m.info);
+  }
   return shadows;
 }
+
+const std::vector<MapInfo>& InstalledMaps() { return g_maps; }
+float SeaLevel() { return g_sea_level; }
 
 void SetShadowsActive(bool active) { g_shadows_active.store(active, std::memory_order_relaxed); }
 bool ShadowsActive() { return g_shadows_active.load(std::memory_order_relaxed); }

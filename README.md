@@ -186,6 +186,29 @@ network session.
 
 ## Changes
 
+- **v1.7.30**: **time travel to a place**: the DeLorean's destinations can
+  carry a map set (`tools/maps/mapset.py`): a PC map mod's models, texture
+  dictionaries (built fresh with their mip chains, the Xenos mip layout
+  checked against stock textures by `mipcheck.py`) and collision (one bound
+  dictionary named after the `.ide` the models are added to: common.rpf's
+  `gtxd.ide`, which `gta.dat` already loads), injected into `vehicles.img`
+  with the cars. Confirming the destination requests the models; at 88 mph the
+  car stays away until the pieces stand (frozen objects, the WPL rotations
+  inverted as the files store them, moved out to sea and matched to the
+  game's sea level from `water.dat`, with water added under them if the stock
+  sea does not reach); a trip elsewhere brings it back where it left the city
+  and deletes them. First set: The Gator Keys 0.3.5. The base model store
+  (`sub_821C8110`) gets 1024 more entries. Also: the Part II DeLorean holds
+  its height in flight (it sank, leaning forward to speed up) and its
+  thrusters became a quiet '80s synth; the Batwing's three gear contacts are
+  probed on the ground and it is set back on its wheels along the slope when
+  one sinks in; the jets' autopilot can land on open ground it finds with the
+  ground probe (`TrySite`: a flat 500 m strip, 18 m wide, its approach clear
+  under the glide); `SET_CHAR_CANT_BE_DRAGGED_OUT` in the Lazar 3, Batmobile
+  and jets. `bounds360.py` read the vertex and polygon counts swapped (+0xC8
+  is the vertex count): fixed.
+- **v1.7.29**: the console's prop archives, `gta.dat`, `images.txt` and
+  `water.dat` exported for the map converter (`ExportMapSets`).
 - **v1.7.28**: **targeting** only takes what can be seen: each candidate's
   line of sight tested with `GET_GROUND_Z_FOR_3D_COORD` from high over points
   along it (a roof over the line hides what is behind it), 40 probes a scan,

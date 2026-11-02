@@ -259,6 +259,7 @@ struct Pilot {
   int retries = 0;          // approaches flown again (too high, too close)
   bool gear_down = false, brakes = false;
   const char* why = "";      // the last abort's reason
+  const char* where = "FRANCIS INTL";  // what the route flies to (the HUD's words)
 };
 struct Situation {
   V3 pos;              // the jet's origin

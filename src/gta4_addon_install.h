@@ -33,6 +33,35 @@ std::vector<ShadowArchive> InstallBundled(const std::filesystem::path& app_addon
 void SetShadowsActive(bool active);
 bool ShadowsActive();
 
+// Map sets (addons/maps/<name>, made by the repo's tools/maps/mapset.py):
+// places for the DeLorean's time travel. Their models, textures and
+// collision go into vehicles.img with the cars; their model lines into
+// common.rpf's gtxd.ide (the shadow; gta.dat already loads it, so its name is
+// their collision dictionary's, gtxd.xbd); water under them into water.dat
+// when the stock sea does not reach there. The trainer places the pieces as
+// frozen objects when the destination is chosen and deletes them again.
+struct MapPiece {
+  std::string model;
+  float q[4]{};    // its rotation (x, y, z, w)
+  float pos[3]{};  // where it stands, in the mod's coordinates
+  bool collision = false;
+};
+struct MapInfo {
+  std::string name, label;
+  int date[5]{};             // year, month, day, hour, minute
+  float shift[2]{};          // the mod's coordinates to the game's (x, y)
+  float sea_src = 0.0f;      // the mod's sea level
+  float sea_dst = 0.0f;      // the game's, where it is put (from water.dat)
+  float arrive[5]{};         // x, y, z (the mod's), heading (degrees), clear run ahead (m)
+  float area[4]{};           // min x, min y, max x, max y (the mod's)
+  std::vector<MapPiece> pieces;
+  bool installed = false;    // in vehicles.img and gtxd.ide this launch
+};
+// The map sets this launch installed (filled by InstallBundled).
+const std::vector<MapInfo>& InstalledMaps();
+// The level most of the stock sea is at (water.dat), or 0 when not read.
+float SeaLevel();
+
 // Launch guard: a launch that mounts the shadows leaves a marker until the
 // game reaches the city (the trainer calls MarkLaunchHealthy then). The
 // marker counts such launches in a row; after two that never got in, a launch

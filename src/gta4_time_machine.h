@@ -8,7 +8,8 @@
 // fire trails roaring), the arrival's triple boom, the cold vents' hiss with
 // the ice cracking, the plutonium chamber's reload (Part I), Mr. Fusion
 // blending its rubbish (Parts II and III), the wheels folding for flight
-// (Part II) and the hover thrusters, the empty-reactor warning.
+// (Part II) and the hover thrusters (an '80s synth's take, v1.7.30), the
+// empty-reactor warning.
 //
 // Plain C++ like gta4_car_engine.h: the game thread sets levels and events
 // (atomics), the mixer's thread renders. tools/car/render_time_machine.cpp
@@ -312,12 +313,33 @@ class TimeMachineSynth {
         }
         convert_t_ += dt;
       }
-      // ---- hover thrusters: a roaring hum, rising with the thrust
+      // ---- hover thrusters (v1.7.30): an '80s synth's take on them, and
+      // quiet (v1.7.29's was a roar of noise, 10 dB over everything else):
+      // two detuned saw voices an octave over a sine sub, each through a
+      // resonant low-pass that opens with the thrust and sweeps slowly (a
+      // chorus across the two sides), throbbing gently; a turbine whine with
+      // vibrato on top; a breath of air through a swept band-pass.
       if (hover_ > 1e-3f) {
-        thr_ph_ = Wrap(thr_ph_ + (900.0f + 600.0f * hover_) * dt);
-        const float roar = thrust_lp_.Lowpass(Noise(), G(500.0f + 1800.0f * hover_), 0.8f) * (0.25f + 0.55f * hover_);
-        s += roar + Sin(thr_ph_) * 0.008f * hover_;
-        side += roar * 0.25f * Noise();
+        const float h = hover_;
+        const float f0 = 98.0f * (1.0f + 0.35f * h);
+        lfo_ph_ = Wrap(lfo_ph_ + 0.23f * dt);
+        const float lfo = Sin(lfo_ph_);
+        saw1_ph_ = Wrap(saw1_ph_ + f0 * (1.0f + 0.002f * lfo) * dt);
+        saw2_ph_ = Wrap(saw2_ph_ + f0 * 1.0059f * dt);
+        sub_ph_ = Wrap(sub_ph_ + f0 * 0.5f * dt);
+        const float sub = 0.3f * Sin(sub_ph_);
+        const float cut_l = 520.0f + 1100.0f * h + 300.0f * lfo, cut_r = 520.0f + 1100.0f * h - 300.0f * lfo;
+        const float vl = pad_l_.Lowpass(Saw(saw1_ph_, f0 * dt) + sub, G(cut_l), 0.38f);
+        const float vr = pad_r_.Lowpass(Saw(saw2_ph_, f0 * 1.0059f * dt) + sub, G(cut_r), 0.38f);
+        throb_ph_ = Wrap(throb_ph_ + (3.5f + 3.0f * h) * dt);
+        const float level = (0.033f + 0.025f * h) * (0.84f + 0.16f * Sin(throb_ph_));
+        vib2_ph_ = Wrap(vib2_ph_ + 5.2f * dt);
+        thr_ph_ = Wrap(thr_ph_ + (1150.0f + 650.0f * h) * (1.0f + 0.006f * Sin(vib2_ph_)) * dt);
+        const float whine = Sin(thr_ph_) * (0.0025f + 0.004f * h);
+        const float air = thrust_lp_.Bandpass(Noise(), G(900.0f + 1400.0f * h + 500.0f * Sin(lfo_ph_ + 0.25f)), 1.1f) *
+                          (0.012f + 0.018f * h);
+        s += 0.5f * (vl + vr) * level + whine + air;
+        side += 0.25f * (vl - vr) * level + air * 0.25f * Noise();
       }
 
       float l = s + side, r = s - side;
@@ -369,6 +391,18 @@ class TimeMachineSynth {
   static float Wrap(float p) { return p - std::floor(p); }
   static float Sin(float p) { return std::sin(6.28318531f * p); }
   static float Square(float p) { return p < 0.5f ? 1.0f : -1.0f; }
+  // A sawtooth with its step smoothed (polyBLEP): `inc`, the phase step a sample.
+  static float Saw(float p, float inc) {
+    float v = 2.0f * p - 1.0f;
+    if (p < inc) {
+      const float t = p / inc;
+      v -= t + t - t * t - 1.0f;
+    } else if (p > 1.0f - inc) {
+      const float t = (p - 1.0f) / inc;
+      v -= t * t + t + t + 1.0f;
+    }
+    return v;
+  }
   static float Hump(float u) {
     const float h = 4.0f * u * (1.0f - u);
     return h < 0.0f ? 0.0f : h;
@@ -401,11 +435,12 @@ class TimeMachineSynth {
   float pluto_t_ = 10, seat_ph_ = 0, react_ph_ = 0;
   float fusion_t_ = 10, tink_ = 0, tink_hz_ = 3000, motor_ph_ = 0, grind_ = 0, up_ph_ = 0;
   float convert_t_ = 10, servo_ph_ = 0, thr_ph_ = 0;
+  float lfo_ph_ = 0, saw1_ph_ = 0, saw2_ph_ = 0.37f, sub_ph_ = 0, throb_ph_ = 0, vib2_ph_ = 0;
   bool convert_to_flight_ = false;
   uint32_t seed_ = 0x1985BEEFu;
   Svf relay_bp_, click_bp_, zap_bp_, arc_bp_, buzz_bp_, surge_bp_, crack_bp_, rumble_lp_, whoosh_bp_, fire_lp_,
       pop_bp_, arr_crack_[3], arr_lp_[3], vent_bp_, vent_lp_, ice_bp_, slide_bp_, seat_lp_, seal_bp_, grind_bp_,
-      tink_bp_, spool_lp_, thrust_lp_, clank_bp_[4];
+      tink_bp_, spool_lp_, thrust_lp_, clank_bp_[4], pad_l_, pad_r_;
 };
 
 }  // namespace gta4::car
