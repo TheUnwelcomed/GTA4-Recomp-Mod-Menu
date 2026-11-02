@@ -22,8 +22,10 @@ against the mod's PC files and the console's nj_01_4.xbn):
              most 128 nodes whose parent's is bigger (Bullet's rule), or the
              whole tree's when it is that small.
   header     margin 0.005 (a composite: 0.04); +0x50 the centroid of the
-             mesh's (signed) volume and +0x6C the volume (a composite: the
-             sum of its children's volume times centroid at +0x50).
+             mesh's volume and +0x6C the volume (the stock static bounds carry
+             it signed; kept positive here, as these are objects with mass;
+             a composite: the sum of its children's volume times centroid at
+             +0x50).
 """
 import heapq
 import math
@@ -499,6 +501,10 @@ def build_bvh(v, t, m, quads=True):
                          *[int(x) for x in nb[i]])
     tris = poly_triangles(polys)
     vol, vcen = volume(vq, tris)
+    # (kept positive: with the prop flag the game treats these as objects with
+    # mass, and an open mesh's signed volume can come out negative or nil)
+    box = float(np.prod(hi - lo))
+    vol = abs(vol) if abs(vol) >= 1.0 else max(box, 1.0)
     centroid = (lo + hi) / 2
     radius = float(np.linalg.norm(vq - centroid, axis=1).max()) + BOX_SLACK
     return dict(type=10, radius=radius, max=hi.tolist(), min=lo.tolist(), centroid=centroid.tolist(),

@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -1791,10 +1792,27 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
       if (!line.empty() && line[0] != '#')
         m.objs.push_back(line);
     }
+    // Only the files its model lines name (<model>.xdr, <txd>.xtd) and its
+    // collision dictionary: copying a release over the last leaves the last
+    // one's files in the folder (v1.7.32's log: 192 files for 176; the
+    // island's old untiled pieces went into vehicles.img again).
+    std::set<std::string> named;
+    for (const auto& line : m.objs) {
+      const size_t c1 = line.find(','), c2 = c1 == std::string::npos ? c1 : line.find(',', c1 + 1);
+      if (c2 == std::string::npos)
+        continue;
+      named.insert(Lower(Trimmed(line.substr(0, c1))) + ".xdr");
+      named.insert(Lower(Trimmed(line.substr(c1 + 1, c2 - c1 - 1))) + ".xtd");
+    }
+    int unnamed = 0;
     for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
       const std::string ext = Lower(it->path().extension().string());
       if (!it->is_regular_file(ec) || (ext != ".xdr" && ext != ".xtd" && ext != ".xbd"))
         continue;
+      if (ext != ".xbd" && !named.count(Lower(it->path().filename().string()))) {
+        ++unnamed;
+        continue;
+      }
       // The game registers an image's files by the first 24 characters of
       // the name (with the extension; sub_825127C0): a longer one is never
       // registered (v1.7.30: gk_gtr_deco_polgrnda018, "1 unknown to the game").
@@ -1808,6 +1826,10 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     }
     ec.clear();
     std::sort(m.files.begin(), m.files.end());
+    if (unnamed)
+      REXLOG_INFO("gta4-addons: map set {}: {} file(s) in its folder no model line names (an earlier release's); "
+                  "left out",
+                  dir.filename().string(), unnamed);
     if (info.name.empty() || info.pieces.empty() || m.files.empty() || m.objs.empty()) {
       REXLOG_WARN("gta4-addons: map set {} has no name, pieces, models or files; left out", dir.string());
       continue;

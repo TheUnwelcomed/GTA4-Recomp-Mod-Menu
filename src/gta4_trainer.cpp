@@ -6663,10 +6663,64 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
   const auto& a = g.info->arrive;
   const auto at = MapPoint(*g.info, a[0], a[1], a[2]);
   const auto ground = GroundZ(ctx, base, at[0], at[1], at[2] + 3.0f);
+  // (where the car and the player are now: on the road at about its height,
+  // or in the sea under it - v1.7.32's arrival, its collision missing)
+  std::string car = "gone";
+  if (VehicleAddress(base, g_tm.car))
+    if (const auto c = CarPosition(ctx, base, g_tm.car))
+      car = fmt::format("({:.1f}, {:.1f}, {:.2f})", (*c)[0], (*c)[1], (*c)[2]);
   REXLOG_INFO("gta4-trainer: map {} check: {} of {} pieces exist, {} drawn (on screen); near the player and not "
-              "drawn: {}; the ground under the arrival {} (the place's {:.2f})",
+              "drawn: {}; the ground under the arrival {} (the place's {:.2f}); the car at {}, the player at "
+              "({:.1f}, {:.1f}, {:.2f})",
               g.info->name, exist, g.pieces.size(), shown, near_hidden.empty() ? std::string("none") : near_hidden,
-              ground ? fmt::format("{:.2f}", *ground) : std::string("not found"), at[2]);
+              ground ? fmt::format("{:.2f}", *ground) : std::string("not found"), at[2], car, game.position[0],
+              game.position[1], game.position[2]);
+  // The model under the arrival (one with collision) and one without, as the
+  // game holds them: its model info's first 24 words and the streaming
+  // entries it needs (its collision dictionary among them or not), beside a
+  // stock prop whose collision comes from its .ide's dictionary (BM_plank01,
+  // rubbish.xbd) - for when the island still has no collision.
+  const MapStanding* under = nullptr;
+  const MapStanding* bare = nullptr;
+  float best = 1e30f;
+  for (const auto& p : g.pieces) {
+    const float dx = p.pos[0] - at[0], dy = p.pos[1] - at[1], d = dx * dx + dy * dy;
+    if (p.collision && d < best)
+      best = d, under = &p;
+    if (!p.collision && !bare)
+      bare = &p;
+  }
+  auto dump = [&](const char* what, uint32_t hash, int index) {
+    const uint32_t mi = FindModelInfo(base, hash);
+    std::string words;
+    if (mi && Span(base, mi, 96))
+      for (uint32_t w = 0; w < 24; ++w)
+        words += fmt::format(" {:08X}", Read(base, mi + w * 4));
+    std::string needs;
+    const uint32_t mm = Span(base, kModelModuleIndex, 4) ? Read(base, kModelModuleIndex) : 0xFF;
+    if (index >= 0)
+      for (const uint32_t d : StreamDependencies(ctx, base, StreamModuleFirst(base, int(mm)) + uint32_t(index)))
+        if (const auto de = ReadStreamEntry(base, d))
+          needs += "; " + DescribeEntry(base, *de);
+    REXLOG_INFO("gta4-trainer:   {} {:08X}: info {:08X}:{}{}", what, hash, mi, words.empty() ? " (none)" : words,
+                needs.empty() ? std::string("; needs nothing listed") : needs);
+  };
+  auto index_of = [&](const MapStanding* p) {
+    return p && p->model >= 0 ? g.models[size_t(p->model)].index : -1;
+  };
+  if (under)
+    dump(("under the arrival " + g.models[size_t(under->model)].name).c_str(), under->hash, index_of(under));
+  if (bare)
+    dump(("no collision " + g.models[size_t(bare->model)].name).c_str(), bare->hash, index_of(bare));
+  int stock = -1;
+  const uint32_t plank = ModelHash("bm_plank01"), plank_info = FindModelInfo(base, plank);
+  ForEachModelInfo(base, [&](uint32_t i, uint32_t mi) {
+    if (mi != plank_info)
+      return false;
+    stock = int(i);
+    return true;
+  });
+  dump("stock prop bm_plank01", plank, plank_info ? stock : -1);
 }
 
 // Every frame in a time machine (a look a few times a second otherwise, and

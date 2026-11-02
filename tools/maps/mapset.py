@@ -70,6 +70,7 @@ import maptex  # noqa: E402
 import rsc5  # noqa: E402
 
 XTD_TYPE, XDR_TYPE, XBD_TYPE = 7, 109, 32
+DYNAMIC_FLAG = 0x20000  # (an IDE flag: the object's bound from its IDE's dictionary)
 NAME_LIMIT = 20  # a file's name with its 4-character extension within the game's 24
 
 
@@ -572,7 +573,21 @@ def main():
     with_bounds = {name for name, _ in entries}
 
     # ---- the models' lines, the pieces, the destination
+    # (flag 0x20000 on a model with collision: the game gives an object its
+    # IDE's dictionary bound only when it is set, as the stock props have it -
+    # rubbish.ide's BM_plank01 0xC20000 - while map buildings, 0xC00000 like
+    # the mod's, get theirs from static bounds; v1.7.32's island had none)
+    with_flag = 0
     with open(os.path.join(out, 'objs.ide'), 'w', newline='\r\n') as f:
+        def write(line, name):
+            nonlocal with_flag
+            line = list(line)
+            line[0] = name
+            if name in with_bounds:
+                line[3] = str(int(line[3]) | DYNAMIC_FLAG)
+                with_flag += 1
+            f.write(', '.join(line) + '\n')
+
         for m, fields in sorted(models.items()):
             line = list(fields)
             line[1] = tname[fields[1].lower()]
@@ -580,12 +595,11 @@ def main():
             if m in tiles_of:
                 for t in tiles_of[m][1]:
                     lo, hi, centre, radius = t['bounds']
-                    line[0] = mname[t['key']]
                     line[5:15] = ['%.4f' % x for x in (*lo, *hi, *centre, radius)]
-                    f.write(', '.join(line) + '\n')
+                    write(line, mname[t['key']])
                 continue
-            line[0] = mname[m]
-            f.write(', '.join(line) + '\n')
+            write(line, mname[m])
+    print('model lines: %d with flag 0x%X (their collision from %s.xbd)' % (with_flag, DYNAMIC_FLAG, cfg['bounds']))
     with open(os.path.join(out, 'place.txt'), 'w') as f:
         f.write('# model qx qy qz qw x y z collision (the mod\'s coordinates)\n')
         count = 0

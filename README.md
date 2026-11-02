@@ -186,6 +186,20 @@ network session.
 
 ## Changes
 
+- **v1.7.33**: v1.7.32's island was there, its pieces drawn, but **with no
+  collision**: the car fell through its road into the sea under the island
+  and everything was seen from below. An object gets its bound from its
+  `.ide`'s dictionary only with model flag `0x20000` (the stock props:
+  rubbish.ide's `BM_plank01` `0xC20000`; in nj_01.ide exactly the 6 models
+  with nj_01.xbd bounds carry it, none of the 714 others), while the mod's
+  pieces carry map buildings' `0xC00000` (their collision from placed static
+  bounds); `mapset.py` sets it on every model with collision (108 of 156).
+  Bound volumes kept positive (these are objects with mass now). The
+  installer takes only the map files its model lines name (an earlier
+  release's left in the folder went into `vehicles.img` again). The arrival
+  check logs the car and player positions and, for the model under the
+  arrival, one without collision and the stock `bm_plank01`, the model info's
+  first 24 words and the streaming entries each needs.
 - **v1.7.32**: on the island **only the buildings and palms showed**, floating,
   and the car landed in the sea: every missing piece was big (the terrain
   pieces about a kilometre across, the roads and rocks hundreds of metres),
