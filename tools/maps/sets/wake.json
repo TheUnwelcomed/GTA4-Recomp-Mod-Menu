@@ -88,6 +88,8 @@
     "below_sea": 3.0,
     "notes": "64 models over 100 m in radius (the sea floor, the ground, roads, the runway, rock lines, palm and bush clusters, the carrier's hull) cut into tiles of 150 m; render triangles wholly over 3 m under the sea dropped."
   },
+  "stream": 700,
+  "stream_notes": "v1.7.38: the pieces within 700 m of the player stand (a sixth farther once made), the rest wait: at once, the set's 1,600 pieces filled the game's streaming memory (log 104: 260 of 268 MB with 659 of 820 models in; the car sank by the runway, the world stopped streaming)",
   "plant_notes": "v1.7.37: not planted: the GTA V trees placed one by one stand on the mod's visible ground exactly, its collision runs up to 1.5 m over that ground in places (a poor guide), and its tree clusters (MW3 trees) have canopy pieces a grouping can't tell from plants; left as the mod placed them.",
   "vehicles": "../stock_vehicles.txt",
   "life": {

@@ -186,6 +186,36 @@ network session.
 
 ## Changes
 
+- **v1.7.38**: **streamed places**, the game's **real shaders**, **Benny's
+  done up**, and the **Scarface mansion** on the Keys. Wake Island at once
+  was too much (log 104: the game's streaming memory at 260 of 268 MB with
+  the models still coming in, the world then not streaming, the car in the
+  sea by the runway): a set may now be **streamed by distance**
+  (`map.txt` `stream`, the trainer's `MapWant`/`MapStreamTick`): the pieces
+  within that of the player are made and the rest wait, those gone far are
+  deleted and their models let go, the pieces with collision made first;
+  Wake Island within 700 m, the Keys within 1 km; the game's pools
+  (objects, buildings, dummies, pointer and entry nodes) are logged at each
+  step. The user's **mapsets export** came: the game's own trees, fences,
+  windows, lamps and lights (340 console models), so `gta_trees`,
+  `gta_cutout_fence`, `gta_glass`, the emissive and reflect presets are
+  real samples now (the mods' trees drawn as the game draws its own, both
+  sides, no back faces: Wake's models 126 to 89 MiB). **Benny's** (the
+  user's photo: the mod's oval sign a floating plank from the deck behind
+  it): a set's **edits** (`edit`: geometries by colour map and collision by
+  box left out of a model) and **extra placements** (`extra`: the game's
+  props by name, or props made here) - the sign gone, a new double-sided
+  "Benny's" sign and a tiki bar made here (`props.py`, lit at night), café
+  tables and chairs, planters, lamp posts and lanterns on the deck. The
+  **Scarface mansion** (a GTA V MLO: 54 `.ydr`, 21 `.ymap`, 17 `.ytyp`):
+  `vimport.py` reads GTA V resources (`v_reader.py`: drawables, textures,
+  placements through the archetypes) and writes them as GTA IV PC pieces
+  (`pcwrite.py`: `.wdr`, `.wtd`, the lines, the placements with their full
+  rotation, the render meshes for collision), so the set's pipeline takes
+  them unchanged; the mansion stands on its own islet south-east of the
+  eastern key, its causeway turned to land on the key's shore road. Its GTA
+  V props (palms, furniture: 1,686 placements of the game's own) are not
+  in the pack. Still open: the olive wall in the Keys' sky.
 - **v1.7.37**: the second destination, **Wake Island**, the Gator Keys'
   **trees** put right, and **life** on both. Wake Island (nine30's Wake
   Island v1.1 for GTA IV: an atoll with a runway, a village, a bunkered
@@ -590,7 +620,8 @@ network session.
 | `src/gta4_island_sound.h` | a place's synthesized ambience (the Keys' surf, breeze, gulls and insects; Wake's wind, surf and a plane passing), played while the player is on a map set's island (`tools/island/` renders it) |
 | `patches/liberty-trainer.patch` | the small wiring edits to the port (and one fix in its native hooks: the D3D fence wait skipped when there is no GPU fence memory) |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
-| `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI, with the rest-pose check |
+| `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI, with the rest-pose check; `pcwrite.py` writes GTA IV PC drawables and texture dictionaries from plain data (props made here, GTA V imports) |
+| `tools/maps/` | the map sets: `mapdraw.py`/`mapset.py` (a PC map mod as a destination), `vimport.py` (GTA V resources as PC pieces), `props.py` (Benny's sign and bar), `v_reader.py`, `plant.py`, `alphamask.py`, `collide.py`... (see `tools/maps/README.md`) |
 | `tools/inspect/`, `tools/re/`, `tools/unarc.py` | car file inspection, the game-code disassembly helper, the mod-archive unpacker (see `tools/README.md`) |
 
 ## Building

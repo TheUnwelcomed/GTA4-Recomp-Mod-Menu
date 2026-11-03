@@ -127,6 +127,35 @@ trainer's ambience by name (`keys`, `atoll`: `src/gta4_island_sound.h`).
 `ground.bin` is the collision's walkable surface on a 4 m grid for the
 trainer's own ground probe (the game's does not see the pieces).
 
+Streamed by distance (v1.7.38, a set's `stream`, map.txt's): the trainer
+makes the pieces within that of the player (the arrival first), deletes
+those gone a sixth farther and lets their models go, so a set takes only
+the streaming memory of what is near. Wake Island at once (1,600 pieces,
+160 MiB) filled the game's 268 MB and the world stopped streaming (log
+104); it is streamed within 700 m now, the Keys with the mansion within 1 km.
+The pieces with collision are made first.
+
+Edits and additions (v1.7.38): `edit` leaves out of a model the geometries
+drawn with the named colour maps (`mapdraw.py --edits`) and the collision
+triangles in the named boxes (the model's space); `extra` names text files
+of placements beyond the mod's (`model x y z heading`, or with a quaternion:
+the game's props by name, or models made here: `props.py` writes Benny's
+new sign and tiki bar as `.wdr`/`.wtd` with their collision in
+`<model>.colmesh.npz` and an `.ide`, all linked into the source directory).
+`tex_of` caps a dictionary's texture size by name.
+
+GTA V (v1.7.38, `vimport.py`): the Scarface mansion (a FiveM MLO) joined the
+Keys as PC pieces: `v_reader.py` reads the V resources (RSC7: drawables with
+their shaders, vertex formats and embedded textures; texture dictionaries;
+`.ymap` entities through the `.ytyp` archetypes), `pc2x360/pcwrite.py`
+writes IV PC files (the shaders cloned from the mods' own PC samples of the
+nearest preset, `V_SHADERS`), and the set takes them like a mod's. A V
+entity's rotation is stored inverted as IV's are; the whole scene can be
+turned and anchored (`--anchor=vx,vy,vz:tx,ty,tz --turn=deg`); a model
+placed once is written turned as placed (its placement unrotated, so it can
+be tiled and its render mesh taken as collision). What the pack lacks (the
+game's own props it places) is listed and left out.
+
 Names: the game registers an image's files by the first 24 characters of the
 name, the extension among them (`sub_825127C0`), so `mapset.py` keeps every
 model and texture dictionary name within 20 characters (a set can rename

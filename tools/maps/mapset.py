@@ -61,6 +61,17 @@ its own (<prefix>c<n>, an invisible drawable of one triangle far below the
 ground, its .ide line's box the cell's collision) placed unrotated at the
 cell's centre; the mod's models then have no bounds of their own.
 
+A set's own additions and edits (v1.7.38, Benny's on the Gator Keys):
+cfg['extra'] names a text file of placements beyond the mod's (model x y z
+heading; the game's own props by name, or models made for the set:
+props.py, their .wdr/.wtd and custom.ide in the source directory, the .ide
+named in cfg['ide']); cfg['edit'] is {model: {"drop_textures": [...],
+"drop_box": [[x0, y0, z0, x1, y1, z1], ...]}}: the geometries drawn with
+those colour maps left out of the model (mapdraw.py --edits), and the
+collision triangles whose centres lie in those boxes (the model's space)
+dropped. A <model>.colmesh.npz in the source directory (v, t, m in the
+model's space) is a piece's collision like a .wbn's (props.py writes them).
+
 Tiles (v1.7.32): a model over the set's tiles.radius across, placed once and
 unrotated, is cut into tiles of tiles.cell metres (mapdraw.plan_tiles), each
 a model of its own named <model>_<n>, its drawable converted here, its
@@ -210,7 +221,22 @@ def read_piece(path):
     return b
 
 
+def cut_boxes(b, boxes, place):
+    """A piece as a soup with the triangles whose centres lie in one of the
+    boxes (the model's space, the placement unrotated) dropped."""
+    v, t, m = collide.soup(b)
+    cen = v[t].mean(axis=1) - np.array(place['pos'])
+    keep = np.ones(len(t), bool)
+    for x0, y0, z0, x1, y1, z1 in boxes:
+        keep &= ~((cen[:, 0] >= x0) & (cen[:, 0] <= x1) & (cen[:, 1] >= y0) & (cen[:, 1] <= y1)
+                  & (cen[:, 2] >= z0) & (cen[:, 2] <= z1))
+    print('edit: %s: %d of %d collision triangles dropped (in its boxes)' % (place['model'], int((~keep).sum()), len(t)))
+    return dict(type='soup', v=v, t=t[keep], m=m[keep])
+
+
 def mesh_points(b):
+    if b['type'] == 'soup':
+        return b['v']
     if b['type'] == 12:
         return np.concatenate([mesh_points(c) for c in b['children']])
     v = np.frombuffer(b['vertices'], '<i2').reshape(-1, 3).astype(np.float64)
@@ -298,15 +324,21 @@ def height_map(pieces, cell=2.0):
             if x['type'] == 12:
                 stack += x['children']
                 continue
-            v = np.frombuffer(x['vertices'], '<i2').reshape(-1, 3).astype(np.float64)
-            v = v * np.array(x['quantum']) + np.array(x['offset'])
-            n = len(x['polygons']) // 32
-            raw = np.frombuffer(x['polygons'], np.uint8).reshape(n, 32)
-            idx = raw[:, 16:24].copy().view('<u2').astype(np.int64)
-            normal = raw[:, :12].copy().view('<f4').reshape(-1, 3)
-            up = normal[:, 2] > 0.7  # (walkable faces only)
-            quads = up & (idx[:, 3] != 0)
-            tris = [idx[up][:, [0, 1, 2]], idx[quads][:, [0, 2, 3]]]
+            if x['type'] == 'soup':  # (a set's own: its upward faces by their winding)
+                v, t3 = x['v'], x['t']
+                nrm = np.cross(v[t3[:, 1]] - v[t3[:, 0]], v[t3[:, 2]] - v[t3[:, 0]])
+                up = nrm[:, 2] > 0.7 * np.maximum(np.linalg.norm(nrm, axis=1), 1e-9)
+                tris = [t3[up]]
+            else:
+                v = np.frombuffer(x['vertices'], '<i2').reshape(-1, 3).astype(np.float64)
+                v = v * np.array(x['quantum']) + np.array(x['offset'])
+                n = len(x['polygons']) // 32
+                raw = np.frombuffer(x['polygons'], np.uint8).reshape(n, 32)
+                idx = raw[:, 16:24].copy().view('<u2').astype(np.int64)
+                normal = raw[:, :12].copy().view('<f4').reshape(-1, 3)
+                up = normal[:, 2] > 0.7  # (walkable faces only)
+                quads = up & (idx[:, 3] != 0)
+                tris = [idx[up][:, [0, 1, 2]], idx[quads][:, [0, 2, 3]]]
             for t in tris:
                 if not len(t):
                     continue
@@ -455,9 +487,10 @@ def check_carrier(body, flags, bounds):
 
 class Drawer:
     """mapdraw's converter set up as the models were converted (--draw)."""
-    def __init__(self, draw_arg, cutout=()):
+    def __init__(self, draw_arg, cutout=(), edits=None):
         assert draw_arg, 'a set with tiles or carriers needs --draw (what mapdraw.py converted the models with)'
         self.cutout = set(cutout)
+        self.edits = edits or {}  # model -> the colour maps whose geometries are left out
         dtmpl_arg, shader_dir = draw_arg.split(',', 1)
         dtmpl_path, dtmpl_flags = dtmpl_arg.rsplit(':', 1)
         self.tmpl = rsc5.Resource(open(dtmpl_path, 'rb').read(), int(dtmpl_flags, 16), True, XDR_TYPE, dtmpl_path)
@@ -465,17 +498,17 @@ class Drawer:
         for k, fb in mapdraw.MAP_FALLBACK.items():
             batconv.SPS_FALLBACK.setdefault(k, fb)
 
-    def tile(self, donor, t, lift=None):
+    def tile(self, donor, t, lift=None, name=None):
         conv = mapdraw.MapDrawable(self.tmpl, donor, self.sources, log=lambda msg: None, tile=t, lift=lift,
-                                   cutout=self.cutout)
+                                   cutout=self.cutout, drop=self.edits.get(name))
         flags, body = conv.run()
         return flags, body, conv.tile_bounds(), sum(conv.added)
 
-    def model(self, donor, lift):
+    def model(self, donor, lift, name=None):
         conv = mapdraw.MapDrawable(self.tmpl, donor, self.sources, log=lambda msg: None, lift=lift,
-                                   cutout=self.cutout)
+                                   cutout=self.cutout, drop=self.edits.get(name))
         flags, body = conv.run()
-        return flags, body, conv.lifted, conv.added
+        return flags, body, conv.lifted, conv.added, conv.dropped
 
     def carrier(self, donor, bounds):
         conv = mapdraw.MapDrawable(self.tmpl, donor, self.sources, log=lambda msg: None, tiny=True, bounds=bounds)
@@ -493,7 +526,8 @@ def main():
     tmpl_path, tmpl_flags = tmpl_arg.rsplit(':', 1)
     tmpl = maptex.Template(rsc5.Resource(open(tmpl_path, 'rb').read(), int(tmpl_flags, 16), True, XTD_TYPE, tmpl_path))
     cutout = alphamask.cutouts(src)  # (the plants' cut-out masks: as mapdraw.py --cutout-from converted the models)
-    drawer = Drawer(draw_arg, cutout) if draw_arg else None
+    edits = {m.lower(): e for m, e in cfg.get('edit', {}).items()}
+    drawer = Drawer(draw_arg, cutout, mapdraw.set_edits(set_path)) if draw_arg else None
 
     # ---- the mod's model lines, the game's own names, the placements
     ide_files = cfg['ide'] if isinstance(cfg['ide'], list) else [cfg['ide']]
@@ -515,6 +549,29 @@ def main():
                 unknown[inst['hash']] += 1
                 continue
             placed.append(dict(inst, model=name, stock=name in stock))
+    extra_files = cfg.get('extra') or []
+    if isinstance(extra_files, str):
+        extra_files = [extra_files]
+    if extra_files:  # (the set's own placements: model x y z heading, or model x y z qx qy qz qw - the true rotation)
+        n_extra = 0
+        for ef in extra_files:
+            for line in open(os.path.join(os.path.dirname(set_path), ef)):
+                f = line.split('#')[0].split()
+                if not f:
+                    continue
+                name = f[0].lower()
+                assert name in models or name in stock, 'extra placement of a model with no line: %s' % name
+                x, y, z = (float(v) for v in f[1:4])
+                if len(f) >= 8:
+                    q = tuple(float(v) for v in f[4:8])
+                else:
+                    half = math.radians(float(f[4])) / 2
+                    q = (0.0, 0.0, math.sin(half), math.cos(half))
+                placed.append(dict(pos=(x, y, z), q=q, hash=batconv.joaat(name), model=name,
+                                   stock=name in stock and name not in models))
+                n_extra += 1
+        print('extra: %d placements of the set\'s own (%s)' % (
+            n_extra, ', '.join('%s x%d' % kv for kv in collections.Counter(p['model'] for p in placed[-n_extra:]).most_common(12))))
     # the vehicles the mod parks (its car generators): the game's own
     # vehicles by name (cfg['vehicles']: stock_vehicles.txt), a mod's name
     # for another game's car swapped by cfg['vehicle_subs'] (Vice City's
@@ -559,15 +616,40 @@ def main():
     mode = col.get('mode', 'model')
     floor_z = cfg['sea'] - col.get('seabed', 3.0)
     pieces_world, piece_files, dropped = [], {}, []
+    where = {}
+    for p in placed:
+        where.setdefault(p['model'], p)
     for f in sorted(os.listdir(src)):
         if not f.endswith('.wbn'):
             continue
         name = f[:-4].lower()
         b = read_piece(os.path.join(src, f))
+        if name in edits and edits[name].get('drop_box') and name in where:  # (the set's edits: boxes cut out)
+            b = cut_boxes(b, edits[name]['drop_box'], where[name])
         pieces_world.append(b)
         if any(fnmatch.fnmatch(name, pat) for pat in col.get('drop', [])):
             dropped.append(name)
             continue
+        piece_files[name] = b
+    # the set's own props' collision (props.py: triangles in the model's space), in the mod's usual material
+    soup_material = collections.Counter()
+    for b in piece_files.values():
+        soup_material.update(np.unique(collide.soup(b)[2]).tolist())
+    for f in sorted(os.listdir(src)):
+        if not f.endswith('.colmesh.npz'):
+            continue
+        name = f[:-len('.colmesh.npz')].lower()
+        if name not in where:
+            continue
+        if mode == 'model' and count_of[name] != 1:
+            print('collision: %s placed %d times: its own left out (collision per model needs one placement)'
+                  % (name, count_of[name]))
+            continue
+        z = np.load(os.path.join(src, f))
+        v = z['v'].astype(np.float64) @ quat_matrix(where[name]['q']).T + np.array(where[name]['pos'])
+        m = np.full(len(z['t']), soup_material.most_common(1)[0][0] if soup_material else 0, np.uint32)
+        b = dict(type='soup', v=v, t=z['t'].astype(np.int64), m=m)
+        pieces_world.append(b)
         piece_files[name] = b
     allpts = np.concatenate([mesh_points(b) for b in pieces_world])
     lo, hi = allpts[:, :2].min(0), allpts[:, :2].max(0)
@@ -698,8 +780,12 @@ def main():
             chosen[n] = src_tex
             if how:
                 notes.append('%s (%s)' % (n, how))
-        flags, body, report = maptex.build(tmpl, chosen, side=cfg.get('tex', maptex.MAP_SIDE),
-                                           detail=cfg.get('detail', maptex.DETAIL_SIDE))
+        side, detail = cfg.get('tex', maptex.MAP_SIDE), cfg.get('detail', maptex.DETAIL_SIDE)
+        for pat, s_side, s_detail in cfg.get('tex_of', []):  # (a dictionary's own cap, by name pattern)
+            if fnmatch.fnmatch(txd, pat):
+                side, detail = s_side, s_detail
+                break
+        flags, body, report = maptex.build(tmpl, chosen, side=side, detail=detail)
         verdict, worst = maptex.check(body, flags, chosen)
         # (a level laid out wrong decodes to noise, 40 and up; a translucent
         # gradient's smallest level differs from its parent's box filter by
@@ -728,9 +814,9 @@ def main():
             continue
         if m in lifts:  # (converted again here, its plants moved)
             donor = rsc5.Resource.pc(os.path.join(src, m + '.wdr'))
-            flags, body, moved, added = drawer.model(donor, lifts[m])
+            flags, body, moved, added, gone = drawer.model(donor, lifts[m], m)
             assert moved, m
-            mapdraw.check(body, flags, donor, lifts[m], added)
+            mapdraw.check(body, flags, donor, lifts[m], added, gone)
             replanted += 1
         else:
             flags, body = flags_of[m], open(os.path.join(xdr_dir, m + '.xdr.bin'), 'rb').read()
@@ -742,7 +828,7 @@ def main():
         tiles_done = 0
         for m, (donor, ts) in sorted(tiles_of.items()):
             for t in ts:
-                flags, body, t['bounds'], added = drawer.tile(donor, t, lifts.get(m))
+                flags, body, t['bounds'], added = drawer.tile(donor, t, lifts.get(m), m)
                 check_tile(body, flags, donor, t, lifts.get(m), added)
                 if 'models' not in skip:
                     pack(xlzx, XDR_TYPE, flags, body, os.path.join(out, mname[t['key']] + '.xdr'))
@@ -763,9 +849,6 @@ def main():
 
     gathered, unplaced = {}, []
     tri_in = tri_out = 0
-    where = {}
-    for p in placed:
-        where.setdefault(p['model'], p)
     materials = collections.Counter()
 
     def route(name, v, t, m):
@@ -938,6 +1021,12 @@ def main():
         f.write('pieces %d\n' % sum(count.values()))
         f.write('prefix %s\n' % prefix)  # (the installer drops files with it this set no longer has)
         f.write('bounds %s\n' % ' '.join(dict_names))  # (the trainer asks for them with the models)
+        # streamed by distance (v1.7.38): the trainer makes the pieces within
+        # this of the player and deletes those farther, their models let go
+        # (Wake Island's 1,600 pieces at once filled the game's streaming
+        # memory, 260 of 268 MB, and left the car in the sea)
+        if cfg.get('stream'):
+            f.write('stream %.0f\n' % cfg['stream'])
         # its life (v1.7.37): the game's ped models that belong there, how
         # many to keep about the player, the weather (the game's id), the
         # trainer's ambience by name

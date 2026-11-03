@@ -1791,6 +1791,8 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
         std::sscanf(value.c_str(), "%d", &info.weather);
       else if (key == "ambience")
         info.ambience = Lower(value);
+      else if (key == "stream")
+        std::sscanf(value.c_str(), "%f", &info.stream);
     }
     // (the vehicles the mod parks: optional)
     TextLines vehicles;
@@ -1899,10 +1901,12 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
       continue;
     }
     REXLOG_INFO("gta4-addons: map set {} (\"{}\"): {} pieces ({} of the game's own models), {} models, {} files, "
-                "{} collision dictionar{}; its life: {} vehicles, {} ped models ({} about), weather {}, ambience {}",
+                "{} collision dictionar{}, {}; its life: {} vehicles, {} ped models ({} about), weather {}, ambience {}",
                 info.name, info.label, info.pieces.size(), stock_pieces, m.objs.size(), m.files.size(),
-                info.bounds.size(), info.bounds.size() == 1 ? "y" : "ies", info.vehicles.size(), info.peds.size(),
-                info.wander, info.weather, info.ambience.empty() ? "none" : info.ambience);
+                info.bounds.size(), info.bounds.size() == 1 ? "y" : "ies",
+                info.stream > 0 ? fmt::format("streamed within {:.0f} m", info.stream) : std::string("all placed at once"),
+                info.vehicles.size(), info.peds.size(), info.wander, info.weather,
+                info.ambience.empty() ? "none" : info.ambience);
     out.push_back(std::move(m));
   }
   return out;

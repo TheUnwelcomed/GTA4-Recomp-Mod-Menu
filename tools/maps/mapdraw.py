@@ -27,6 +27,9 @@ usage: python3 -I mapdraw.py <out_dir> <shader sources dir> <template.xdr.bin:fl
   shader sources: decompressed console drawables (<name>.xdr.bin / .xdd.bin
   / .xft.bin, each with <name>.log from xlzx unrsc holding its flags).
   Writes <out_dir>/<model>.xdr.bin and flags.txt lines.
+  --cutout-from=<source dir>: an opaque shader over a plant's cut-out mask drawn cut out
+  --edits=<set.json>: the set's "edit" (per model, "drop_textures": the
+    geometries drawn with those colour maps left out)
 """
 import glob
 import os
@@ -331,15 +334,20 @@ def back_faces(c):
 
 
 class MapDrawable(batconv.Converter):
-    def __init__(self, tmpl, donor, sources, log=print, tile=None, tiny=False, bounds=None, lift=None, cutout=None):
+    def __init__(self, tmpl, donor, sources, log=print, tile=None, tiny=False, bounds=None, lift=None, cutout=None,
+                 drop=None):
         """`tile`: one of plan_tiles' (its triangles only, moved to its
         origin). `tiny`: the donor's first geometry as one tiny triangle
         (tiny_geometry). `bounds`: (lo, hi, centre, radius) written as the
         drawable's instead of the donor's. `lift`: the plants' vertical moves
         (plant.shifts), applied to the positions before anything else.
         `cutout`: the colour maps that are plants' cut-out masks
-        (alphamask.cutouts): an opaque shader using one drawn cut out."""
+        (alphamask.cutouts): an opaque shader using one drawn cut out.
+        `drop`: colour-map names (lower case) whose geometries are left out
+        (a set's edits: Benny's one-sided sign, v1.7.38)."""
         self.tile = tile
+        self.drop = {n.lower() for n in (drop or ())}
+        self.dropped = []         # triangles left out per LOD (drop)
         self.tiny = tiny
         self.bounds = bounds
         self.lift = lift
@@ -500,6 +508,11 @@ class MapDrawable(batconv.Converter):
                 smap = [self.d.u16(smap_p + 2 * k) for k in range(len(gs))]
                 geoms, shaders = [], []
                 for g, si in zip(gs, smap):
+                    if self.drop and self.colour_map(self.df['drawable']['shader_group']['shaders'][si]['off']) in self.drop:
+                        while len(self.dropped) <= len(out):
+                            self.dropped.append(0)
+                        self.dropped[len(out)] += self.d.u32(g + 44) // 3
+                        continue
                     first = self.donor_slot[si]
                     whole = self.convert_geometry(rsc5.read_geometry(self.d, g), self.shader_usage[first])
                     if self.tiny:
@@ -589,9 +602,19 @@ class MapDrawable(batconv.Converter):
         return flags, virt + bytes(self.p.buf)
 
 
+def set_edits(path):
+    """A set's edits ({model: {colour maps whose geometries are left out}})."""
+    if not path:
+        return {}
+    import json
+    return {m.lower(): {t.lower() for t in e.get('drop_textures', [])}
+            for m, e in json.load(open(path)).get('edit', {}).items()}
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     cutout_dir = next((a[len('--cutout-from='):] for a in sys.argv[1:] if a.startswith('--cutout-from=')), None)
+    edits_path = next((a[len('--edits='):] for a in sys.argv[1:] if a.startswith('--edits=')), None)
     out_dir, src_dir, tmpl_arg = args[:3]
     tmpl_path, tmpl_flags = tmpl_arg.rsplit(':', 1)
     tmpl = rsc5.Resource(open(tmpl_path, 'rb').read(), int(tmpl_flags, 16), True, XDR_TYPE, tmpl_path)
@@ -603,14 +626,16 @@ def main():
         import alphamask
         cutout = alphamask.cutouts(cutout_dir)
         print('cut-out masks of plants (alphamask.py): %d textures' % len(cutout))
+    edits = set_edits(edits_path)
     os.makedirs(out_dir, exist_ok=True)
     flags_out = open(os.path.join(out_dir, 'flags.txt'), 'a')
     for path in args[3:]:
         name = os.path.basename(path)[:-4]
         donor = rsc5.Resource.pc(path)
-        conv = MapDrawable(tmpl, donor, sources, log=lambda s, n=name: print('[%s] %s' % (n, s)), cutout=cutout)
+        conv = MapDrawable(tmpl, donor, sources, log=lambda s, n=name: print('[%s] %s' % (n, s)), cutout=cutout,
+                           drop=edits.get(name.lower()))
         flags, body = conv.run()
-        verdict = check(body, flags, donor, added=conv.added)
+        verdict = check(body, flags, donor, added=conv.added, dropped=conv.dropped)
         open(os.path.join(out_dir, name + '.xdr.bin'), 'wb').write(body)
         flags_out.write('%s.xdr %d 0x%08X\n' % (name, XDR_TYPE, flags))
         fallbacks = sorted({'%s as %s' % (a, b.split(' ')[0]) for a, b in conv.shader_report if a not in conv.t_shaders})
@@ -621,7 +646,7 @@ def main():
 
 
 
-def check(body, flags, donor, lift=None, added=()):
+def check(body, flags, donor, lift=None, added=(), dropped=()):
     """The console drawable read back: per LOD the same triangles as the
     mod's (count), every index inside its buffer, every position decoding
     to one of the mod's (exactly: positions are stored as floats on both;
@@ -635,7 +660,8 @@ def check(body, flags, donor, lift=None, added=()):
         tri_x = sum(g['index_count'] // 3 for m in xl for g in m['geometries'])
         tri_d = sum(g['index_count'] // 3 for m in dl for g in m['geometries'])
         extra = added[k] if k < len(added) else 0  # (back faces given to two-sided shaders' triangles)
-        assert tri_x == tri_d + extra, ('triangles', tri_x, tri_d, extra)
+        gone = dropped[k] if k < len(dropped) else 0  # (a set's edits: geometries left out)
+        assert tri_x == tri_d + extra - gone, ('triangles', tri_x, tri_d, extra, gone)
         pc_pos = set()
         for m in dl:
             for g in m['geometries']:
@@ -669,7 +695,8 @@ def check(body, flags, donor, lift=None, added=()):
                         parts = [((w >> sh) & 0x3FF) for sh in (0, 10, 20)]
                         parts = [q - 1024 if q >= 512 else q for q in parts]
                         assert sum(q * q for q in parts) > 450 * 450, ('zero or short vector', e, v, parts)
-        report.append('%d triangles%s, %d positions checked' % (tri_x, (' (%d back faces)' % extra) if extra else '', checked))
+        report.append('%d triangles%s%s, %d positions checked' % (tri_x, (' (%d back faces)' % extra) if extra else '',
+                                                                  (' (%d left out)' % gone) if gone else '', checked))
     return '; '.join(report)
 
 

@@ -117,8 +117,15 @@ def decode_component(raw, ctype, count, stride, offset):
     if ctype in (8, 9):  # ubyte4 / colour (0..255; colour normalised)
         a = view.reshape(count, 4).astype(np.float32)
         return a / 255.0 if ctype == 9 else a
-    if ctype == 10:  # rgba8 snorm
-        return view.view(np.int8).reshape(count, 4).astype(np.float32) / 127.0
+    if ctype == 10:  # Dec3N: 10 bits each of x, y, z (two's complement), 2 of w
+        w = view.reshape(count, 4).copy().view('<u4').reshape(count)
+        out = np.empty((count, 4), np.float32)
+        for k in range(3):
+            v = ((w >> (10 * k)) & 0x3FF).astype(np.int32)
+            v = np.where(v >= 512, v - 1024, v)
+            out[:, k] = v / 511.0
+        out[:, 3] = (w >> 30).astype(np.float32)
+        return out
     raise ValueError('vertex component type %d' % ctype)
 
 
@@ -214,7 +221,7 @@ def read_geometry(r, ptr):
     ib_ptr = r.u64(ptr + 0x38)
     # VertexBuffer (gen8): stride, flags, data pointer, vertex count, ..., info (declaration)
     stride = r.u16(vb_ptr + 8)
-    data_ptr = r.u64(vb_ptr + 0x10)
+    data_ptr = r.u64(vb_ptr + 0x10) or r.u64(vb_ptr + 0x20)  # (some exporters fill only the second, in the system pages)
     vcount = r.u32(vb_ptr + 0x18)
     info_ptr = r.u64(vb_ptr + 0x30)
     flags = r.u32(info_ptr)
@@ -229,7 +236,7 @@ def read_geometry(r, ptr):
         comps[SEMANTICS[sem]] = decode_component(raw, ctype, vcount, stride, off)
         off += COMP_SIZE[ctype]
     icount = r.u32(ib_ptr + 8)
-    ind_ptr = r.u64(ib_ptr + 0x10)
+    ind_ptr = r.u64(ib_ptr + 0x10) or r.u64(ib_ptr + 0x20)
     indices = np.frombuffer(r.bytes(ind_ptr, 2 * icount), dtype='<u2').copy()
     return dict(vertex_count=vcount, stride=stride, decl_stride=decl_stride, decl_flags=flags, decl_types=types,
                 components=comps, indices=indices)

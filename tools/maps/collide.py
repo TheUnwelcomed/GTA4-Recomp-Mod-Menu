@@ -50,6 +50,8 @@ def soup(b, matrix=None):
     """A bound read by bounds360.read_bound as a triangle soup: vertices (n x
     3, float64), triangles (m x 3), each triangle's material (the u32 value).
     Quads come out as two triangles."""
+    if b['type'] == 'soup':  # (a set's own: props.py's .colmesh.npz, or a piece cut by its edits)
+        return b['v'], b['t'], b['m']
     if b['type'] == 12:
         parts = []
         for k, c in enumerate(b['children']):

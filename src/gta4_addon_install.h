@@ -76,6 +76,11 @@ struct MapInfo {
   int wander = 0;
   int weather = -1;
   std::string ambience;
+  // Streamed by distance (v1.7.38, map.txt "stream": metres, 0 all at once):
+  // a big set's pieces are made within this of the player and deleted
+  // farther away, their models let go, so the whole need not fit the game's
+  // streaming memory (Wake Island's 1,600 pieces filled it).
+  float stream = 0;
   std::filesystem::path dir;  // its folder (ground.bin, the trainer's own ground grid, is read from it)
   bool installed = false;    // in vehicles.img and gtxd.ide this launch
 };

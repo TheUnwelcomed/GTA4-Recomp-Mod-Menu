@@ -6329,17 +6329,56 @@ extern "C" void sub_82326E10(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// The game's entity pools, for the log (v1.7.38: Wake Island's 1,600 pieces
+// at once left the car in the sea and the world not streaming - a pool full
+// would do that, as would its streaming memory). Each pool (sub_82507368):
+// +0 the slots, +4 a flag byte per slot (bit 7 free), +8 the count; its
+// pointer in a global. Counts (the 360's): objects 1300 (3400 here),
+// buildings 32000, dummies 14000, pointer nodes 65536 single / 16000
+// double, entry-info nodes 16000.
+struct PoolGlobal {
+  const char* name;
+  uint32_t global;
+};
+constexpr PoolGlobal kPools[] = {
+    {"objects", 0x82DE5A50},    {"buildings", 0x830248C4},     {"dummies", 0x830248C8},
+    {"ptr-single", 0x830328D8}, {"ptr-double", 0x830328DC}, {"entry-info", 0x8305C5A4},
+};
+std::string DescribePools(uint8_t* base) {
+  std::string out;
+  for (const auto& pl : kPools) {
+    if (!Span(base, pl.global, 4))
+      continue;
+    const uint32_t pool = Read(base, pl.global);
+    if (!pool || !Span(base, pool, 28))
+      continue;
+    const uint32_t flags = Read(base, pool + 4), count = Read(base, pool + 8);
+    if (!flags || count > 200000 || !Span(base, flags, count))
+      continue;
+    uint32_t used = 0;
+    const uint8_t* f = rex::memory::GuestPtr(base, flags);
+    for (uint32_t i = 0; i < count; ++i)
+      used += !(f[i] & 0x80);
+    out += fmt::format("{}{} {}/{}", out.empty() ? "" : ", ", pl.name, used, count);
+  }
+  return out.empty() ? std::string("pools not readable") : out;
+}
+
 struct MapStanding {
   uint32_t hash = 0, object = 0;
   int model = -1;  // in MapRun::models
   bool collision = false;
   bool stock = false;  // one of the game's own models (its collision the game's, not the set's)
+  bool wanted = true;  // within the set's stream radius of the focus (v1.7.38; every piece of a set with none)
   float pos[3]{}, q[4]{};
 };
 struct MapModel {
   std::string name;
   uint32_t hash = 0;
   bool known = true, loaded = false;
+  bool requested = false;  // asked of the game (REQUEST_MODEL) and not let go since
+  int wanted = 0;          // its pieces within the stream radius
+  int standing = 0;        // its pieces made (objects)
   int index = -1;  // in the model table (its streaming entry: the model module's first entry + this)
 };
 // One of the place's collision dictionaries (v1.7.34; several from v1.7.37, a
@@ -6361,6 +6400,12 @@ struct MapRun {
   uint64_t check_at = 0;  // (v1.7.32: when to look at the pieces after an arrival)
   std::vector<MapDictionary> dicts;
   uint64_t bounds_in_at = 0;  // when the last of them came in
+  // Streaming by distance (v1.7.38; MapInfo::stream > 0): the point the
+  // pieces are wanted about (the arrival till the player stands there, then
+  // the player), and when to look again.
+  float focus[3]{};
+  uint64_t next_stream = 0;
+  int wanted_pieces = 0, made_pieces = 0, stream_rounds = 0;
   // Whether any dictionary is in the store; whether every one that is has loaded.
   bool AnyDictionary() const {
     return std::any_of(dicts.begin(), dicts.end(), [](const MapDictionary& d) { return d.slot >= 0; });
@@ -6575,7 +6620,7 @@ void MapReport(PPCContext& ctx, uint8_t* base, const char* why) {
               StreamModuleName(base, int(mm)), budget);
   int shown = 0;
   for (const auto& mdl : g.models) {
-    if (!mdl.known || mdl.loaded || mdl.index < 0)
+    if (!mdl.known || mdl.loaded || mdl.index < 0 || mdl.wanted == 0)
       continue;
     if (++shown > 4)
       break;
@@ -6595,6 +6640,7 @@ void MapReport(PPCContext& ctx, uint8_t* base, const char* why) {
 }
 
 void LifeStop(PPCContext& ctx, uint8_t* base, const char* why);
+void MapDropPiece(PPCContext& ctx, uint8_t* base, MapStanding& p);
 void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
   auto& g = g_map;
   if (!g.info)
@@ -6603,23 +6649,27 @@ void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
   int deleted = 0;
   for (auto& p : g.pieces)
     if (p.object) {
-      DeleteObject(ctx, base, p.object);
+      MapDropPiece(ctx, base, p);
       ++deleted;
     }
-  for (const auto& mdl : g.models)
-    if (mdl.known)
+  int let_go = 0;
+  for (auto& mdl : g.models)
+    if (mdl.known && mdl.requested) {
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {mdl.hash});
+      mdl.requested = false;
+      ++let_go;
+    }
   // (its collision dictionaries no longer kept: the store lets them go once
   // the pieces' references to them are gone, the models' links staying)
   const uint32_t module = BoundsModule(base);
-  std::string let_go;
+  std::string kept;
   for (const auto& d : g.dicts)
     if (d.slot >= 0 && module < uint32_t(StreamModuleCount(base))) {
       CallGuest(ctx, base, kStreamUnkeep, uint32_t(d.slot), module);
-      let_go += (let_go.empty() ? ", " : " ") + d.name + ".xbd";
+      kept += (kept.empty() ? ", " : " ") + d.name + ".xbd";
     }
   REXLOG_INFO("gta4-trainer: map {} unloaded ({}): {} pieces deleted, {} models let go{}", g.info->name, why, deleted,
-              g.known_count, let_go.empty() ? std::string() : let_go + " no longer kept");
+              let_go, kept.empty() ? std::string() : kept + " no longer kept");
   g = MapRun{};
 }
 
@@ -6687,6 +6737,95 @@ MapLinks MapCountLinks(uint8_t* base) {
   return out;
 }
 
+// Which pieces are wanted now: every one of a set placed at once; of a set
+// streamed by distance (MapInfo::stream), those within that of the focus (a
+// standing piece kept to a sixth farther, so the edge does not flicker).
+// Their models are asked of the game, and the models of none let go, so the
+// set takes only as much of the game's streaming memory as the player sees
+// (v1.7.38: Wake Island's 1,600 pieces at once filled it - 260 of 268 MB -
+// and the game stopped streaming the world). Returns how many models newly
+// wanted were asked for.
+int MapWant(PPCContext& ctx, uint8_t* base) {
+  auto& g = g_map;
+  if (!g.info)
+    return 0;
+  const float radius = g.info->stream;
+  const float in2 = radius * radius, out2 = radius * radius * (7.0f / 6.0f) * (7.0f / 6.0f);
+  for (auto& mdl : g.models)
+    mdl.wanted = 0;
+  g.wanted_pieces = 0;
+  for (auto& p : g.pieces) {
+    if (radius > 0) {
+      const float dx = p.pos[0] - g.focus[0], dy = p.pos[1] - g.focus[1];
+      const float d2 = dx * dx + dy * dy;
+      p.wanted = d2 < (p.object ? out2 : in2);
+    } else {
+      p.wanted = true;
+    }
+    if (p.wanted) {
+      ++g.wanted_pieces;
+      if (p.model >= 0)
+        ++g.models[size_t(p.model)].wanted;
+    }
+  }
+  int asked = 0, let_go = 0;
+  g.known_count = 0;
+  for (auto& mdl : g.models) {
+    if (!mdl.known)
+      continue;
+    if (mdl.wanted > 0) {
+      ++g.known_count;
+      if (!mdl.requested) {
+        Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
+        mdl.requested = true;
+        ++asked;
+      }
+    } else if (mdl.requested && mdl.standing == 0) {
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {mdl.hash});
+      mdl.requested = false;
+      mdl.loaded = false;
+      ++let_go;
+    }
+  }
+  if (radius > 0 && (asked || let_go) && g.stream_rounds < 40) {
+    ++g.stream_rounds;
+    REXLOG_INFO("gta4-trainer: map {}: {} pieces wanted within {:.0f} m of ({:.0f}, {:.0f}); {} models asked for, {} "
+                "let go ({} models wanted)",
+                g.info->name, g.wanted_pieces, radius, g.focus[0], g.focus[1], asked, let_go, g.known_count);
+  }
+  return asked;
+}
+
+// A wanted piece made (its model in): the object, frozen where the mod put it.
+bool MapMakePiece(PPCContext& ctx, uint8_t* base, MapStanding& p, bool exact) {
+  auto& g = g_map;
+  const auto obj = Invoke(ctx, base, exact ? "CREATE_OBJECT_NO_OFFSET" : "CREATE_OBJECT",
+                          {p.hash, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2]), 0, 1}, 4);
+  if (!obj || !obj->words[0])
+    return false;
+  p.object = obj->words[0];
+  Invoke(ctx, base, "SET_OBJECT_QUATERNION", {p.object, Bits(p.q[0]), Bits(p.q[1]), Bits(p.q[2]), Bits(p.q[3])});
+  if (!exact)
+    Invoke(ctx, base, "SET_OBJECT_COORDINATES", {p.object, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2])});
+  Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {p.object, 1});
+  Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {p.object, 1});
+  Invoke(ctx, base, "SET_OBJECT_COLLISION", {p.object, p.collision ? 1u : 0u});
+  if (p.model >= 0)
+    ++g.models[size_t(p.model)].standing;
+  ++g.made_pieces;
+  return true;
+}
+void MapDropPiece(PPCContext& ctx, uint8_t* base, MapStanding& p) {
+  auto& g = g_map;
+  if (!p.object)
+    return;
+  DeleteObject(ctx, base, p.object);
+  p.object = 0;
+  if (p.model >= 0)
+    --g.models[size_t(p.model)].standing;
+  --g.made_pieces;
+}
+
 // The place's models requested (another place deleted first). Models the
 // game does not have (not in its images) are left out, their pieces with them.
 bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info) {
@@ -6721,21 +6860,29 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
     s.model = int(it - g.models.begin());
     g.pieces.push_back(s);
   }
+  // (the pieces with collision first: the ground before what stands on it,
+  // should a pool run short)
+  std::stable_partition(g.pieces.begin(), g.pieces.end(), [](const MapStanding& p) { return p.collision; });
   std::string unknown;
   std::unordered_map<uint32_t, size_t> by_info;
+  int known = 0;
   for (size_t k = 0; k < g.models.size(); ++k) {
     auto& mdl = g.models[k];
-    const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {mdl.hash});
-    mdl.known = !known || known->r0();
+    const auto is_known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {mdl.hash});
+    mdl.known = !is_known || is_known->r0();
     if (!mdl.known) {
       unknown += (unknown.empty() ? "" : ", ") + mdl.name;
       continue;
     }
-    ++g.known_count;
-    Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
+    ++known;
     if (const uint32_t mi = FindModelInfo(base, mdl.hash))
       by_info[mi] = k;
   }
+  // (the pieces wanted about the arrival first; the player once there)
+  const auto focus = MapPoint(info, info.arrive[0], info.arrive[1], info.arrive[2]);
+  for (int a = 0; a < 3; ++a)
+    g.focus[a] = focus[size_t(a)];
+  MapWant(ctx, base);
   int used = 0;
   ForEachModelInfo(base, [&](uint32_t i, uint32_t mi) {
     ++used;
@@ -6746,9 +6893,14 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
   REXLOG_INFO("gta4-trainer: map {}: the model table holds {} of {}", info.name, used, kModelInfoCount);
   const size_t stock = size_t(std::count_if(g.pieces.begin(), g.pieces.end(), [](const MapStanding& s) { return s.stock; }));
   REXLOG_INFO("gta4-trainer: map {} requested: {} pieces ({} of the game's own models), {} models ({} not in the "
-              "game's images{}{}), the sea there at {:.2f} (the mod's {:.2f})",
-              info.name, g.pieces.size(), stock, g.models.size(), g.models.size() - size_t(g.known_count),
-              unknown.empty() ? "" : ": ", unknown, info.sea_dst, info.sea_src);
+              "game's images{}{}), the sea there at {:.2f} (the mod's {:.2f}); {}",
+              info.name, g.pieces.size(), stock, g.models.size(), g.models.size() - size_t(known),
+              unknown.empty() ? "" : ": ", unknown, info.sea_dst, info.sea_src,
+              info.stream > 0 ? fmt::format("streamed by distance: {} pieces of {} models wanted within {:.0f} m of the "
+                                            "arrival first",
+                                            g.wanted_pieces, g.known_count, info.stream)
+                              : std::string("placed at once"));
+  REXLOG_INFO("gta4-trainer: map {}: the game's pools before it: {}", info.name, DescribePools(base));
   MapRequestBounds(ctx, base);
   if (g.AnyDictionary()) {
     const auto links = MapCountLinks(base);
@@ -6763,6 +6915,7 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
 // Loading: how many models are in, the requests renewed while some are not,
 // a report of what it waits for every few seconds.
 void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game);
+void MapStreamTick(PPCContext& ctx, uint8_t* base, const GameContext& game, uint64_t now);
 void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
   auto& g = g_map;
   if (!g.info || now < g.next_check)
@@ -6774,11 +6927,15 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
   }
   if (g.check_at && now >= g.check_at)
     MapCheck(ctx, base, game);
+  if (g.phase == 2) {
+    MapStreamTick(ctx, base, game, now);
+    return;
+  }
   if (g.phase != 1 || g.loaded)
     return;
   int in = 0;
   for (auto& mdl : g.models) {
-    if (!mdl.known)
+    if (!mdl.known || mdl.wanted == 0)
       continue;
     const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {mdl.hash});
     mdl.loaded = loaded && loaded->r0();
@@ -6858,27 +7015,18 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
   if (g.phase == 2)
     return true;
   const bool exact = NativeKnown("CREATE_OBJECT_NO_OFFSET");
-  int made = 0, failed = 0, left_out = 0;
+  int made = 0, failed = 0, left_out = 0, waiting = 0;
   for (auto& p : g.pieces) {
-    if (p.object)
+    if (p.object || !p.wanted)
       continue;
     if (p.model < 0 || !g.models[size_t(p.model)].known) {
       ++left_out;
       continue;
     }
-    const auto obj = Invoke(ctx, base, exact ? "CREATE_OBJECT_NO_OFFSET" : "CREATE_OBJECT",
-                            {p.hash, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2]), 0, 1}, 4);
-    if (!obj || !obj->words[0]) {
+    if (!MapMakePiece(ctx, base, p, exact)) {
       ++failed;
       continue;
     }
-    p.object = obj->words[0];
-    Invoke(ctx, base, "SET_OBJECT_QUATERNION", {p.object, Bits(p.q[0]), Bits(p.q[1]), Bits(p.q[2]), Bits(p.q[3])});
-    if (!exact)
-      Invoke(ctx, base, "SET_OBJECT_COORDINATES", {p.object, Bits(p.pos[0]), Bits(p.pos[1]), Bits(p.pos[2])});
-    Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {p.object, 1});
-    Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {p.object, 1});
-    Invoke(ctx, base, "SET_OBJECT_COLLISION", {p.object, p.collision ? 1u : 0u});
     if (made < 3) {  // (where the game put the first few, for the log)
       if (const auto c = Invoke(ctx, base, "GET_OBJECT_COORDINATES", {p.object, 0, 0, 0}, 1, 0, 3))
         REXLOG_INFO("gta4-trainer: map piece {:08X} at ({:.2f}, {:.2f}, {:.2f}), asked ({:.2f}, {:.2f}, {:.2f})",
@@ -6886,15 +7034,69 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
     }
     ++made;
   }
+  for (const auto& p : g.pieces)
+    waiting += !p.wanted;
   const auto links = MapCountLinks(base);
-  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not, {} left out (models the game hasn't) ({}); {} of "
-              "{} models with collision linked to their bounds ({}; {} with their bounds in)",
-              g.info->name, made, failed, left_out, exact ? "exactly" : "CREATE_OBJECT, then moved", links.linked,
-              links.models, g.DictionaryNames(), links.archetypes);
+  REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not, {} left out (models the game hasn't), {} farther "
+              "off for later ({}); {} of {} models with collision linked to their bounds ({}; {} with their bounds in)",
+              g.info->name, made, failed, left_out, waiting, exact ? "exactly" : "CREATE_OBJECT, then moved",
+              links.linked, links.models, g.DictionaryNames(), links.archetypes);
+  REXLOG_INFO("gta4-trainer: map {}: the game's pools with it placed: {}", g.info->name, DescribePools(base));
   if (failed)
     return false;
   g.phase = 2;
   return true;
+}
+
+// Standing, streamed by distance: twice a second the pieces are wanted about
+// the player; those newly wanted are made as their models come in, those
+// gone far are deleted and their models let go (v1.7.38).
+void MapStreamTick(PPCContext& ctx, uint8_t* base, const GameContext& game, uint64_t now) {
+  auto& g = g_map;
+  if (!g.info || g.phase != 2 || g.info->stream <= 0 || now < g.next_stream)
+    return;
+  g.next_stream = now + 500;
+  for (int a = 0; a < 3; ++a)
+    g.focus[a] = game.position[a];
+  MapWant(ctx, base);
+  const bool exact = NativeKnown("CREATE_OBJECT_NO_OFFSET");
+  int made = 0, dropped = 0, waiting = 0;
+  for (auto& p : g.pieces) {
+    if (!p.wanted) {
+      if (p.object) {
+        MapDropPiece(ctx, base, p);
+        ++dropped;
+      }
+      continue;
+    }
+    if (p.object || p.model < 0)
+      continue;
+    auto& mdl = g.models[size_t(p.model)];
+    if (!mdl.known)
+      continue;
+    if (!mdl.loaded) {
+      const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {mdl.hash});
+      mdl.loaded = loaded && loaded->r0();
+    }
+    if (!mdl.loaded) {
+      ++waiting;
+      if (now >= g.next_renew)
+        Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
+      continue;
+    }
+    if (MapMakePiece(ctx, base, p, exact))
+      ++made;
+    else
+      mdl.loaded = false;  // (the game may have let the model go: asked for again next time)
+  }
+  if (now >= g.next_renew)
+    g.next_renew = now + 6000;
+  if ((made || dropped) && g.stream_rounds < 40) {
+    ++g.stream_rounds;
+    REXLOG_INFO("gta4-trainer: map {}: streaming: {} pieces made, {} deleted, {} waiting for their models; {} of {} "
+                "standing; pools: {}",
+                g.info->name, made, dropped, waiting, g.made_pieces, g.pieces.size(), DescribePools(base));
+  }
 }
 
 // The place standing now, or none.
@@ -6954,6 +7156,7 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
     REXLOG_INFO("gta4-trainer:   collision: {}; {} of {} models linked, {} with their bounds", DescribeDictionaries(base),
                 links.linked, links.models, links.archetypes);
   }
+  REXLOG_INFO("gta4-trainer:   the game's pools: {}", DescribePools(base));
   // The model under the arrival (one with collision) and one without, as the
   // game holds them: its model info's first 24 words and the streaming
   // entries it needs (its collision dictionary among them or not), beside a
