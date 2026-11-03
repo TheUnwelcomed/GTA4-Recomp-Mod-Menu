@@ -238,8 +238,11 @@ def read_geometry(r, ptr):
     icount = r.u32(ib_ptr + 8)
     ind_ptr = r.u64(ib_ptr + 0x10) or r.u64(ib_ptr + 0x20)
     indices = np.frombuffer(r.bytes(ind_ptr, 2 * icount), dtype='<u2').copy()
+    # a skinned geometry's bone ids: the vertices' blend indices index this list of skeleton bones
+    bone_ids_ptr, bone_ids_count = r.u64(ptr + 0x68), r.u16(ptr + 0x72)
+    bone_ids = [r.u16(bone_ids_ptr + 2 * i) for i in range(bone_ids_count)] if bone_ids_ptr and bone_ids_count < 256 else []
     return dict(vertex_count=vcount, stride=stride, decl_stride=decl_stride, decl_flags=flags, decl_types=types,
-                components=comps, indices=indices)
+                components=comps, indices=indices, bone_ids=bone_ids)
 
 
 def read_model(r, ptr):
@@ -285,6 +288,57 @@ def read_drawable(r, ptr=0x50000000, with_name=True):
 
 def read_ydr(path):
     return read_drawable(Resource.open(path))
+
+
+def read_ydd(path):
+    """A drawable dictionary: {name hash: drawable}."""
+    r = Resource.open(path)
+    hashes_ptr, count, dr_ptr = r.u64(0x50000020), r.u16(0x50000028), r.u64(0x50000030)
+    out = {}
+    for i in range(count):
+        out[r.u32(hashes_ptr + 4 * i)] = read_drawable(r, r.u64(dr_ptr + 8 * i), with_name=False)
+    return out
+
+
+def read_skeleton(r, drawable_ptr):
+    """The drawable's skeleton (a .yft's: bones with their names, parents and
+    local transforms; model-space positions accumulated), or None."""
+    sk = r.u64(drawable_ptr + 0x18)
+    if not sk:
+        return None
+    bones_ptr, parents_ptr, n = r.u64(sk + 0x20), r.u64(sk + 0x38), r.u16(sk + 0x5E)
+    bones = []
+    for i in range(n):
+        b = bones_ptr + 0x50 * i
+        rot = r.f32s(b, 4)
+        tr = r.f32s(b + 0x10, 3)
+        o = b & 0x0FFFFFFF
+        sib, parent = struct.unpack_from('<hh', r.sys, o + 0x30)
+        flags, index, tag = struct.unpack_from('<HHH', r.sys, o + 0x40)
+        bones.append(dict(name=r.cstr(r.u64(b + 0x38)) or '', parent=parent, rot=rot, trans=tr, tag=tag, flags=flags))
+    # model-space (bind) transforms
+    def qmat(q):
+        x, y, z, w = q
+        return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    for b in bones:
+        if b['parent'] < 0:
+            b['pos'] = np.array(b['trans']); b['mat'] = qmat(b['rot'])
+        else:
+            p = bones[b['parent']]
+            b['pos'] = p['pos'] + p['mat'] @ np.array(b['trans'])
+            b['mat'] = p['mat'] @ qmat(b['rot'])
+    return bones
+
+
+def read_yft(path):
+    """A fragment's drawable (with its skeleton) and name."""
+    r = Resource.open(path)
+    dr_ptr = r.u64(0x50000030)
+    d = read_drawable(r, dr_ptr, with_name=False)
+    d['skeleton'] = read_skeleton(r, dr_ptr)
+    return d
 
 
 def read_ytd(path):

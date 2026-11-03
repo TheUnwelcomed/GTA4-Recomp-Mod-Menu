@@ -244,6 +244,8 @@ std::array g_natives = {
     NativeEntry{"TASK_GO_STRAIGHT_TO_COORD"}, NativeEntry{"TASK_STAND_STILL"}, NativeEntry{"DOES_CHAR_EXIST"},
     NativeEntry{"GET_CHAR_COORDINATES"}, NativeEntry{"DOES_VEHICLE_EXIST"}, NativeEntry{"FORCE_WEATHER"},
     NativeEntry{"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS"}, NativeEntry{"TASK_WANDER_STANDARD"},
+    // v1.7.39: the creatures (the sharks' bite).
+    NativeEntry{"IS_CHAR_IN_WATER"}, NativeEntry{"GET_CHAR_HEALTH"},
 };
 std::mutex g_native_mutex;
 
@@ -326,6 +328,7 @@ constexpr HandleUse kHandleUses[] = {
     {"SET_CHAR_RANDOM_COMPONENT_VARIATION", -1, 0}, {"TASK_GO_STRAIGHT_TO_COORD", -1, 0},
     {"TASK_STAND_STILL", -1, 0}, {"DOES_CHAR_EXIST", -1, 0}, {"GET_CHAR_COORDINATES", -1, 0},
     {"DOES_VEHICLE_EXIST", 0}, {"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS", -1, 0}, {"TASK_WANDER_STANDARD", -1, 0},
+    {"IS_CHAR_IN_WATER", -1, 0}, {"GET_CHAR_HEALTH", -1, 0},
 };
 
 // Whether the call must not go ahead: a handle in it the game no longer has.
@@ -7249,9 +7252,29 @@ struct LifeGround {
     return float(v) / 100.0f;
   }
 };
+// A creature about (v1.7.39): its parts as frozen objects the trainer moves
+// every other frame - the body where the creature is, each part turned
+// about its pivot by its swing - and its mind: a swimmer cruising the water
+// and hunting a swimmer; a walker wandering the land; an amphibian lying
+// on a shore, then moving to another.
+struct LifeCreature {
+  int kind = -1;  // in MapInfo::creatures
+  std::vector<uint32_t> objects;  // one per part, the body first
+  float pos[3]{}, heading = 0, speed = 0, roll = 0, clock = 0;
+  float target[2]{};
+  bool has_target = false, hunting = false, in_water = true;
+  uint64_t born = 0, next_think = 0, rest_until = 0, bite_at = 0, next_bite = 0;
+  int bites = 0;
+};
 struct MapLife {
   const gta4::addons::MapInfo* info = nullptr;
   std::vector<LifeVehicle> vehicles;
+  std::vector<LifeCreature> creatures;
+  std::vector<uint32_t> creature_models;  // every part model, asked for while the place stands
+  bool creature_models_asked = false;
+  uint64_t next_creature = 0, creature_frame = 0;
+  int made_creatures = 0, creature_logs = 0;
+  bool creature_frame_odd = false;
   std::vector<uint32_t> ped_models;
   std::vector<std::string> ped_names;
   std::vector<LifePed> peds;
@@ -7372,10 +7395,20 @@ void LifeStart(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info
     L.ped_models.push_back(hash);
     L.ped_names.push_back(n);
   }
+  for (const auto& k : info.creatures)
+    for (const auto& part : k.parts)
+      L.creature_models.push_back(ModelHash(part.model));
   LifeLoadGround(info);
-  REXLOG_INFO("gta4-trainer: life of {}: {} vehicles parked, {} ped models ({} about), weather {}, ambience {}",
+  REXLOG_INFO("gta4-trainer: life of {}: {} vehicles parked, {} ped models ({} about), weather {}, ambience {}, {} "
+              "kinds of creature ({} part models)",
               info.name, L.vehicles.size(), L.ped_models.size(), info.wander, info.weather,
-              info.ambience.empty() ? "none" : info.ambience);
+              info.ambience.empty() ? "none" : info.ambience, info.creatures.size(), L.creature_models.size());
+}
+
+void LifeDeleteCreature(PPCContext& ctx, uint8_t* base, LifeCreature& c) {
+  for (auto& o : c.objects)
+    DeleteObject(ctx, base, o);
+  c.objects.clear();
 }
 
 void LifeStop(PPCContext& ctx, uint8_t* base, const char* why) {
@@ -7406,11 +7439,19 @@ void LifeStop(PPCContext& ctx, uint8_t* base, const char* why) {
   L.peds.clear();
   for (const uint32_t h : L.ped_models)
     Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {h});
+  int creatures = 0;
+  for (auto& c : L.creatures) {
+    LifeDeleteCreature(ctx, base, c);
+    ++creatures;
+  }
+  L.creatures.clear();
+  for (const uint32_t h : L.creature_models)
+    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {h});
   if (L.weather_forced)
     Invoke(ctx, base, "RELEASE_WEATHER", {});
   LifeAmbience(false);
-  REXLOG_INFO("gta4-trainer: life of {} ended ({}): {} vehicles and {} people removed", L.info->name, why, cars,
-              peds);
+  REXLOG_INFO("gta4-trainer: life of {} ended ({}): {} vehicles, {} people and {} creatures removed", L.info->name,
+              why, cars, peds, creatures);
   const auto* info = L.info;
   L = MapLife{};
   (void)info;
@@ -7435,6 +7476,339 @@ void LifeTask(PPCContext& ctx, uint8_t* base, LifePed& p, uint64_t now) {
     return;
   }
   p.next_task = now + 4000;
+}
+
+
+// ---- the creatures (v1.7.39) ----
+constexpr float kCreatureNear = 60.0f, kCreatureSpread = 120.0f, kCreatureFar = 360.0f;
+constexpr float kSharkHunt = 90.0f, kSharkBite = 4.5f;
+
+// A point the creature could live at: water (no ground of the place) for a
+// swimmer, land with ground for a walker, a shore (shallow water or a low
+// beach) for an amphibian. Returns the height the creature's origin sits at.
+std::optional<float> CreatureSpot(const gta4::addons::CreatureKind& k, float x, float y, bool& water) {
+  auto& L = g_life;
+  const auto& info = *L.info;
+  const std::array<float, 3> p{x, y, info.sea_dst};
+  if (!OnMap(info, p, 40.0f))
+    return std::nullopt;
+  const auto ground = LifeGroundAt(x, y);
+  const bool is_water = !ground || *ground < info.sea_dst - 0.3f;
+  if (k.kind == "swimmer") {
+    // deep enough for it (the place's collision reaches 3 m under the sea; deeper water has none)
+    if (!is_water || (ground && *ground > info.sea_dst - 1.2f - k.height * 0.45f))
+      return std::nullopt;
+    water = true;
+    return info.sea_dst - 1.15f;  // (the fin above the water)
+  }
+  if (k.kind == "walker") {
+    if (!ground || *ground < info.sea_dst + 0.3f)
+      return std::nullopt;
+    water = false;
+    return *ground - k.bottom;
+  }
+  // an amphibian: the shallows, or a beach within a metre and a half of the sea
+  if (is_water) {
+    water = true;
+    return std::max(info.sea_dst - 0.25f, ground ? *ground - k.bottom : -1000.0f);
+  }
+  if (*ground > info.sea_dst + 1.5f)
+    return std::nullopt;
+  water = false;
+  return *ground - k.bottom;
+}
+
+// A new creature made: its parts as frozen objects (no collision: the bite
+// is the trainer's own) at its spot.
+bool CreatureMake(PPCContext& ctx, uint8_t* base, int kind, float x, float y, float z, float heading, bool water) {
+  auto& L = g_life;
+  const auto& k = L.info->creatures[size_t(kind)];
+  LifeCreature c;
+  c.kind = kind;
+  c.pos[0] = x;
+  c.pos[1] = y;
+  c.pos[2] = z;
+  c.heading = heading;
+  c.in_water = water;
+  c.born = NowMs();
+  c.clock = L.Uniform() * 6.0f;
+  for (const auto& part : k.parts) {
+    const uint32_t hash = ModelHash(part.model);
+    const auto obj = Invoke(ctx, base, "CREATE_OBJECT_NO_OFFSET", {hash, Bits(x), Bits(y), Bits(z), 0, 1}, 4);
+    if (!obj || !obj->words[0]) {
+      LifeDeleteCreature(ctx, base, c);
+      return false;
+    }
+    c.objects.push_back(obj->words[0]);
+    Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {obj->words[0], 1});
+    Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {obj->words[0], 1});
+    Invoke(ctx, base, "SET_OBJECT_COLLISION", {obj->words[0], 0});
+  }
+  L.creatures.push_back(c);
+  ++L.made_creatures;
+  return true;
+}
+
+// Where the parts stand for the creature's pose: the body turned by its
+// heading (and a little roll), each part turned about its pivot by its
+// swing (the jaw by the bite).
+void CreaturePose(PPCContext& ctx, uint8_t* base, LifeCreature& c, uint64_t now) {
+  const auto& k = g_life.info->creatures[size_t(c.kind)];
+  const Quat body = QNormalize(QMul(QAxis(0, 0, 1, c.heading), QAxis(0, 1, 0, c.roll)));
+  const float bx = body.x, by = body.y, bz = body.z, bw = body.w;
+  auto rotate = [&](const Quat& q, const float v[3], float out[3]) {
+    // v' = q v q*
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    const float r00 = 1 - 2 * (y * y + z * z), r01 = 2 * (x * y - z * w), r02 = 2 * (x * z + y * w);
+    const float r10 = 2 * (x * y + z * w), r11 = 1 - 2 * (x * x + z * z), r12 = 2 * (y * z - x * w);
+    const float r20 = 2 * (x * z - y * w), r21 = 2 * (y * z + x * w), r22 = 1 - 2 * (x * x + y * y);
+    out[0] = r00 * v[0] + r01 * v[1] + r02 * v[2];
+    out[1] = r10 * v[0] + r11 * v[1] + r12 * v[2];
+    out[2] = r20 * v[0] + r21 * v[1] + r22 * v[2];
+  };
+  (void)bx; (void)by; (void)bz; (void)bw;
+  for (size_t i = 0; i < k.parts.size() && i < c.objects.size(); ++i) {
+    const auto& part = k.parts[i];
+    if (!c.objects[i])
+      continue;
+    float angle = 0.0f;
+    if (part.name == "jaw") {
+      // open for a third of a second at the bite
+      const uint64_t since = c.bite_at ? now - c.bite_at : 1000;
+      angle = since < 350 ? 0.45f * std::sin(float(since) / 350.0f * 3.14159265f) : 0.0f;
+    } else if (part.amp != 0.0f) {
+      const float rate = part.hz * (c.speed > 0.1f ? std::clamp(c.speed / 2.5f, 0.6f, 2.2f) : 0.35f);
+      angle = part.amp * 3.14159265f / 180.0f * std::sin(6.2831853f * rate * c.clock + part.phase * 3.14159265f / 180.0f);
+    }
+    Quat q = body;
+    float at[3] = {c.pos[0], c.pos[1], c.pos[2]};
+    if (i > 0 && angle != 0.0f) {
+      const Quat turn = QAxis(part.axis[0], part.axis[1], part.axis[2], angle);
+      q = QNormalize(QMul(body, turn));
+      // the pivot stays put: the object moves by p - R_part p, in the body's frame
+      float rp[3], shift[3], world[3];
+      rotate(turn, part.pivot, rp);
+      shift[0] = part.pivot[0] - rp[0];
+      shift[1] = part.pivot[1] - rp[1];
+      shift[2] = part.pivot[2] - rp[2];
+      rotate(body, shift, world);
+      at[0] += world[0];
+      at[1] += world[1];
+      at[2] += world[2];
+    }
+    Invoke(ctx, base, "SET_OBJECT_COORDINATES", {c.objects[i], Bits(at[0]), Bits(at[1]), Bits(at[2])});
+    Invoke(ctx, base, "SET_OBJECT_QUATERNION", {c.objects[i], Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
+  }
+}
+
+// A creature's mind, a few times a second: where to go, how fast.
+void CreatureThink(PPCContext& ctx, uint8_t* base, const GameContext& game, LifeCreature& c, uint64_t now) {
+  auto& L = g_life;
+  const auto& info = *L.info;
+  const auto& k = info.creatures[size_t(c.kind)];
+  c.next_think = now + 400;
+  const float dxp = game.position[0] - c.pos[0], dyp = game.position[1] - c.pos[1];
+  const float player_d = std::sqrt(dxp * dxp + dyp * dyp);
+  // a shark hunts a swimmer
+  if (k.kind == "swimmer") {
+    bool swimmer = false;
+    if (player_d < kSharkHunt && game.ped && NativeKnown("IS_CHAR_IN_WATER")) {
+      const auto w = Invoke(ctx, base, "IS_CHAR_IN_WATER", {game.ped});
+      swimmer = w && w->r0();
+    }
+    if (swimmer && c.bites < 4) {
+      c.hunting = true;
+      c.target[0] = game.position[0];
+      c.target[1] = game.position[1];
+      c.has_target = true;
+      if (player_d < kSharkBite && now >= c.next_bite) {
+        c.bite_at = now;
+        c.next_bite = now + 2800;
+        ++c.bites;
+        if (NativeKnown("GET_CHAR_HEALTH")) {
+          if (const auto h = Invoke(ctx, base, "GET_CHAR_HEALTH", {game.ped, 0}, 1)) {
+            const int health = int(h->r0());
+            const int left = std::max(health - 35, 1);  // (never the last point: the game would count it a death by nothing)
+            Invoke(ctx, base, "SET_CHAR_HEALTH", {game.ped, uint32_t(left)});
+            if (L.creature_logs < 12) {
+              ++L.creature_logs;
+              REXLOG_INFO("gta4-trainer: life: the {} bit the player ({} -> {})", k.name, health, left);
+            }
+          }
+        }
+      }
+      return;
+    }
+    if (c.hunting) {  // (lost it, or had its fill: off it goes)
+      c.hunting = false;
+      c.has_target = false;
+      if (c.bites >= 4)
+        c.rest_until = now + 20000;
+    }
+    if (c.rest_until && now > c.rest_until) {
+      c.rest_until = 0;
+      c.bites = 0;
+    }
+  }
+  // an amphibian lies still between moves
+  if (k.kind == "amphibian" && now < c.rest_until) {
+    c.speed = 0.0f;
+    return;
+  }
+  // a new target when none, or reached
+  const float dx = c.target[0] - c.pos[0], dy = c.target[1] - c.pos[1];
+  if (!c.has_target || dx * dx + dy * dy < 36.0f) {
+    if (k.kind == "amphibian" && c.has_target && L.Uniform() < 0.7f) {
+      c.rest_until = now + 12000 + uint64_t(L.Uniform() * 30000);
+      c.has_target = false;
+      c.speed = 0.0f;
+      return;
+    }
+    for (int tries = 0; tries < 8; ++tries) {
+      const float a = c.heading + (L.Uniform() - 0.5f) * 2.6f;  // (mostly onward)
+      const float d = 30.0f + L.Uniform() * 70.0f;
+      const float x = c.pos[0] - std::sin(a) * d, y = c.pos[1] + std::cos(a) * d;
+      bool water = false;
+      if (!CreatureSpot(k, x, y, water))
+        continue;
+      c.target[0] = x;
+      c.target[1] = y;
+      c.has_target = true;
+      break;
+    }
+    if (!c.has_target) {
+      c.speed = 0.0f;
+      return;
+    }
+  }
+}
+
+// Every other frame: the creatures moved and posed; new ones made and far
+// ones let go a few times a second (LifeTick).
+void LifeCreatureFrame(PPCContext& ctx, uint8_t* base, const GameContext& game, uint64_t now) {
+  auto& L = g_life;
+  if (!L.info || L.creatures.empty())
+    return;
+  L.creature_frame_odd = !L.creature_frame_odd;
+  if (L.creature_frame_odd)
+    return;
+  const float dt = L.creature_frame ? std::clamp(float(now - L.creature_frame) / 1000.0f, 0.0f, 0.1f) : 0.0f;
+  L.creature_frame = now;
+  const auto& info = *L.info;
+  for (auto& c : L.creatures) {
+    const auto& k = info.creatures[size_t(c.kind)];
+    if (now >= c.next_think)
+      CreatureThink(ctx, base, game, c, now);
+    c.clock += dt;
+    // the speed it wants, and the turn towards its target
+    float want = 0.0f;
+    if (c.has_target) {
+      const float dx = c.target[0] - c.pos[0], dy = c.target[1] - c.pos[1];
+      const float to = std::atan2(-dx, dy);  // (heading: 0 north, counter-clockwise)
+      float diff = to - c.heading;
+      while (diff > 3.14159265f)
+        diff -= 6.2831853f;
+      while (diff < -3.14159265f)
+        diff += 6.2831853f;
+      const float turn_rate = k.kind == "swimmer" ? (c.hunting ? 1.4f : 0.7f) : k.kind == "walker" ? 0.5f : 0.8f;
+      const float step = std::clamp(diff, -turn_rate * dt, turn_rate * dt);
+      c.heading += step;
+      want = k.kind == "swimmer" ? (c.hunting ? 7.0f : 3.2f) : k.kind == "walker" ? 1.6f : (c.in_water ? 1.2f : 0.7f);
+      if (std::fabs(diff) > 1.2f)
+        want *= 0.4f;
+      // a swimmer banks into its turns
+      const float roll_want = k.kind == "swimmer" ? std::clamp(-diff * 0.5f, -0.35f, 0.35f) : 0.0f;
+      c.roll += (roll_want - c.roll) * std::min(1.0f, dt * 2.0f);
+    } else {
+      c.roll += (0.0f - c.roll) * std::min(1.0f, dt * 2.0f);
+    }
+    c.speed += (want - c.speed) * std::min(1.0f, dt * 1.5f);
+    if (c.speed > 0.01f) {
+      const float nx = c.pos[0] - std::sin(c.heading) * c.speed * dt, ny = c.pos[1] + std::cos(c.heading) * c.speed * dt;
+      bool water = c.in_water;
+      if (const auto z = CreatureSpot(k, nx, ny, water)) {
+        c.pos[0] = nx;
+        c.pos[1] = ny;
+        c.in_water = water;
+        // the height follows the ground (or the water) smoothly; a swimmer bobs
+        float zt = *z;
+        if (k.kind == "swimmer")
+          zt += 0.18f * std::sin(c.clock * 0.9f);
+        c.pos[2] += (zt - c.pos[2]) * std::min(1.0f, dt * 3.0f);
+      } else {
+        c.has_target = false;  // (the way ahead is not its element: another target)
+        c.speed *= 0.5f;
+      }
+    } else if (k.kind == "swimmer") {
+      c.pos[2] += ((info.sea_dst - 1.15f + 0.18f * std::sin(c.clock * 0.9f)) - c.pos[2]) * std::min(1.0f, dt * 3.0f);
+    }
+    CreaturePose(ctx, base, c, now);
+  }
+}
+
+// A few times a second: creatures gone far are let go; new ones made while
+// fewer than wanted are about, in their element near the player.
+void LifeCreatureTick(PPCContext& ctx, uint8_t* base, const GameContext& game, uint64_t now, bool on) {
+  auto& L = g_life;
+  const auto& info = *L.info;
+  if (info.creatures.empty())
+    return;
+  if (!L.creature_models_asked) {
+    for (const uint32_t h : L.creature_models)
+      Invoke(ctx, base, "REQUEST_MODEL", {h});
+    L.creature_models_asked = true;
+  }
+  for (auto it = L.creatures.begin(); it != L.creatures.end();) {
+    const float dx = it->pos[0] - game.position[0], dy = it->pos[1] - game.position[1];
+    bool keep = dx * dx + dy * dy < kCreatureFar * kCreatureFar;
+    if (keep && !it->objects.empty()) {
+      const auto exists = Invoke(ctx, base, "DOES_OBJECT_EXIST", {it->objects[0]});
+      keep = exists && exists->r0();
+    }
+    if (!keep) {
+      LifeDeleteCreature(ctx, base, *it);
+      it = L.creatures.erase(it);
+      continue;
+    }
+    ++it;
+  }
+  if (!on || now < L.next_creature || !L.ground.loaded)
+    return;
+  L.next_creature = now + 1200;
+  for (size_t kind = 0; kind < info.creatures.size(); ++kind) {
+    const auto& k = info.creatures[kind];
+    const int about = int(std::count_if(L.creatures.begin(), L.creatures.end(),
+                                        [&](const LifeCreature& c) { return c.kind == int(kind); }));
+    if (about >= k.count || k.parts.empty())
+      continue;
+    bool loaded = true;
+    for (const auto& part : k.parts) {
+      const uint32_t hash = ModelHash(part.model);
+      const auto in = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+      if (!in || !in->r0()) {
+        Invoke(ctx, base, "REQUEST_MODEL", {hash});
+        loaded = false;
+      }
+    }
+    if (!loaded)
+      continue;
+    for (int tries = 0; tries < 10; ++tries) {
+      const float a = L.Uniform() * 6.2831853f, d = kCreatureNear + L.Uniform() * kCreatureSpread;
+      const float x = game.position[0] + std::cos(a) * d, y = game.position[1] + std::sin(a) * d;
+      bool water = false;
+      const auto z = CreatureSpot(k, x, y, water);
+      if (!z)
+        continue;
+      if (CreatureMake(ctx, base, int(kind), x, y, *z, L.Uniform() * 6.2831853f, water)) {
+        if (L.creature_logs < 12) {
+          ++L.creature_logs;
+          REXLOG_INFO("gta4-trainer: life: a {} ({}) at ({:.1f}, {:.1f}, {:.2f}), {:.0f} m from the player ({} about)",
+                      k.name, water ? "in the water" : "on land", x, y, *z, d, about + 1);
+        }
+      }
+      break;
+    }
+  }
 }
 
 void LifeTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
@@ -7605,6 +7979,7 @@ void LifeTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
       break;
     }
   }
+  LifeCreatureTick(ctx, base, game, now, on);
   (void)s;
 }
 
@@ -9900,11 +10275,12 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   static uint64_t s_next_seat_look = 0;
   const bool seat_due = (g_have_lazar || g_have_batmobile || g_have_f16 || g_have_batwing) && now >= s_next_seat_look;
   const bool map_due = g_map.info != nullptr && now >= g_map.next_check;
+  const bool creatures_due = !g_life.creatures.empty();
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due && !heat_due &&
       !jet_canopy_due && !batwing_canopy_due && !complete_due && !perf_due && !teleport_due && !any_engine_due &&
       s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
-      !tm_due && !seat_due && !map_due && g_addons_probed)
+      !tm_due && !seat_due && !map_due && !creatures_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -9993,6 +10369,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     MapTick(ctx, base, game, s, now);
     LifeTick(ctx, base, game, s, now);
   }
+  if (creatures_due)
+    LifeCreatureFrame(ctx, base, game, now);
   if (drive_due) {
     s_next_drive_look = now + 250;
     PlayerVehicle(ctx, base, game);

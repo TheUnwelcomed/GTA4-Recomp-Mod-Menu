@@ -186,6 +186,24 @@ network session.
 
 ## Changes
 
+- **v1.7.39**: the **creatures** - the user's GTA V animals (the JAWS great
+  white, StrideR's crocodile, indirivacua's elephant) as creatures the
+  trainer moves. A V animal is a skinned ped on a skeleton the game here
+  cannot drive, so `creature.py` cuts its mesh into rigid parts by the
+  bones that move each vertex (the body, the tail in two, the jaw, the
+  legs), writes each as a PC drawable in the creature's space with a pivot
+  and an axis (`creatures/*.json`: the parts, the swing of each), and the
+  set carries them (`creatures.txt`: the parts, how many about). The trainer
+  (`LifeCreature*`) makes each creature as frozen objects without
+  collision and moves them every other frame: the body where the creature
+  is, each part turned about its pivot by its swing (a tail, legs in a
+  diagonal walk, the jaw at a bite). Minds: a swimmer cruises the deep
+  water (the place's ground grid: no collision under the sea 3 m down) and
+  hunts a swimming player within 90 m, biting within reach (35 health a
+  bite, four bites then it tires); a walker wanders the land; an amphibian
+  lies on a shore or in the shallows, moving to another now and then.
+  Four sharks, three crocodiles and an elephant on the Keys, four sharks
+  on Wake. `v_reader.py` reads `.ydd` and `.yft` (the skeleton, bone ids).
 - **v1.7.38**: **streamed places**, the game's **real shaders**, **Benny's
   done up**, and the **Scarface mansion** on the Keys. Wake Island at once
   was too much (log 104: the game's streaming memory at 260 of 268 MB with

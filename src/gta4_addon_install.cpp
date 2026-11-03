@@ -1794,6 +1794,64 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
       else if (key == "stream")
         std::sscanf(value.c_str(), "%f", &info.stream);
     }
+    // (the place's creatures: optional, creatures.txt)
+    TextLines creatures;
+    if (LoadText(dir / "creatures.txt", creatures)) {
+      for (const auto& raw : creatures.lines) {
+        const std::string line = Trimmed(raw);
+        if (line.empty() || line[0] == '#')
+          continue;
+        std::vector<std::string> w;
+        std::string word;
+        for (const char c : line + " ") {
+          if (c == ' ' || c == '\t') {
+            if (!word.empty())
+              w.push_back(word);
+            word.clear();
+          } else {
+            word += c;
+          }
+        }
+        if (w.size() >= 2 && w[0] == "creature") {
+          CreatureKind k;
+          k.name = Lower(w[1]);
+          for (size_t i = 2; i + 1 < w.size(); i += 2) {
+            if (w[i] == "kind")
+              k.kind = Lower(w[i + 1]);
+            else if (w[i] == "length")
+              k.length = std::strtof(w[i + 1].c_str(), nullptr);
+            else if (w[i] == "height")
+              k.height = std::strtof(w[i + 1].c_str(), nullptr);
+            else if (w[i] == "bottom")
+              k.bottom = std::strtof(w[i + 1].c_str(), nullptr);
+            else if (w[i] == "count")
+              k.count = std::atoi(w[i + 1].c_str());
+          }
+          info.creatures.push_back(k);
+        } else if (w.size() >= 3 && w[0] == "part" && !info.creatures.empty()) {
+          CreaturePart part;
+          part.name = Lower(w[1]);
+          part.model = Lower(w[2]);
+          for (size_t i = 3; i < w.size(); ++i) {
+            if (w[i] == "pivot" && i + 3 < w.size()) {
+              for (int a = 0; a < 3; ++a)
+                part.pivot[a] = std::strtof(w[i + 1 + size_t(a)].c_str(), nullptr);
+              i += 3;
+            } else if (w[i] == "axis" && i + 3 < w.size()) {
+              for (int a = 0; a < 3; ++a)
+                part.axis[a] = std::strtof(w[i + 1 + size_t(a)].c_str(), nullptr);
+              i += 3;
+            } else if (w[i] == "swing" && i + 3 < w.size()) {
+              part.amp = std::strtof(w[i + 1].c_str(), nullptr);
+              part.hz = std::strtof(w[i + 2].c_str(), nullptr);
+              part.phase = std::strtof(w[i + 3].c_str(), nullptr);
+              i += 3;
+            }
+          }
+          info.creatures.back().parts.push_back(part);
+        }
+      }
+    }
     // (the vehicles the mod parks: optional)
     TextLines vehicles;
     if (LoadText(dir / "vehicles.txt", vehicles))
@@ -1907,6 +1965,9 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
                 info.stream > 0 ? fmt::format("streamed within {:.0f} m", info.stream) : std::string("all placed at once"),
                 info.vehicles.size(), info.peds.size(), info.wander, info.weather,
                 info.ambience.empty() ? "none" : info.ambience);
+    for (const auto& k : info.creatures)
+      REXLOG_INFO("gta4-addons: map set {}: creature {} ({}, {:.1f} m, {} about): {} parts", info.name, k.name, k.kind,
+                  k.length, k.count, k.parts.size());
     out.push_back(std::move(m));
   }
   return out;

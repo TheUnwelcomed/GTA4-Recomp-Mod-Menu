@@ -156,6 +156,15 @@ placed once is written turned as placed (its placement unrotated, so it can
 be tiled and its render mesh taken as collision). What the pack lacks (the
 game's own props it places) is listed and left out.
 
+Creatures (v1.7.39, `creature.py`, a set's `life.creatures`): a GTA V animal
+cut into rigid parts by the bones that drive each vertex (a triangle goes
+with most of its corners), each part a PC drawable in the creature's space
+with a pivot (the midpoint between the part and the body along the
+creature's length, or given) and an axis; `creature.txt` goes to the set,
+which lists the part models as its own and writes `creatures.txt` with how
+many of each kind. The trainer places the body and turns the parts about
+their pivots as the creature swims or walks.
+
 Names: the game registers an image's files by the first 24 characters of the
 name, the extension among them (`sub_825127C0`), so `mapset.py` keeps every
 model and texture dictionary name within 20 characters (a set can rename

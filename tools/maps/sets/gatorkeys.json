@@ -12,7 +12,8 @@
   "ide": [
     "vc_gtrky.ide",
     "custom.ide",
-    "vmodels.ide"
+    "vmodels.ide",
+    "creature.ide"
   ],
   "wpl": [
     "vc_gtrky.wpl",
@@ -65,6 +66,21 @@
       "vmans_ext",
       256,
       128
+    ],
+    [
+      "shark",
+      512,
+      256
+    ],
+    [
+      "croc",
+      512,
+      256
+    ],
+    [
+      "elephant",
+      512,
+      256
     ]
   ],
   "tex_notes": "tex_of: a dictionary's own cap (by its name): the mansion's interiors at 128 (291 textures would take 26 MiB at 256)",
@@ -152,7 +168,13 @@
     "wander": 9,
     "weather": 0,
     "ambience": "keys",
-    "notes": "v1.7.37: the mod's 36 car generators (sports cars at the hotel, a sailboat, a helicopter on the pad; Vice City's sparrow as the game's maverick); tourists, joggers and the resort's staff about the player; the weather EXTRASUNNY (0); the trainer's own surf, breeze, gulls and insects."
+    "notes": "v1.7.37: the mod's 36 car generators (sports cars at the hotel, a sailboat, a helicopter on the pad; Vice City's sparrow as the game's maverick); tourists, joggers and the resort's staff about the player; the weather EXTRASUNNY (0); the trainer's own surf, breeze, gulls and insects.",
+    "creatures": {
+      "shark": 4,
+      "croc": 3,
+      "elephant": 1
+    },
+    "creature_notes": "v1.7.39: GTA V animals as creatures the trainer moves (creature.py: the JAWS great white, StrideR's crocodile, indirivacua's elephant): how many of each kind are kept about the player"
   },
   "mansion_notes": "v1.7.38: the Scarface mansion (a GTA V MLO by its maker, imported by vimport.py: its 49 models, 577,000 triangles, as PC pieces with their render meshes for collision) stands on its own islet south-east of the eastern key, its causeway turned to land on the key's shore road at (-122, -1445); vimport.py ... --anchor=-3063.2,415.5,5.5:-122,-1445,6.7 --turn=180 --skip='scarface_custom_light*,custgr' --no-collision='scarwater,torturelight'. Its GTA V props (palms, furniture: 1,686 placements of 184 of the game's own archetypes) are not in the pack and are not here"
 }

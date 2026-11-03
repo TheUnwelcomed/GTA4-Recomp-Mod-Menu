@@ -15,7 +15,8 @@
     "wake_stream.ide",
     "us_carrier.ide",
     "ship_intro.ide",
-    "ext_veg.ide"
+    "ext_veg.ide",
+    "creature.ide"
   ],
   "wpl": [
     "wake_main.wpl",
@@ -110,7 +111,11 @@
     "wander": 7,
     "weather": 2,
     "ambience": "atoll",
-    "notes": "v1.7.37: the mod's car generators (its dinghies, jeeps, bikes, the carrier's helicopters); airmen, sailors and troopers about the player; the weather SUNNY_WINDY (2); the trainer's own wind, surf, a gull and a plane passing."
+    "notes": "v1.7.37: the mod's car generators (its dinghies, jeeps, bikes, the carrier's helicopters); airmen, sailors and troopers about the player; the weather SUNNY_WINDY (2); the trainer's own wind, surf, a gull and a plane passing.",
+    "creatures": {
+      "shark": 4
+    },
+    "creature_notes": "v1.7.39: GTA V animals as creatures the trainer moves (creature.py: the JAWS great white, StrideR's crocodile, indirivacua's elephant): how many of each kind are kept about the player"
   },
   "arrive": [
     -2790.0,
@@ -119,5 +124,12 @@
     337.5,
     450
   ],
-  "arrive_notes": "the runway's south-east end, the whole runway ahead (the longest flat run found starts 80 m further up it)"
+  "arrive_notes": "the runway's south-east end, the whole runway ahead (the longest flat run found starts 80 m further up it)",
+  "tex_of": [
+    [
+      "shark",
+      512,
+      256
+    ]
+  ]
 }

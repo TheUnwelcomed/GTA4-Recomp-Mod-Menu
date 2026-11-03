@@ -57,6 +57,22 @@ struct MapVehicle {
   float pos[3]{};     // the mod's coordinates
   float heading = 0;  // degrees
 };
+// A creature of the place (v1.7.39: the sharks, the crocodile, the
+// elephant - GTA V animals cut into rigid parts by tools/maps/creature.py):
+// the trainer places the body and turns each part about its pivot (the
+// creature's own space, metres) as it swims or walks. creatures.txt.
+struct CreaturePart {
+  std::string name, model;
+  float pivot[3]{};
+  float axis[3]{0, 0, 1};
+  float amp = 0, hz = 0, phase = 0;  // the swing: degrees, cycles a second, degrees of phase
+};
+struct CreatureKind {
+  std::string name, kind;  // kind: swimmer, walker, amphibian
+  float length = 0, height = 0, bottom = 0;  // its size, and its lowest point below its origin
+  int count = 0;           // how many the place keeps about the player
+  std::vector<CreaturePart> parts;
+};
 struct MapInfo {
   std::string name, label;
   int date[5]{};             // year, month, day, hour, minute
@@ -81,6 +97,7 @@ struct MapInfo {
   // farther away, their models let go, so the whole need not fit the game's
   // streaming memory (Wake Island's 1,600 pieces filled it).
   float stream = 0;
+  std::vector<CreatureKind> creatures;
   std::filesystem::path dir;  // its folder (ground.bin, the trainer's own ground grid, is read from it)
   bool installed = false;    // in vehicles.img and gtxd.ide this launch
 };

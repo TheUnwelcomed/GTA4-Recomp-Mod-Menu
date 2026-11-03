@@ -1,0 +1,61 @@
+{
+ "notes": "the JAWS great white (GTA JAWS Replaces Tiger Sharks): a 9 m mesh on the tiger shark's skeleton, its tail in two and its jaw as parts",
+ "yft": "/tmp/claude-0/-home-claude/26a00c37-414d-5ca2-b1c7-dd07e2d9e4d6/scratchpad/animals/jaws/GTA JAWS (Replaces Tiger Sharks)/Files/a_c_sharktiger.yft",
+ "ydd": [
+  "/tmp/claude-0/-home-claude/26a00c37-414d-5ca2-b1c7-dd07e2d9e4d6/scratchpad/animals/jaws/GTA JAWS (Replaces Tiger Sharks)/Files/a_c_sharktiger/head_000_r.ydd"
+ ],
+ "ytd": [
+  "/tmp/claude-0/-home-claude/26a00c37-414d-5ca2-b1c7-dd07e2d9e4d6/scratchpad/animals/jaws/GTA JAWS (Replaces Tiger Sharks)/Files/a_c_sharktiger/head_diff_000_a_whi.ytd"
+ ],
+ "kind": "swimmer",
+ "scale": 1.0,
+ "turn": 180,
+ "parts": {
+  "body": {
+   "bones": [
+    "*"
+   ]
+  },
+  "tail1": {
+   "bones": [
+    "SKEL_Tail_02",
+    "SKEL_Tail_03"
+   ],
+   "axis": "z",
+   "pivot": "boundary",
+   "swing": [
+    9,
+    0.55,
+    0
+   ]
+  },
+  "tail2": {
+   "bones": [
+    "SKEL_Tail_04",
+    "SKEL_Tail_05",
+    "SKEL_Tail_06",
+    "SKEL_Tail_07",
+    "SKEL_Tail_08"
+   ],
+   "axis": "z",
+   "pivot": "boundary",
+   "swing": [
+    16,
+    0.55,
+    -70
+   ]
+  },
+  "jaw": {
+   "bones": [
+    "FB_Jaw_000"
+   ],
+   "axis": "x",
+   "pivot": "boundary",
+   "swing": [
+    0,
+    0,
+    0
+   ]
+  }
+ }
+}

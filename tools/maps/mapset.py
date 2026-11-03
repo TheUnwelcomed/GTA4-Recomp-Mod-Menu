@@ -600,6 +600,27 @@ def main():
             ('; %d of models the game has not: %s' % (sum(vehicles_unknown.values()), ', '.join('%08X' % h for h in vehicles_unknown)))
             if vehicles_unknown else ''))
     used = sorted({p['model'] for p in placed if not p['stock']})
+    # the creatures (v1.7.39: creature.py's creature.txt in the source
+    # directory, cfg['life']['creatures'] saying how many of each): their
+    # part models are made like placed ones, the trainer makes and moves them
+    creatures = []  # (name, lines, count)
+    wanted_creatures = cfg.get('life', {}).get('creatures', {})
+    if os.path.exists(os.path.join(src, 'creature.txt')) and wanted_creatures:
+        block = None
+        for line in open(os.path.join(src, 'creature.txt')):
+            f = line.split()
+            if not f:
+                continue
+            if f[0] == 'creature':
+                block = (f[1].lower(), [line.rstrip('\n')], int(wanted_creatures.get(f[1].lower(), 0)))
+                if block[2] > 0:
+                    creatures.append(block)
+            elif f[0] == 'part' and block is not None:
+                block[1].append(line.rstrip('\n'))
+                if block[2] > 0 and f[2].lower() not in used:
+                    used.append(f[2].lower())
+        used = sorted(used)
+        print('creatures: %s' % ', '.join('%s x%d (%d parts)' % (n, c, len(ls) - 1) for n, ls, c in creatures))
     missing = [m for m in used if m not in models or not os.path.exists(os.path.join(src, m + '.wdr'))]
     assert not missing, 'placed models without a .wdr (or a line): %s' % ', '.join(missing)
     count_of = collections.Counter(p['model'] for p in placed)
@@ -1037,6 +1058,17 @@ def main():
             f.write('weather %d\n' % life['weather'])
         if life.get('ambience'):
             f.write('ambience %s\n' % life['ambience'])
+    if creatures:
+        with open(os.path.join(out, 'creatures.txt'), 'w') as f:
+            f.write('# the place\'s creatures (creature.py): kind, size, how many about; each part\'s model, pivot, axis, swing\n')
+            for cname, lines_, count in creatures:
+                for line in lines_:
+                    w = line.split()
+                    if w[0] == 'creature':
+                        w += ['count', str(count)]
+                    elif w[0] == 'part':
+                        w[2] = mname.get(w[2].lower(), w[2])
+                    f.write(('  ' if w[0] == 'part' else '') + ' '.join(w) + '\n')
     if vehicles:
         with open(os.path.join(out, 'vehicles.txt'), 'w') as f:
             f.write('# model x y z heading (the mod\'s coordinates): the vehicles the mod parks\n')

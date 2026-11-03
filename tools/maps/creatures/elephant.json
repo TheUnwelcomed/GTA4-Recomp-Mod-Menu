@@ -1,0 +1,96 @@
+{
+ "notes": "indirivacua's elephant (replaces the deer): a deer-sized mesh scaled 2.2x to an adult, its four legs as parts swinging in a diagonal walk",
+ "yft": "/tmp/claude-0/-home-claude/26a00c37-414d-5ca2-b1c7-dd07e2d9e4d6/scratchpad/animals/elephant/a_c_deer.yft",
+ "ydd": [
+  "/tmp/claude-0/-home-claude/26a00c37-414d-5ca2-b1c7-dd07e2d9e4d6/scratchpad/animals/elephant/a_c_deer.ydd"
+ ],
+ "ytd": [
+  "/tmp/claude-0/-home-claude/26a00c37-414d-5ca2-b1c7-dd07e2d9e4d6/scratchpad/animals/elephant/a_c_deer.ytd"
+ ],
+ "kind": "walker",
+ "scale": 2.2,
+ "turn": 180,
+ "parts": {
+  "body": {
+   "bones": [
+    "*"
+   ]
+  },
+  "legfl": {
+   "bones": [
+    "SKEL_L_UpperArm",
+    "SKEL_L_Forearm",
+    "SKEL_L_Hand",
+    "SKEL_L_Finger0*"
+   ],
+   "axis": "x",
+   "pivot": [
+    0.07,
+    -0.35,
+    -0.03
+   ],
+   "swing": [
+    11,
+    0.75,
+    0
+   ]
+  },
+  "legfr": {
+   "bones": [
+    "SKEL_R_UpperArm",
+    "SKEL_R_Forearm",
+    "SKEL_R_Hand",
+    "SKEL_R_Finger0*"
+   ],
+   "axis": "x",
+   "pivot": [
+    -0.07,
+    -0.35,
+    -0.03
+   ],
+   "swing": [
+    11,
+    0.75,
+    180
+   ]
+  },
+  "legbl": {
+   "bones": [
+    "SKEL_L_Thigh",
+    "SKEL_L_Calf",
+    "SKEL_L_Foot",
+    "SKEL_L_Toe*"
+   ],
+   "axis": "x",
+   "pivot": [
+    0.11,
+    0.57,
+    0.05
+   ],
+   "swing": [
+    11,
+    0.75,
+    180
+   ]
+  },
+  "legbr": {
+   "bones": [
+    "SKEL_R_Thigh",
+    "SKEL_R_Calf",
+    "SKEL_R_Foot",
+    "SKEL_R_Toe*"
+   ],
+   "axis": "x",
+   "pivot": [
+    -0.11,
+    0.57,
+    0.05
+   ],
+   "swing": [
+    11,
+    0.75,
+    0
+   ]
+  }
+ }
+}
