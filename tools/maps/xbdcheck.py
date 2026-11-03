@@ -4,7 +4,10 @@ polygons in order, boxes holding their polygons, inner boxes the union of
 their children, subtree headers by Bullet's rule), its quads flat-convex in
 order round them, and vertical rays walked through the tree stacklessly (and
 through its subtree headers) against every polygon tried in turn
-(collide.check_bvh).
+(collide.check_bvh); and every object inside one load chunk (the console
+loads a segment in chunks, pointers translated chunk by chunk, so an array
+over a chunk's edge is read from the memory after the chunk: v1.7.34's
+island froze the game on arrival in a node walk through such a tree).
 
 usage: python3 -I xbdcheck.py <body.bin> <flags>
   body.bin   the dictionary's body, unpacked (pc2x360/xlzx unrsc in out)
@@ -19,6 +22,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'pc2x360'))
 sys.path.insert(0, HERE)
+import batconv  # noqa: E402
+import bounds360  # noqa: E402
 import collide  # noqa: E402
 import rsc5  # noqa: E402
 
@@ -73,8 +78,14 @@ def main():
 
     for i in range(n):
         walk(r.vptr(r.vptr(0x18) + 4 * i))
-    print('%d bounds, %d meshes, %d polygons (%d quads); trees walked against every polygon: worst %.4f m' % (
-        n, stats['meshes'], stats['polygons'], stats['quads'], stats['worst']))
+    cut = bounds360.chunk_crossings(body, flags)
+    for label, off, size in cut[:8]:
+        print('CUT BY A LOAD CHUNK EDGE: %s at %X, %d bytes' % (label, off, size))
+    print('%d bounds, %d meshes, %d polygons (%d quads); trees walked against every polygon: worst %.4f m; %d objects '
+          'in %d load chunks, %d cut by a chunk edge' % (
+              n, stats['meshes'], stats['polygons'], stats['quads'], stats['worst'], len(bounds360.objects(r)),
+              len(batconv.segment_chunks(flags, physical=False)), len(cut)))
+    assert not cut
 
 
 if __name__ == '__main__':

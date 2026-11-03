@@ -9,6 +9,8 @@ differ in checked (v1.7.34):
     volume times centre
   - +0x6C (the volume): the dictionaries' meshes on their own -FLT_MAX (the
     game works it out), those in a composite their volume
+  - load chunks: objects cross pages freely, but none crosses one of the
+    chunks the console loads the segment in (batconv.load_chunks)
 
 usage: python3 -I boundheaders.py <body.bin>:<flags hex>[:label] [...]
 """
@@ -18,6 +20,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'pc2x360'))
+sys.path.insert(0, HERE)
+import batconv  # noqa: E402
+import bounds360  # noqa: E402
 import rsc5  # noqa: E402
 
 NEG_MAX = 0xFF7FFFFF
@@ -94,6 +99,14 @@ def check(spec):
                                                                 comps.count('neither')))
     if lone[1]:
         print('   meshes on their own: %d of %d with -FLT_MAX for their volume (+0x6C)' % (lone[0], lone[1]))
+    objs = bounds360.objects(r)
+    page = 256 << ((flags >> 11) & 0xF)
+    chunks = batconv.segment_chunks(flags, physical=False)
+    cut = bounds360.chunk_crossings(r.data, flags)
+    print('   %d objects, %d crossing a %d KiB page, %d cut by one of the %d load chunks (%s KiB)%s' % (
+        len(objs), sum(1 for _, o, n in objs if n and o // page != (o + n - 1) // page), page // 1024, len(cut),
+        len(chunks), '/'.join(str((e - s) // 1024) for s, e in chunks[:3]) + ('...' if len(chunks) > 3 else ''),
+        ''.join(': %s at %X, %d B' % c for c in cut[:3])))
 
 
 if __name__ == '__main__':

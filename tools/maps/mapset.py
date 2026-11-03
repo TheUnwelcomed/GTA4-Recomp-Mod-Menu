@@ -212,13 +212,9 @@ def build_dictionary(entries):
     root = struct.pack('>IIIIIHHIHH', bounds360.VT_DICT, bounds360.ptr(blockmap), 0, 1, bounds360.ptr(keys), n, n,
                        bounds360.ptr(vals), n, n)
     a.buf[0:0x20] = root
-    size = len(a.buf)
-    count = (size + page - 1) // page
-    assert count <= 0x7FF, (size, page)
-    assert len(batconv.load_chunks(count, page)) <= 100
-    body = bytes(a.buf) + b'\xCD' * (count * page - size)
-    flags = 0xC0000000 | count | (shift << 11)
-    assert rsc5.seg_sizes(flags) == (count * page, 0)
+    body, flags = a.segment(shift)
+    cut = bounds360.chunk_crossings(body, flags)
+    assert not cut, cut[:4]
     return body, flags
 
 

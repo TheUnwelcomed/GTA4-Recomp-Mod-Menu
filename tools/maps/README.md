@@ -16,6 +16,18 @@ A PC GTA IV map mod becomes a destination the time machine can travel to:
    `vehicles.img` and the lines into the shadow `common.rpf`, and the
    trainer places and deletes the pieces.
 
+Load chunks (v1.7.35): the console loads a resource segment in chunks
+(`pc2x360/batconv.load_chunks`: as many 16-page chunks as fit, the rest in
+power-of-two chunks), each wherever its allocator finds room, pointers
+translated chunk by chunk, so an array over a chunk's edge is read partly
+from the memory after the chunk. The stock bound files cross pages freely but
+never a chunk; `bounds360.Arena` keeps every object inside one, rounding the
+page count up to whole 16-page chunks when the smaller tail chunks would cut
+one (v1.7.34's island: a 17-node tree over the 64 KiB tail chunk's edge, its
+last nodes read as zeros, and the game's node walk - a step of 0 for an inner
+node of size 0 - never ended; the arrival froze). `xbdcheck.py` and
+`boundheaders.py` check it.
+
 `collide.py` makes the collision (v1.7.31): a map mod's collision is often
 its render meshes (The Gator Keys: 293,000 triangles, 15 MiB, which the game
 never loaded), so each piece is welded, cut below the shallows, decimated

@@ -186,6 +186,24 @@ network session.
 
 ## Changes
 
+- **v1.7.35**: v1.7.34's collision loaded and linked (log 098: 108 of 108
+  in 284 ms), and the game **froze as the car came down**: a physics worker
+  looping forever in the BVH node walk (`sub_8297F0E8`, called from
+  `sub_8297F540` ← `sub_829C06A0`; the thread dumps show it there 30 s
+  later), the main thread waiting on it. The console loads a resource
+  segment in chunks (`batconv.load_chunks`: 16-page chunks, the rest in
+  power-of-two ones), pointers translated chunk by chunk, so an object over
+  a chunk edge is read partly from the memory after the chunk. The stock
+  bound files cross pages freely but never a chunk; the island's dictionary
+  (156 pages of 16 KiB: nine 256 KiB chunks, then 128 and 64 KiB) had one
+  object over the 64 KiB tail chunk's edge: the 17-node tree of the ground
+  tile under the arrival, its last 8 nodes read as zeros - an inner node
+  whose subtree size is 0 is a step of 0, so the walk never ends. The arena
+  kept objects inside 16-page chunks but not the tail's smaller ones; now
+  the page count is rounded up to whole 16-page chunks when the tail would
+  cut an object (`Arena.segment`), `xbdcheck.py` and `boundheaders.py`
+  check every object against the loader's chunks (`bounds360.objects`,
+  `chunk_crossings`), and the build asserts it. Only `gk_col.xbd` changed.
 - **v1.7.34**: the island **still had no collision**: v1.7.33's log showed
   every piece's model info with `+0x52` (its bound dictionary's slot) unset,
   stock `bm_plank01`'s `0x0097`. The game links a model to its bound only

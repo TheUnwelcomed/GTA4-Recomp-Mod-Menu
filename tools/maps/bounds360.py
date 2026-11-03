@@ -147,23 +147,53 @@ def swap_nodes(raw):
 
 class Arena:
     """The virtual segment, laid out front to back, 16-byte aligned; an
-    object that would cross a load chunk (16 pages) starts the next one."""
+    object that would cross a load chunk (16 pages) starts the next one.
+    The console loads a segment in chunks (batconv.load_chunks: as many
+    16-page chunks as fit, the rest in power-of-two chunks), each wherever
+    its allocator finds room, pointers translated chunk by chunk: an array
+    running past its chunk's end is read from whatever memory follows. The
+    stock files cross pages freely but never a chunk (rubbish.xbd, nj_01.xbd,
+    nj_01_4.xbn: xbdcheck.py checks it)."""
 
     def __init__(self, chunk):
         self.buf = bytearray()
         self.chunk = chunk
+        self.objects = []  # (offset, size) of everything put
 
     def alloc(self, size, align=16):
         o = (len(self.buf) + align - 1) & ~(align - 1)
         if self.chunk and size <= self.chunk and o // self.chunk != (o + size - 1) // self.chunk:
             o = (o // self.chunk + 1) * self.chunk
         self.buf += b'\xCD' * (o + size - len(self.buf))
+        self.objects.append((o, size))
         return o
 
     def put(self, data, align=16):
         o = self.alloc(len(data), align)
         self.buf[o:o + len(data)] = data
         return o
+
+    def segment(self, shift):
+        """The whole segment (body, flags) for pages of 256 << shift: the page
+        count rounded up to whole 16-page chunks when the loader's smaller
+        tail chunks (the remainder in power-of-two chunks, which the 16-page
+        rule above does not see) would cut an object. v1.7.34's island: a
+        17-node tree over the edge of the 64 KiB tail chunk, its last nodes
+        read from the memory after the chunk, and the game's walk through
+        them never ended (the arrival froze)."""
+        import batconv
+        page = 256 << shift
+        assert self.chunk == 16 * page, (self.chunk, page)
+        count = -(-len(self.buf) // page)
+        chunks = batconv.load_chunks(count, page)
+        if any(not any(cs <= o and o + n <= ce for cs, ce in chunks) for o, n in self.objects):
+            count = -(-count // 16) * 16
+        assert count <= 0x7FF, count
+        assert len(batconv.load_chunks(count, page)) <= 100
+        body = bytes(self.buf) + b'\xCD' * (count * page - len(self.buf))
+        flags = 0xC0000000 | count | (shift << 11)
+        assert rsc5.seg_sizes(flags) == (count * page, 0)
+        return body, flags
 
 
 def ptr(o):
@@ -267,13 +297,52 @@ def build_dictionary(entries):
     blockmap = a.put(b'\x00\x00\x00\x00' + b'\xCD' * 0x2C)
     root = struct.pack('>IIIIIHHIHH', VT_DICT, ptr(blockmap), 0, 1, ptr(keys), n, n, ptr(vals), n, n)
     a.buf[0:0x20] = root
-    size = len(a.buf)
-    count = (size + page - 1) // page
-    assert count <= 0x3F, (size, page)
-    body = bytes(a.buf) + b'\xCD' * (count * page - size)
-    flags = 0xC0000000 | count | (shift << 11)
-    assert rsc5.seg_sizes(flags) == (count * page, 0)
+    body, flags = a.segment(shift)
+    assert len(chunk_crossings(body, flags)) == 0
     return body, flags
+
+
+def objects(r):
+    """Everything a console bound dictionary or static bounds body (read as
+    the game reads it) reaches through a pointer: [(label, offset, size)]."""
+    v = r.virt
+    out = []
+    if struct.unpack_from('>I', v, 0)[0] == VT_DICT:
+        n = struct.unpack_from('>H', v, 0x14)[0]
+        out += [('dictionary', 0, 0x20), ('keys', r.vptr(0x10), 4 * n), ('values', r.vptr(0x18), 4 * n)]
+        stack = [r.vptr(r.vptr(0x18) + 4 * i) for i in range(n)]
+    else:
+        out.append(('container', 0, 0x20))
+        stack = [r.vptr(8)]
+    while stack:
+        off = stack.pop()
+        t = v[off + 4]
+        if t == 12:
+            k = struct.unpack_from('>H', v, off + 0x90)[0]
+            out += [('composite', off, 0xA0), ('children', r.vptr(off + 0x80), 4 * k),
+                    ('matrices', r.vptr(off + 0x84), 64 * k), ('matrices', r.vptr(off + 0x88), 64 * k),
+                    ('boxes', r.vptr(off + 0x8C), 32 * k)]
+            stack += [r.vptr(r.vptr(off + 0x80) + 4 * i) for i in range(k)]
+        elif t in (4, 10):
+            nv, npo = struct.unpack_from('>II', v, off + 0xC8)
+            out += [('bound', off, 0xF0 if t == 10 else 0xE0), ('polygons', r.vptr(off + 0x8C), 32 * npo),
+                    ('vertices', r.vptr(off + 0xB0), 6 * nv), ('materials', r.vptr(off + 0xD0), 4 * v[off + 0xD8])]
+            if t == 10:
+                tr = r.vptr(off + 0xE0)
+                out += [('tree', tr, 0x60), ('nodes', r.vptr(tr), 16 * struct.unpack_from('>I', v, tr + 4)[0]),
+                        ('subtrees', r.vptr(tr + 0x50), 16 * struct.unpack_from('>H', v, tr + 0x54)[0])]
+        else:
+            out.append(('bound', off, 0x80))
+    return out
+
+
+def chunk_crossings(body, flags):
+    """The objects the console would load cut in two: those not inside one
+    of the segment's load chunks (batconv.load_chunks)."""
+    import batconv
+    r = rsc5.Resource(body, flags, True, 32, 'bounds')
+    chunks = batconv.segment_chunks(flags, physical=False)
+    return [o for o in objects(r) if o[2] and not any(cs <= o[1] and o[1] + o[2] <= ce for cs, ce in chunks)]
 
 
 def check(body, flags, entries):
