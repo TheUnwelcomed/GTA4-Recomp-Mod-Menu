@@ -7518,6 +7518,20 @@ std::optional<float> CreatureSpot(const gta4::addons::CreatureKind& k, float x, 
   return *ground - k.bottom;
 }
 
+// A creature's sound to the player: its level by distance, its pan by where
+// it is to the player's right.
+void CreatureSound(const GameContext& game, const LifeCreature& c, bool bite) {
+  const float dx = c.pos[0] - game.position[0], dy = c.pos[1] - game.position[1];
+  const float d = std::sqrt(dx * dx + dy * dy);
+  const float level = 1.0f / (1.0f + d / 18.0f);
+  const float rx = game.forward[1], ry = -game.forward[0];  // (to the player's right)
+  const float pan = d > 0.1f ? 0.5f + 0.5f * (dx * rx + dy * ry) / d : 0.5f;
+  if (bite)
+    g_island_synth.Bite(level, pan);
+  else
+    g_island_synth.Splash(level, pan);
+}
+
 // A new creature made: its parts as frozen objects (no collision: the bite
 // is the trainer's own) at its spot.
 bool CreatureMake(PPCContext& ctx, uint8_t* base, int kind, float x, float y, float z, float heading, bool water) {
@@ -7625,6 +7639,8 @@ void CreatureThink(PPCContext& ctx, uint8_t* base, const GameContext& game, Life
         c.bite_at = now;
         c.next_bite = now + 2800;
         ++c.bites;
+        CreatureSound(game, c, true);
+        CreatureSound(game, c, false);
         if (NativeKnown("GET_CHAR_HEALTH")) {
           if (const auto h = Invoke(ctx, base, "GET_CHAR_HEALTH", {game.ped, 0}, 1)) {
             const int health = int(h->r0());
@@ -7729,6 +7745,8 @@ void LifeCreatureFrame(PPCContext& ctx, uint8_t* base, const GameContext& game, 
       if (const auto z = CreatureSpot(k, nx, ny, water)) {
         c.pos[0] = nx;
         c.pos[1] = ny;
+        if (water && !c.in_water && k.kind == "amphibian")
+          CreatureSound(game, c, false);
         c.in_water = water;
         // the height follows the ground (or the water) smoothly; a swimmer bobs
         float zt = *z;

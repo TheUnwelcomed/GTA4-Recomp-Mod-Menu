@@ -22,7 +22,9 @@
 // rumble; a gull's cry is two to four syllables of a sine with harmonics
 // gliding down with a vibrato, each panned somewhere; the insects a trill
 // of a high tone pulsed at 20 Hz; the plane two saw tones (the engine and
-// its exhaust) with a Doppler glide and a pan across.
+// its exhaust) with a Doppler glide and a pan across. The creatures' one-shots
+// (v1.7.39): a splash is a burst of noise, bright then dull, over a low whomp;
+// a bite two crunches of band-passed noise over a thud.
 //
 // Plain C++ with no platform code: the game thread sets targets (atomics),
 // the mixer's thread renders. tools/island/render_preview.cpp (in the
@@ -48,6 +50,17 @@ class Ambience {
     character_.store(character, std::memory_order_relaxed);
   }
   bool Quiet() const { return quiet_.load(std::memory_order_relaxed); }
+  // One-shots from the creatures (v1.7.39): a splash (a shark's bite at the
+  // surface, a crocodile sliding in), a bite (its jaws). level 0..1 by
+  // distance, pan 0 left .. 1 right. Taken by the render once each.
+  void Splash(float level, float pan) {
+    splash_level_.store(std::clamp(level, 0.0f, 1.0f), std::memory_order_relaxed);
+    splash_pan_.store(std::clamp(pan, 0.0f, 1.0f), std::memory_order_relaxed);
+  }
+  void Bite(float level, float pan) {
+    bite_level_.store(std::clamp(level, 0.0f, 1.0f), std::memory_order_relaxed);
+    bite_pan_.store(std::clamp(pan, 0.0f, 1.0f), std::memory_order_relaxed);
+  }
 
   // Interleaved stereo, frames at kRate, overwritten (not mixed into).
   void Render(float* lr, size_t frames) {
@@ -55,6 +68,17 @@ class Ambience {
     const int ch = character_.load(std::memory_order_relaxed);
     const bool atoll = ch == kAtoll;
     constexpr float dt = 1.0f / kRate;
+    // the one-shots asked for since the last render
+    if (const float lv = splash_level_.exchange(0.0f, std::memory_order_relaxed); lv > 0.0f) {
+      splash_t_ = 0.0f;
+      splash_lv_ = lv;
+      splash_pan_now_ = splash_pan_.load(std::memory_order_relaxed);
+    }
+    if (const float lv = bite_level_.exchange(0.0f, std::memory_order_relaxed); lv > 0.0f) {
+      bite_t_ = 0.0f;
+      bite_lv_ = lv;
+      bite_pan_now_ = bite_pan_.load(std::memory_order_relaxed);
+    }
     for (size_t i = 0; i < frames; ++i) {
       // the volume eased over ~2 s either way
       volume_ += (target - volume_) * (dt / 2.0f);
@@ -160,6 +184,40 @@ class Ambience {
           }
         }
       }
+      // ---- a splash: a burst of noise, bright then dull, over a low whomp
+      if (splash_t_ >= 0.0f) {
+        splash_t_ += dt;
+        if (splash_t_ > 1.8f) {
+          splash_t_ = -1.0f;
+        } else {
+          const float x = splash_t_;
+          // the strike, bright and short; then the water settling, dull and longer
+          const float env = Smooth(0.0f, 0.012f, x) * (std::exp(-x * 4.5f) + 0.45f * std::exp(-x * 1.8f) * Smooth(0.0f, 0.15f, x));
+          const float cutoff = 350.0f + 3200.0f * std::exp(-x * 6.0f);
+          const float burst = splash_lp_.Lowpass(Noise(), 3.14159265f * cutoff / kRate, 0.7f) * env;
+          splash_ph_ = Wrap(splash_ph_ + (28.0f + 40.0f * std::exp(-x * 9.0f)) * dt);
+          const float whomp = Sin(splash_ph_) * std::exp(-x * 7.0f) * Smooth(0.0f, 0.01f, x);
+          const float sp = (burst * 0.55f + whomp * 0.35f) * splash_lv_ * 0.9f;
+          l += sp * (1.0f - splash_pan_now_ * 0.8f);
+          r += sp * (0.2f + splash_pan_now_ * 0.8f);
+        }
+      }
+      // ---- a bite: two crunches (band-passed noise) over a thud
+      if (bite_t_ >= 0.0f) {
+        bite_t_ += dt;
+        if (bite_t_ > 0.5f) {
+          bite_t_ = -1.0f;
+        } else {
+          const float x = bite_t_;
+          const float crunch = (x < 0.05f ? std::exp(-x * 60.0f) : 0.0f) + (x > 0.07f && x < 0.14f ? std::exp(-(x - 0.07f) * 50.0f) * 0.8f : 0.0f);
+          const float cr = bite_bp_.Bandpass(Noise(), 3.14159265f * 1700.0f / kRate, 0.6f) * crunch;
+          bite_ph_ = Wrap(bite_ph_ + 85.0f * dt);
+          const float thud = Sin(bite_ph_) * std::exp(-x * 14.0f);
+          const float bt = (cr * 0.7f + thud * 0.5f) * bite_lv_ * 0.9f;
+          l += bt * (1.0f - bite_pan_now_ * 0.8f);
+          r += bt * (0.2f + bite_pan_now_ * 0.8f);
+        }
+      }
       lr[2 * i] = l * volume_;
       lr[2 * i + 1] = r * volume_;
     }
@@ -209,6 +267,10 @@ class Ambience {
   float insect_wait_ = 3.0f, insect_level_ = 0.0f, insect_pulse_ = 0.0f, insect_ph_ = 0.0f;
   bool insect_on_ = true;
   float plane_wait_ = 20.0f, plane_t_ = -1.0f, plane_dir_ = 1.0f, plane_ph_ = 0.0f, plane_ph2_ = 0.0f;
+  std::atomic<float> splash_level_{0}, splash_pan_{0.5f}, bite_level_{0}, bite_pan_{0.5f};
+  float splash_t_ = -1.0f, splash_lv_ = 0.0f, splash_pan_now_ = 0.5f, splash_ph_ = 0.0f;
+  float bite_t_ = -1.0f, bite_lv_ = 0.0f, bite_pan_now_ = 0.5f, bite_ph_ = 0.0f;
+  Svf splash_lp_, bite_bp_;
   uint32_t seed_ = 0x2545F491u;
 };
 

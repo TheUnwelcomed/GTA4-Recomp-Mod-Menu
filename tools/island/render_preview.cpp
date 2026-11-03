@@ -4,7 +4,8 @@
 // each 10-second stretch (RMS and peak) so a change can be checked without
 // a console.
 //   c++ -std=c++20 -O2 -Wall -Wextra -I../../src render_preview.cpp -o render_preview
-//   ./render_preview keys|atoll out.wav [seconds]
+//   ./render_preview keys|atoll out.wav [seconds] [creatures]
+//   (creatures: a splash at 3 s and 9 s, a bite with its splash at 6 s, to hear the one-shots)
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -28,8 +29,15 @@ int main(int argc, char** argv) {
   const size_t frames = size_t(seconds * double(rate));
   std::vector<float> lr(frames * 2);
   constexpr size_t block = 512;
-  for (size_t at = 0; at < frames; at += block)
+  const bool creatures = argc > 4 && std::string(argv[4]) == "creatures";
+  for (size_t at = 0; at < frames; at += block) {
+    if (creatures) {
+      if (at == (3 * rate / block) * block) amb.Splash(1.0f, 0.3f);
+      if (at == (6 * rate / block) * block) { amb.Bite(1.0f, 0.7f); amb.Splash(0.8f, 0.7f); }
+      if (at == (9 * rate / block) * block) amb.Splash(0.4f, 0.5f);
+    }
     amb.Render(lr.data() + 2 * at, std::min(block, frames - at));
+  }
   // levels per 10 s
   for (size_t s = 0; s < frames; s += 10 * rate) {
     double sum = 0; float peak = 0;
