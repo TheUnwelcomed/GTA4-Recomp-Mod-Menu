@@ -36,6 +36,8 @@
 #include "gta4_jet_engine.h"
 #include "gta4_car_engine.h"
 #include "gta4_time_machine.h"
+#include "gta4_island_sound.h"
+#include <fstream>
 #include "gta4_mission_pass.h"
 #include "gta4_jet_flight.h"
 
@@ -237,6 +239,11 @@ std::array g_natives = {
     NativeEntry{"CREATE_OBJECT_NO_OFFSET"}, NativeEntry{"SET_CHAR_CANT_BE_DRAGGED_OUT"},
     // v1.7.32: the map's pieces checked after the arrival.
     NativeEntry{"DOES_OBJECT_EXIST"}, NativeEntry{"IS_OBJECT_ON_SCREEN"},
+    // v1.7.37: a place's life - its parked cars and boats, the people about.
+    NativeEntry{"CREATE_CHAR"}, NativeEntry{"SET_CHAR_RANDOM_COMPONENT_VARIATION"},
+    NativeEntry{"TASK_GO_STRAIGHT_TO_COORD"}, NativeEntry{"TASK_STAND_STILL"}, NativeEntry{"DOES_CHAR_EXIST"},
+    NativeEntry{"GET_CHAR_COORDINATES"}, NativeEntry{"DOES_VEHICLE_EXIST"}, NativeEntry{"FORCE_WEATHER"},
+    NativeEntry{"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS"}, NativeEntry{"TASK_WANDER_STANDARD"},
 };
 std::mutex g_native_mutex;
 
@@ -316,6 +323,9 @@ constexpr HandleUse kHandleUses[] = {
     {"TASK_LEAVE_CAR_IMMEDIATELY", 1, 0}, {"WARP_CHAR_INTO_CAR", 1, 0},
     {"WARP_CHAR_INTO_CAR_AS_PASSENGER", 1, 0}, {"DELETE_CHAR", -1, 0, true},
     {"MARK_CHAR_AS_NO_LONGER_NEEDED", -1, 0, true}, {"SET_CHAR_CANT_BE_DRAGGED_OUT", -1, 0},
+    {"SET_CHAR_RANDOM_COMPONENT_VARIATION", -1, 0}, {"TASK_GO_STRAIGHT_TO_COORD", -1, 0},
+    {"TASK_STAND_STILL", -1, 0}, {"DOES_CHAR_EXIST", -1, 0}, {"GET_CHAR_COORDINATES", -1, 0},
+    {"DOES_VEHICLE_EXIST", 0}, {"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS", -1, 0}, {"TASK_WANDER_STANDARD", -1, 0},
 };
 
 // Whether the call must not go ahead: a handle in it the game no longer has.
@@ -1011,8 +1021,9 @@ constexpr std::array kTcdPresets = {
     TcdPreset{"Sep 2, 1885 (the Old West)", {1885, 9, 2, 8, 0}},
     TcdPreset{"Jul 4, 1776 (Independence)", {1776, 7, 4, 12, 0}},
     TcdPreset{"Dec 25, 0000", {0, 12, 25, 0, 0}},
-    // (a place as well as a time: the map set's own island, out to sea)
+    // (a place as well as a time: the map sets' own islands, out to sea)
     TcdPreset{"Oct 26, 1984 (Gator Keys)", {1984, 10, 26, 10, 0}, "gatorkeys"},
+    TcdPreset{"Dec 8, 1941 (Wake Island)", {1941, 12, 8, 7, 0}, "wake"},
 };
 
 // Shared trainer state: written on the game thread, drawn on the UI thread.
@@ -2749,11 +2760,13 @@ void LaunchSound() {
   EnsureVoice();
 }
 // Once a pass: a voice left running with nothing to play is stopped.
+void LifeSoundTick();
 void SoundTick() {
 #if REX_PLATFORM_PS5
   if (g_jet_voice && g_jet_voice->Active() && g_jet_synth.Quiet())
     g_jet_voice->Stop();
 #endif
+  LifeSoundTick();
 }
 
 // Spool target (0 off, idle .. 1), afterburner, volume. The voice runs while
@@ -6283,10 +6296,44 @@ void Hover(PPCContext& ctx, uint8_t* base, TimeMachineState& m, const DrivePad& 
 // back to where it left the city and deletes the place; Unload deletes it any
 // time (taking the player home first if he is on it). One place at a time.
 // ---------------------------------------------------------------------------
+// The object pool (v1.7.37): the game makes it at boot (sub_82326E10) with
+// room for 1300 objects of 800 bytes - [0x82DE5A50]: +0 the objects, +4 a
+// flag byte each, +8 the count, +12 an object's size, +20 in use - and it
+// holds every object the city streams in near the player, every one a script
+// makes, and a place's pieces (sub_822B9B18 stops turning the city's dummies
+// into objects under 50 free). The Gator Keys took 156; Wake Island takes
+// about 1,400 (its own models, their tiles, the game's props it places, its
+// collision carriers): the pool is made with room for 3400 (2.7 MiB in the
+// game's heap for 1 MiB). Nothing else in the game holds its size: the one
+// other 1300 in the code is a text buffer's.
+extern "C" void sub_82326E10(PPCContext& ctx, uint8_t* base) {
+  constexpr uint32_t kObjectPoolPointer = 0x82DE5A50, kObjectPoolName = 0x82011C70, kObjectBytes = 800,
+                     kStockObjects = 1300, kObjects = 3400;
+  ctx.r3.u32 = 28;
+  __imp__sub_821B3510(ctx, base);  // (the game's allocator: the pool object itself)
+  const uint32_t pool = ctx.r3.u32;
+  if (pool) {
+    ctx.r3.u32 = pool;
+    ctx.r4.u32 = kObjects;
+    ctx.r5.u32 = kObjectPoolName;
+    ctx.r6.u32 = kObjectBytes;
+    __imp__sub_82507368(ctx, base);  // (the pool's constructor: count, name, an object's size)
+  }
+  Write(base, kObjectPoolPointer, pool);  // (as the game's own code does, whatever came back)
+  ctx.r3.u32 = pool;
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    REXLOG_INFO("gta4-trainer: object pool made with room for {} objects (the game's {}): {:08X}", kObjects,
+                kStockObjects, pool);
+  }
+}
+
 struct MapStanding {
   uint32_t hash = 0, object = 0;
   int model = -1;  // in MapRun::models
   bool collision = false;
+  bool stock = false;  // one of the game's own models (its collision the game's, not the set's)
   float pos[3]{}, q[4]{};
 };
 struct MapModel {
@@ -6294,6 +6341,14 @@ struct MapModel {
   uint32_t hash = 0;
   bool known = true, loaded = false;
   int index = -1;  // in the model table (its streaming entry: the model module's first entry + this)
+};
+// One of the place's collision dictionaries (v1.7.34; several from v1.7.37, a
+// big set's in dictionaries of ~3 MiB): its slot in the bounds store, asked
+// for with the models and kept in (flag 2) till the place goes.
+struct MapDictionary {
+  std::string name;
+  int slot = -1;
+  bool in = false;
 };
 struct MapRun {
   const gta4::addons::MapInfo* info = nullptr;
@@ -6304,15 +6359,28 @@ struct MapRun {
   bool loaded = false;
   int loaded_count = 0, known_count = 0, renewals = 0, logs = 0, reports = 0;
   uint64_t check_at = 0;  // (v1.7.32: when to look at the pieces after an arrival)
-  // Its collision dictionary (v1.7.34): its slot in the bounds store, asked
-  // for with the models and kept in (flag 2) till the place goes.
-  int bounds_slot = -1;
-  bool bounds_in = false;
-  uint64_t bounds_in_at = 0;
+  std::vector<MapDictionary> dicts;
+  uint64_t bounds_in_at = 0;  // when the last of them came in
+  // Whether any dictionary is in the store; whether every one that is has loaded.
+  bool AnyDictionary() const {
+    return std::any_of(dicts.begin(), dicts.end(), [](const MapDictionary& d) { return d.slot >= 0; });
+  }
+  bool DictionariesIn() const {
+    return std::all_of(dicts.begin(), dicts.end(), [](const MapDictionary& d) { return d.slot < 0 || d.in; });
+  }
+  bool IsDictionarySlot(uint16_t slot) const {
+    return std::any_of(dicts.begin(), dicts.end(), [&](const MapDictionary& d) { return d.slot >= 0 && slot == uint16_t(d.slot); });
+  }
+  std::string DictionaryNames() const {
+    std::string out;
+    for (const auto& d : dicts)
+      out += (out.empty() ? "" : ", ") + d.name + ".xbd";
+    return out.empty() ? std::string("no dictionary") : out;
+  }
 };
 MapRun g_map;
 constexpr uint64_t kMapLoadLimitMs = 45000;  // a trip waits this long for the place, then turns back
-constexpr uint64_t kMapBoundsWaitMs = 20000;  // and this long for its collision dictionary, then places it anyway
+constexpr uint64_t kMapBoundsWaitMs = 20000;  // and this long for its collision dictionaries, then places it anyway
 
 // ---- the game's streaming, read for the map's log (v1.7.31) ----
 // Entries: 24 bytes each from [0x83032744]: +0 the resource's flags, +4 its
@@ -6526,10 +6594,12 @@ void MapReport(PPCContext& ctx, uint8_t* base, const char* why) {
   }
 }
 
+void LifeStop(PPCContext& ctx, uint8_t* base, const char* why);
 void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
   auto& g = g_map;
   if (!g.info)
     return;
+  LifeStop(ctx, base, why);
   int deleted = 0;
   for (auto& p : g.pieces)
     if (p.object) {
@@ -6539,37 +6609,55 @@ void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
   for (const auto& mdl : g.models)
     if (mdl.known)
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {mdl.hash});
-  // (its collision dictionary no longer kept: the store lets it go once the
-  // pieces' references to it are gone, the models' links staying)
+  // (its collision dictionaries no longer kept: the store lets them go once
+  // the pieces' references to them are gone, the models' links staying)
   const uint32_t module = BoundsModule(base);
-  if (g.bounds_slot >= 0 && module < uint32_t(StreamModuleCount(base)))
-    CallGuest(ctx, base, kStreamUnkeep, uint32_t(g.bounds_slot), module);
+  std::string let_go;
+  for (const auto& d : g.dicts)
+    if (d.slot >= 0 && module < uint32_t(StreamModuleCount(base))) {
+      CallGuest(ctx, base, kStreamUnkeep, uint32_t(d.slot), module);
+      let_go += (let_go.empty() ? ", " : " ") + d.name + ".xbd";
+    }
   REXLOG_INFO("gta4-trainer: map {} unloaded ({}): {} pieces deleted, {} models let go{}", g.info->name, why, deleted,
-              g.known_count, g.bounds_slot >= 0 ? fmt::format(", {}.xbd no longer kept", g.info->bounds) : "");
+              g.known_count, let_go.empty() ? std::string() : let_go + " no longer kept");
   g = MapRun{};
 }
 
-// The place's collision dictionary asked for (kept in till the place goes).
+// The place's collision dictionaries asked for (kept in till the place goes).
 void MapRequestBounds(PPCContext& ctx, uint8_t* base) {
   auto& g = g_map;
-  if (!g.info || g.info->bounds.empty())
+  if (!g.info)
     return;
+  if (g.dicts.empty())
+    for (const auto& name : g.info->bounds)
+      g.dicts.push_back(MapDictionary{name});
   const uint32_t module = BoundsModule(base);
-  if (g.bounds_slot < 0)
-    g.bounds_slot = BoundsSlot(base, g.info->bounds);
-  if (g.bounds_slot < 0 || module >= uint32_t(StreamModuleCount(base))) {
-    if (g.renewals == 0)
-      REXLOG_WARN("gta4-trainer: map {}: its collision dictionary {}.xbd is not in the game's bounds store (module {}); "
-                  "its pieces will have no collision",
-                  g.info->name, g.info->bounds, int(module));
-    return;
+  for (auto& d : g.dicts) {
+    if (d.slot < 0)
+      d.slot = BoundsSlot(base, d.name);
+    if (d.slot < 0 || module >= uint32_t(StreamModuleCount(base))) {
+      if (g.renewals == 0)
+        REXLOG_WARN("gta4-trainer: map {}: its collision dictionary {}.xbd is not in the game's bounds store (module "
+                    "{}); the pieces in it will have no collision",
+                    g.info->name, d.name, int(module));
+      continue;
+    }
+    CallGuest(ctx, base, kStreamRequest, uint32_t(d.slot), module, kBoundsRequestFlags);
   }
-  CallGuest(ctx, base, kStreamRequest, uint32_t(g.bounds_slot), module, kBoundsRequestFlags);
+}
+// The dictionaries' streaming state, for the log.
+std::string DescribeDictionaries(uint8_t* base) {
+  std::string out;
+  for (const auto& d : g_map.dicts)
+    out += fmt::format("{}{}.xbd {}", out.empty() ? "" : "; ", d.name,
+                       d.slot < 0 ? std::string("not in the store") : DescribeBoundsSlot(base, d.slot));
+  return out.empty() ? std::string("none") : out;
 }
 
 // How many of the place's models with collision the game has linked to their
-// bounds (their +0x52 the dictionary's slot), of how many; and whether those
-// have their archetypes now (the dictionary in).
+// bounds (their +0x52 one of the set's dictionaries' slots; a game model's any
+// slot), of how many; and whether those have their archetypes now (the
+// dictionary in).
 struct MapLinks {
   int models = 0, linked = 0, archetypes = 0;
   uint32_t first_unlinked = 0;
@@ -6588,7 +6676,7 @@ MapLinks MapCountLinks(uint8_t* base) {
     if (!mi || !Span(base, mi, 96))
       continue;
     const uint16_t slot = Read16(base, mi + kModelInfoBoundsSlot);
-    if (g.bounds_slot >= 0 && slot == uint16_t(g.bounds_slot)) {
+    if (p.stock ? slot != 0xFFFF : g.IsDictionarySlot(slot)) {
       ++out.linked;
       out.archetypes += Read(base, mi + kModelInfoArchetype) != 0;
     } else if (!out.first_unlinked) {
@@ -6616,6 +6704,7 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
     MapStanding s;
     s.hash = ModelHash(p.model);
     s.collision = p.collision;
+    s.stock = p.stock;
     const auto at = MapPoint(info, p.pos[0], p.pos[1], p.pos[2]);
     for (int a = 0; a < 3; ++a)
       s.pos[a] = at[size_t(a)];
@@ -6655,16 +6744,16 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
     return false;
   });
   REXLOG_INFO("gta4-trainer: map {}: the model table holds {} of {}", info.name, used, kModelInfoCount);
-  REXLOG_INFO("gta4-trainer: map {} requested: {} pieces, {} models ({} not in the game's images{}{}), the sea there "
-              "at {:.2f} (the mod's {:.2f})",
-              info.name, g.pieces.size(), g.models.size(), g.models.size() - size_t(g.known_count),
+  const size_t stock = size_t(std::count_if(g.pieces.begin(), g.pieces.end(), [](const MapStanding& s) { return s.stock; }));
+  REXLOG_INFO("gta4-trainer: map {} requested: {} pieces ({} of the game's own models), {} models ({} not in the "
+              "game's images{}{}), the sea there at {:.2f} (the mod's {:.2f})",
+              info.name, g.pieces.size(), stock, g.models.size(), g.models.size() - size_t(g.known_count),
               unknown.empty() ? "" : ": ", unknown, info.sea_dst, info.sea_src);
   MapRequestBounds(ctx, base);
-  if (g.bounds_slot >= 0) {
+  if (g.AnyDictionary()) {
     const auto links = MapCountLinks(base);
-    REXLOG_INFO("gta4-trainer: map {}: collision dictionary {}.xbd asked for ({}); {} of its {} models with collision "
-                "linked to it already",
-                info.name, info.bounds, DescribeBoundsSlot(base, g.bounds_slot), links.linked, links.models);
+    REXLOG_INFO("gta4-trainer: map {}: collision asked for ({}); {} of its {} models with collision linked already",
+                info.name, DescribeDictionaries(base), links.linked, links.models);
   } else if (info.bounds.empty()) {
     REXLOG_INFO("gta4-trainer: map {} has no collision dictionary", info.name);
   }
@@ -6698,24 +6787,31 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     else if (now >= g.next_renew)
       Invoke(ctx, base, "REQUEST_MODEL", {mdl.hash});
   }
-  // Its collision dictionary: in once the store holds it (its set callback
-  // has linked the models then); asked for again while it is not.
-  if (g.bounds_slot >= 0 && !g.bounds_in) {
-    const uint32_t entry = BoundsEntry(base, g.bounds_slot);
-    if (entry && Read(base, entry) != 0) {
-      g.bounds_in = true;
-      g.bounds_in_at = now;
-      const auto links = MapCountLinks(base);
-      REXLOG_INFO("gta4-trainer: map {}: collision dictionary {}.xbd in after {} ms ({}): {} of {} models with "
-                  "collision linked, {} with their bounds{}",
-                  g.info->name, g.info->bounds, now - g.requested_at, DescribeBoundsSlot(base, g.bounds_slot),
-                  links.linked, links.models, links.archetypes,
-                  links.first_unlinked ? fmt::format(" (not: {:08X}, its +0x52 {:04X})", links.first_unlinked,
-                                                     links.first_unlinked_slot)
-                                       : std::string());
-    } else if (now >= g.next_renew) {
-      MapRequestBounds(ctx, base);
+  // Its collision dictionaries: each in once the store holds it (its set
+  // callback has linked the models then); asked for again while one is not.
+  if (!g.DictionariesIn()) {
+    bool missing = false;
+    for (auto& d : g.dicts) {
+      if (d.slot < 0 || d.in)
+        continue;
+      const uint32_t entry = BoundsEntry(base, d.slot);
+      if (entry && Read(base, entry) != 0) {
+        d.in = true;
+        g.bounds_in_at = now;
+        const auto links = MapCountLinks(base);
+        REXLOG_INFO("gta4-trainer: map {}: collision dictionary {}.xbd in after {} ms ({}): {} of {} models with "
+                    "collision linked, {} with their bounds{}",
+                    g.info->name, d.name, now - g.requested_at, DescribeBoundsSlot(base, d.slot), links.linked,
+                    links.models, links.archetypes,
+                    links.first_unlinked ? fmt::format(" (not yet: {:08X}, its +0x52 {:04X})", links.first_unlinked,
+                                                       links.first_unlinked_slot)
+                                         : std::string());
+      } else {
+        missing = true;
+      }
     }
+    if (missing && now >= g.next_renew)
+      MapRequestBounds(ctx, base);
   }
   if (now >= g.next_renew) {
     g.next_renew = now + 6000;
@@ -6727,20 +6823,21 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
                 now - g.requested_at);
   }
   g.loaded_count = in;
-  // (the pieces wait for the dictionary: one made before it is in gets no
+  // (the pieces wait for the dictionaries: one made before its is in gets no
   // collision of its own till the game looks again; 20 s at most, then on
   // without it, logged)
-  const bool bounds_ready = g.bounds_slot < 0 || g.bounds_in || now - g.requested_at > kMapBoundsWaitMs;
+  const bool bounds_ready = g.DictionariesIn() || now - g.requested_at > kMapBoundsWaitMs;
   if (g.known_count > 0 && in == g.known_count && !bounds_ready && now >= g.next_report && g.reports < 8) {
     g.next_report = now + 5000;
     ++g.reports;
-    REXLOG_INFO("gta4-trainer: map {}: models in, waiting for {}.xbd ({})", g.info->name, g.info->bounds,
-                DescribeBoundsSlot(base, g.bounds_slot));
+    REXLOG_INFO("gta4-trainer: map {}: models in, waiting for its collision ({})", g.info->name,
+                DescribeDictionaries(base));
   }
   if (g.known_count > 0 && in == g.known_count && bounds_ready) {
-    if (g.bounds_slot >= 0 && !g.bounds_in)
-      REXLOG_WARN("gta4-trainer: map {}: {}.xbd not in after {} ms ({}); placing the pieces without waiting longer",
-                  g.info->name, g.info->bounds, now - g.requested_at, DescribeBoundsSlot(base, g.bounds_slot));
+    if (!g.DictionariesIn())
+      REXLOG_WARN("gta4-trainer: map {}: its collision not all in after {} ms ({}); placing the pieces without "
+                  "waiting longer",
+                  g.info->name, now - g.requested_at, DescribeDictionaries(base));
     g.loaded = true;
     g.loaded_at = now;
     if (!g_tm.in_car || g_tm.phase == 0)
@@ -6791,10 +6888,9 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
   }
   const auto links = MapCountLinks(base);
   REXLOG_INFO("gta4-trainer: map {} placed: {} pieces made, {} not, {} left out (models the game hasn't) ({}); {} of "
-              "{} models with collision linked to {} ({} with their bounds)",
+              "{} models with collision linked to their bounds ({}; {} with their bounds in)",
               g.info->name, made, failed, left_out, exact ? "exactly" : "CREATE_OBJECT, then moved", links.linked,
-              links.models, g.bounds_slot >= 0 ? g.info->bounds + ".xbd" : std::string("no dictionary"),
-              links.archetypes);
+              links.models, g.DictionaryNames(), links.archetypes);
   if (failed)
     return false;
   g.phase = 2;
@@ -6853,10 +6949,10 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
               g.info->name, exist, g.pieces.size(), shown, near_hidden.empty() ? std::string("none") : near_hidden,
               ground ? fmt::format("{:.2f}", *ground) : std::string("not found"), at[2], car, game.position[0],
               game.position[1], game.position[2]);
-  if (g.bounds_slot >= 0) {
+  if (g.AnyDictionary()) {
     const auto links = MapCountLinks(base);
-    REXLOG_INFO("gta4-trainer:   collision {}.xbd: {}; {} of {} models linked, {} with their bounds", g.info->bounds,
-                DescribeBoundsSlot(base, g.bounds_slot), links.linked, links.models, links.archetypes);
+    REXLOG_INFO("gta4-trainer:   collision: {}; {} of {} models linked, {} with their bounds", DescribeDictionaries(base),
+                links.linked, links.models, links.archetypes);
   }
   // The model under the arrival (one with collision) and one without, as the
   // game holds them: its model info's first 24 words and the streaming
@@ -6904,6 +7000,409 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
     return true;
   });
   dump("stock prop bm_plank01", plank, plank_info ? stock : -1);
+}
+
+// ---------------------------------------------------------------------------
+// A place's life (v1.7.37): what makes an island more than its pieces. While
+// a place stands and the player is on it:
+//  - the vehicles the mod parks (its .wpl car generators: the Gator Keys'
+//    sports cars at the hotel, its sailboat and helicopter; Wake Island's
+//    dinghies, jeeps and the carrier's helicopters) stand there, made as the
+//    player comes within reach and let go of again far away, as the game's
+//    own generators do; one driven off is the player's;
+//  - people who belong there (the set's ped models: tourists, joggers, hotel
+//    staff; airmen, sailors) are kept about the player, walking from spot to
+//    spot - the island has no paths for the game's own population, so the
+//    trainer walks them on straight lines over its own ground grid
+//    (ground.bin, as the game's ground probe does not see the pieces);
+//  - the weather the place asks for holds (the Keys' endless sunshine, the
+//    atoll's wind), and its own sound plays (gta4_island_sound.h).
+// ---------------------------------------------------------------------------
+struct LifeVehicle {
+  uint32_t hash = 0, car = 0;
+  float pos[3]{}, heading = 0.0f;  // (the game's coordinates)
+  bool asked = false, taken = false;
+  std::string model;
+};
+struct LifePed {
+  uint32_t ped = 0;
+  uint64_t next_task = 0;
+  float spot[3]{};
+};
+struct LifeGround {
+  float x0 = 0, y0 = 0;
+  int cell = 0, w = 0, h = 0;
+  std::vector<int16_t> cm;
+  bool loaded = false, tried = false;
+  std::optional<float> At(float x, float y) const {
+    if (!loaded || cell <= 0)
+      return std::nullopt;
+    const int i = int(std::floor((x - x0) / float(cell))), j = int(std::floor((y - y0) / float(cell)));
+    if (i < 0 || j < 0 || i >= w || j >= h)
+      return std::nullopt;
+    const int16_t v = cm[size_t(j) * size_t(w) + size_t(i)];
+    if (v == -32768)
+      return std::nullopt;
+    return float(v) / 100.0f;
+  }
+};
+struct MapLife {
+  const gta4::addons::MapInfo* info = nullptr;
+  std::vector<LifeVehicle> vehicles;
+  std::vector<uint32_t> ped_models;
+  std::vector<std::string> ped_names;
+  std::vector<LifePed> peds;
+  LifeGround ground;
+  uint64_t next_tick = 0, next_ped = 0;
+  bool weather_forced = false, ambience_on = false, models_asked = false;
+  int made_vehicles = 0, made_peds = 0, logs = 0, cursor = 0;
+  uint32_t seed = 0x1234567u;
+  float Uniform() {
+    seed = seed * 1664525u + 1013904223u;
+    return float(seed >> 8) * (1.0f / 16777216.0f);
+  }
+};
+MapLife g_life;
+gta4::island::Ambience g_island_synth;
+#if REX_PLATFORM_PS5
+class IslandSource final : public gta4ps5::sound::Source {
+ public:
+  size_t Read(float* lr, size_t frames) override {
+    g_island_synth.Render(lr, frames);
+    return frames;
+  }
+  bool Rewind() override { return true; }
+};
+gta4ps5::sound::Voice* g_island_voice = nullptr;
+#endif
+constexpr float kLifeVehicleNear = 300.0f, kLifeVehicleFar = 420.0f;  // made within, let go beyond (m)
+constexpr float kLifePedNear = 28.0f, kLifePedSpread = 45.0f, kLifePedFar = 130.0f;
+constexpr uint32_t kPedTypeCivMale = 4, kPedTypeCivFemale = 5;
+
+void LifeAmbience(bool on) {
+#if REX_PLATFORM_PS5
+  auto& L = g_life;
+  if (on) {
+    if (!g_island_voice) {
+      gta4ps5::sound::StartOutput();
+      g_island_voice = gta4ps5::sound::NewVoice();
+      g_island_voice->game_sound = true;
+    }
+    const int character = L.info && L.info->ambience == "atoll" ? gta4::island::Ambience::kAtoll
+                                                                  : gta4::island::Ambience::kKeys;
+    g_island_synth.SetTarget(0.9f, character);
+    if (!g_island_voice->Active()) {
+      g_island_voice->SetVolume(1.0f);
+      g_island_voice->Play(std::make_unique<IslandSource>(), true);
+    }
+  } else {
+    g_island_synth.SetTarget(0.0f, gta4::island::Ambience::kKeys);
+  }
+#endif
+}
+// (once a pass: the voice stopped once its fade is done)
+void LifeSoundTick() {
+#if REX_PLATFORM_PS5
+  if (g_island_voice && g_island_voice->Active() && !g_life.ambience_on && g_island_synth.Quiet())
+    g_island_voice->Stop();
+#endif
+}
+
+void LifeLoadGround(const gta4::addons::MapInfo& info) {
+  auto& g = g_life.ground;
+  if (g.tried)
+    return;
+  g.tried = true;
+  const auto path = info.dir / "ground.bin";
+  std::ifstream f(path, std::ios::binary);
+  if (!f)
+    return;
+  char magic[4] = {};
+  f.read(magic, 4);
+  uint32_t cell = 0, w = 0, h = 0;
+  f.read(reinterpret_cast<char*>(&g.x0), 4);
+  f.read(reinterpret_cast<char*>(&g.y0), 4);
+  f.read(reinterpret_cast<char*>(&cell), 4);
+  f.read(reinterpret_cast<char*>(&w), 4);
+  f.read(reinterpret_cast<char*>(&h), 4);
+  if (std::memcmp(magic, "GRND", 4) != 0 || !f || cell == 0 || cell > 64 || w == 0 || h == 0 || w * h > 4000000u)
+    return;
+  g.cell = int(cell);
+  g.w = int(w);
+  g.h = int(h);
+  g.cm.resize(size_t(w) * h);
+  f.read(reinterpret_cast<char*>(g.cm.data()), std::streamsize(g.cm.size() * 2));
+  g.loaded = bool(f);
+  // (the grid is in the mod's coordinates: moved to the game's here)
+  g.x0 += info.shift[0];
+  g.y0 += info.shift[1];
+  REXLOG_INFO("gta4-trainer: life: the ground of {} read: {}x{} cells of {} m from ({:.0f}, {:.0f}){}", info.name, w, h,
+              cell, g.x0, g.y0, g.loaded ? "" : " (short: not used)");
+}
+// The ground's height at (x, y), the game's coordinates: the set's own grid.
+std::optional<float> LifeGroundAt(float x, float y) {
+  const auto z = g_life.ground.At(x, y);
+  if (!z || !g_life.info)
+    return std::nullopt;
+  return *z + MapDz(*g_life.info);
+}
+
+void LifeStart(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info) {
+  auto& L = g_life;
+  L = MapLife{};
+  L.info = &info;
+  for (const auto& v : info.vehicles) {
+    LifeVehicle lv;
+    lv.model = v.model;
+    lv.hash = ModelHash(v.model);
+    const auto at = MapPoint(info, v.pos[0], v.pos[1], v.pos[2]);
+    for (int a = 0; a < 3; ++a)
+      lv.pos[a] = at[size_t(a)];
+    lv.heading = v.heading;
+    L.vehicles.push_back(lv);
+  }
+  for (const auto& n : info.peds) {
+    const uint32_t hash = ModelHash(n);
+    const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {hash});
+    if (known && !known->r0())
+      continue;
+    L.ped_models.push_back(hash);
+    L.ped_names.push_back(n);
+  }
+  LifeLoadGround(info);
+  REXLOG_INFO("gta4-trainer: life of {}: {} vehicles parked, {} ped models ({} about), weather {}, ambience {}",
+              info.name, L.vehicles.size(), L.ped_models.size(), info.wander, info.weather,
+              info.ambience.empty() ? "none" : info.ambience);
+}
+
+void LifeStop(PPCContext& ctx, uint8_t* base, const char* why) {
+  auto& L = g_life;
+  if (!L.info)
+    return;
+  int cars = 0, peds = 0;
+  for (auto& v : L.vehicles) {
+    if (!v.car)
+      continue;
+    const auto exists = Invoke(ctx, base, "DOES_VEHICLE_EXIST", {v.car});
+    if (exists && exists->r0()) {
+      Invoke(ctx, base, "MARK_CAR_AS_NO_LONGER_NEEDED", {0}, 0, v.car);  // (the game lets it go)
+      if (!v.taken) {
+        Invoke(ctx, base, "DELETE_CAR", {0}, 0, v.car);
+        ++cars;
+      }
+    }
+    v.car = 0;
+  }
+  for (auto& p : L.peds) {
+    const auto exists = Invoke(ctx, base, "DOES_CHAR_EXIST", {p.ped});
+    if (exists && exists->r0()) {
+      Invoke(ctx, base, "DELETE_CHAR", {0}, 0, p.ped);
+      ++peds;
+    }
+  }
+  L.peds.clear();
+  for (const uint32_t h : L.ped_models)
+    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {h});
+  if (L.weather_forced)
+    Invoke(ctx, base, "RELEASE_WEATHER", {});
+  LifeAmbience(false);
+  REXLOG_INFO("gta4-trainer: life of {} ended ({}): {} vehicles and {} people removed", L.info->name, why, cars,
+              peds);
+  const auto* info = L.info;
+  L = MapLife{};
+  (void)info;
+}
+
+// A ped's next walk: a straight line to a point near its spot, or a pause.
+void LifeTask(PPCContext& ctx, uint8_t* base, LifePed& p, uint64_t now) {
+  auto& L = g_life;
+  if (L.Uniform() < 0.3f) {
+    Invoke(ctx, base, "TASK_STAND_STILL", {p.ped, uint32_t(4000 + L.Uniform() * 6000)});
+    p.next_task = now + 5000 + uint64_t(L.Uniform() * 6000);
+    return;
+  }
+  for (int tries = 0; tries < 6; ++tries) {
+    const float a = L.Uniform() * 6.2831853f, d = 8.0f + L.Uniform() * 22.0f;
+    const float x = p.spot[0] + std::cos(a) * d, y = p.spot[1] + std::sin(a) * d;
+    const auto z = LifeGroundAt(x, y);
+    if (!z || *z < L.info->sea_dst + 0.4f || std::fabs(*z - p.spot[2]) > 6.0f)
+      continue;
+    Invoke(ctx, base, "TASK_GO_STRAIGHT_TO_COORD", {p.ped, Bits(x), Bits(y), Bits(*z), 2, uint32_t(-1)});
+    p.next_task = now + 7000 + uint64_t(L.Uniform() * 9000);
+    return;
+  }
+  p.next_task = now + 4000;
+}
+
+void LifeTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
+  auto& L = g_life;
+  const auto* standing = MapStandingNow();
+  if (!standing) {
+    if (L.info)
+      LifeStop(ctx, base, "the place went");
+    return;
+  }
+  if (L.info != standing)
+    LifeStart(ctx, base, *standing);
+  if (now < L.next_tick)
+    return;
+  L.next_tick = now + 500;
+  const auto& info = *L.info;
+  const std::array<float, 3> here{game.position[0], game.position[1], game.position[2]};
+  const bool on = OnMap(info, here, 250.0f);
+  // the weather and the sound, while the player is on the place
+  if (on && info.weather >= 0 && !L.weather_forced) {
+    Invoke(ctx, base, "FORCE_WEATHER_NOW", {uint32_t(info.weather)});
+    if (NativeKnown("FORCE_WEATHER"))
+      Invoke(ctx, base, "FORCE_WEATHER", {uint32_t(info.weather)});
+    L.weather_forced = true;
+  } else if (!on && L.weather_forced) {
+    Invoke(ctx, base, "RELEASE_WEATHER", {});
+    L.weather_forced = false;
+  }
+  if (!info.ambience.empty() && on != L.ambience_on) {
+    L.ambience_on = on;
+    LifeAmbience(on);
+  }
+  // the vehicles: made within reach, let go of far away; one driven off is the player's
+  const auto in_car = CurrentVehicle(ctx, base, game);
+  int made = 0;
+  for (auto& v : L.vehicles) {
+    const float dx = v.pos[0] - here[0], dy = v.pos[1] - here[1];
+    const float d = std::sqrt(dx * dx + dy * dy);
+    if (v.car) {
+      const auto exists = Invoke(ctx, base, "DOES_VEHICLE_EXIST", {v.car});
+      if (!exists || !exists->r0()) {
+        v.car = 0;
+        v.taken = true;  // (gone: wrecked, or the game took it; not made again)
+        continue;
+      }
+      if (in_car && *in_car == v.car) {
+        v.taken = true;
+        continue;
+      }
+      if (!v.taken) {
+        if (const auto at = CarPosition(ctx, base, v.car)) {
+          const float mx = (*at)[0] - v.pos[0], my = (*at)[1] - v.pos[1];
+          if (mx * mx + my * my > 12.0f * 12.0f) {
+            v.taken = true;  // (driven away: the player's now, the game's to keep or let go)
+            Invoke(ctx, base, "MARK_CAR_AS_NO_LONGER_NEEDED", {0}, 0, v.car);
+            v.car = 0;
+            continue;
+          }
+        }
+        if (d > kLifeVehicleFar) {
+          Invoke(ctx, base, "DELETE_CAR", {0}, 0, v.car);
+          v.car = 0;
+        }
+      }
+      continue;
+    }
+    if (v.taken || d > kLifeVehicleNear || made >= 2)
+      continue;
+    if (!v.asked) {
+      const auto known = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {v.hash});
+      if (known && !known->r0()) {
+        v.taken = true;  // (a model the game has not)
+        continue;
+      }
+      Invoke(ctx, base, "REQUEST_MODEL", {v.hash});
+      v.asked = true;
+      continue;
+    }
+    const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {v.hash});
+    if (!loaded || !loaded->r0()) {
+      Invoke(ctx, base, "REQUEST_MODEL", {v.hash});
+      continue;
+    }
+    const auto car = Invoke(ctx, base, "CREATE_CAR", {v.hash, Bits(v.pos[0]), Bits(v.pos[1]), Bits(v.pos[2] + 0.4f), 0, 1}, 4);
+    if (!car || !car->words[0]) {
+      v.taken = true;
+      continue;
+    }
+    v.car = car->words[0];
+    Invoke(ctx, base, "SET_CAR_HEADING", {v.car, Bits(v.heading)});
+    if (v.pos[2] > info.sea_dst + 1.0f)  // (on land: settled on its wheels; a boat floats where it is)
+      Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {v.car});
+    Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {v.hash});
+    ++made;
+    ++L.made_vehicles;
+    if (L.logs < 8) {
+      ++L.logs;
+      REXLOG_INFO("gta4-trainer: life: {} {:08X} parked at ({:.1f}, {:.1f}, {:.1f}) heading {:.0f}, {:.0f} m off",
+                  v.model, v.car, v.pos[0], v.pos[1], v.pos[2], v.heading, d);
+    }
+  }
+  // the people: those gone or far are forgotten; new ones come while fewer
+  // than wanted are about; each walks on from time to time
+  if (!L.models_asked && !L.ped_models.empty()) {
+    for (const uint32_t h : L.ped_models)
+      Invoke(ctx, base, "REQUEST_MODEL", {h});
+    L.models_asked = true;
+  }
+  for (auto it = L.peds.begin(); it != L.peds.end();) {
+    const auto exists = Invoke(ctx, base, "DOES_CHAR_EXIST", {it->ped});
+    bool keep = exists && exists->r0();
+    if (keep) {
+      const auto dead = Invoke(ctx, base, "IS_CHAR_DEAD", {it->ped});
+      if (dead && dead->r0())
+        keep = false;
+    }
+    if (keep) {
+      if (const auto c = Invoke(ctx, base, "GET_CHAR_COORDINATES", {it->ped, 0, 0, 0}, 1, 0, 3)) {
+        const float dx = c->f(0) - here[0], dy = c->f(1) - here[1];
+        if (dx * dx + dy * dy > kLifePedFar * kLifePedFar) {
+          Invoke(ctx, base, "DELETE_CHAR", {0}, 0, it->ped);
+          keep = false;
+        }
+      }
+    }
+    if (!keep) {
+      it = L.peds.erase(it);
+      continue;
+    }
+    if (now >= it->next_task)
+      LifeTask(ctx, base, *it, now);
+    ++it;
+  }
+  if (on && !L.ped_models.empty() && int(L.peds.size()) < info.wander && now >= L.next_ped && L.ground.loaded) {
+    L.next_ped = now + 1500;
+    for (int tries = 0; tries < 8; ++tries) {
+      const uint32_t hash = L.ped_models[size_t(L.cursor) % L.ped_models.size()];
+      const std::string& name = L.ped_names[size_t(L.cursor) % L.ped_names.size()];
+      ++L.cursor;
+      const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+      if (!loaded || !loaded->r0()) {
+        Invoke(ctx, base, "REQUEST_MODEL", {hash});
+        continue;
+      }
+      const float a = L.Uniform() * 6.2831853f, d = kLifePedNear + L.Uniform() * kLifePedSpread;
+      const float x = here[0] + std::cos(a) * d, y = here[1] + std::sin(a) * d;
+      const auto z = LifeGroundAt(x, y);
+      if (!z || *z < info.sea_dst + 0.4f || *z > here[2] + 15.0f || *z < here[2] - 15.0f)
+        continue;
+      const uint32_t type = (!name.empty() && (name[0] == 'f' || name[0] == 'F')) ? kPedTypeCivFemale : kPedTypeCivMale;
+      const auto made_ped = Invoke(ctx, base, "CREATE_CHAR", {type, hash, Bits(x), Bits(y), Bits(*z + 1.0f), 0, 1}, 5);
+      if (!made_ped || !made_ped->words[0])
+        continue;
+      LifePed p;
+      p.ped = made_ped->words[0];
+      p.spot[0] = x;
+      p.spot[1] = y;
+      p.spot[2] = *z;
+      if (NativeKnown("SET_CHAR_RANDOM_COMPONENT_VARIATION"))
+        Invoke(ctx, base, "SET_CHAR_RANDOM_COMPONENT_VARIATION", {p.ped});
+      Invoke(ctx, base, "SET_CHAR_HEADING", {p.ped, Bits(L.Uniform() * 360.0f)});
+      LifeTask(ctx, base, p, now);
+      L.peds.push_back(p);
+      ++L.made_peds;
+      if (L.made_peds <= 4)
+        REXLOG_INFO("gta4-trainer: life: {} {:08X} at ({:.1f}, {:.1f}, {:.2f}), {:.0f} m from the player ({} about)",
+                    name, p.ped, x, y, *z, d, L.peds.size());
+      break;
+    }
+  }
+  (void)s;
 }
 
 // Every frame in a time machine (a look a few times a second otherwise, and
@@ -6977,7 +7476,7 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
           if (gone > 2500 && now >= m.next_wait_toast) {
             m.next_wait_toast = now + 1500;
             const bool models_in = g_map.known_count > 0 && g_map.loaded_count == g_map.known_count;
-            const std::string what = models_in && g_map.bounds_slot >= 0 && !g_map.bounds_in
+            const std::string what = models_in && !g_map.DictionariesIn()
                                          ? std::string("its ground loading")
                                          : fmt::format("{} of {} loaded", g_map.loaded_count, g_map.known_count);
             Toast(s, fmt::format("Arriving at {}... ({})  Y: turn back", info->label, what), 1600);
@@ -9287,8 +9786,10 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     s_next_seat_look = now + 400;
     ArmouredSeat(ctx, base, game, now);
   }
-  if (map_due)
+  if (map_due) {
     MapTick(ctx, base, game, s, now);
+    LifeTick(ctx, base, game, s, now);
+  }
   if (drive_due) {
     s_next_drive_look = now + 250;
     PlayerVehicle(ctx, base, game);

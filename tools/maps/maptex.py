@@ -34,6 +34,7 @@ VP, PP = batconv.VP, batconv.PP
 MAP_SIDE = 512
 DETAIL_SIDE = 256
 MIN_LEVEL_SIDE = 32
+MIN_SIDE = 64  # a texture's level 0 at least this on a side
 XENOS = {'DXT1': (18, 8), 'DXT3': (19, 16), 'DXT5': (20, 16)}
 
 
@@ -100,13 +101,23 @@ def encode_levels(rgba, side):
 
 def texture_levels(src, side):
     """(fmt, [(w, h, PC block data)]) for a PC texture: its own levels from
-    the first no bigger than `side`, down to MIN_LEVEL_SIDE; or made here."""
+    the first no bigger than `side`, down to MIN_LEVEL_SIDE; or made here. A
+    texture under MIN_SIDE on a side (a mod's 8x8 glow, a 32x32 stand-in) is
+    made again at MIN_SIDE with mips: none of the game's own textures is that
+    small, and the port's renderer never made an image for one (v1.7.37:
+    the Gator Keys' lamps and a few surfaces drawn with no texture at all)."""
     w, h, fmt, n = src['w'], src['h'], src['fmt'], max(1, src['levels'])
-    if fmt not in XENOS or not (pow2(w) and pow2(h)) or src['data'] is None:
+    if fmt not in XENOS or not (pow2(w) and pow2(h)) or src['data'] is None or min(w, h) < MIN_SIDE:
         if src['data'] is None:
             rgba = np.full((16, 16, 4), 128, np.uint8)
         else:
             rgba = decode_pc(src)
+        if min(rgba.shape[0], rgba.shape[1]) < MIN_SIDE:
+            from PIL import Image
+            scale = MIN_SIDE / min(rgba.shape[0], rgba.shape[1])
+            img = Image.fromarray(rgba, 'RGBA').resize((max(MIN_SIDE, int(round(rgba.shape[1] * scale))),
+                                                        max(MIN_SIDE, int(round(rgba.shape[0] * scale)))), Image.BICUBIC)
+            rgba = np.asarray(img).astype(np.uint8)
         return encode_levels(rgba, side) + ('made',)
     offs, o = [], src['data']
     for k in range(n):

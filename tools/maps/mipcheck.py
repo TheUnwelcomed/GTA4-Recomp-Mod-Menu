@@ -46,7 +46,14 @@ def level_error(child, parent):
     p = parent[:ph // 2 * 2, :pw // 2 * 2].astype(np.float64)
     p = p.reshape(ph // 2, 2, pw // 2, 2, 4).mean((1, 3))
     h, w = min(child.shape[0], p.shape[0]), min(child.shape[1], p.shape[1])
-    return float(np.abs(child[:h, :w, :3].astype(np.float64) - p[:h, :w, :3]).mean())
+    c = child[:h, :w].astype(np.float64)
+    p = p[:h, :w]
+    # (a cutout's colour under its transparent texels means nothing, and
+    # differs level to level: Wake Island's palm leaves)
+    solid = (c[:, :, 3] > 64) & (p[:, :, 3] > 64)
+    if solid.sum() < 0.02 * solid.size:
+        return 0.0
+    return float(np.abs(c[:, :, :3] - p[:, :, :3])[solid].mean())
 
 
 def check(r, log=print):

@@ -1,0 +1,121 @@
+{
+  "name": "wake",
+  "label": "Dec 8, 1941 (Wake Island)",
+  "date": [
+    1941,
+    12,
+    8,
+    7,
+    0
+  ],
+  "prefix": "wk_",
+  "ide": [
+    "wake_main.ide",
+    "wake_props.ide",
+    "wake_stream.ide",
+    "us_carrier.ide",
+    "ship_intro.ide",
+    "ext_veg.ide"
+  ],
+  "wpl": [
+    "wake_main.wpl",
+    "wake_main_stream1.wpl",
+    "wake_props.wpl",
+    "wake_stream.wpl",
+    "wake_stream_stream0.wpl",
+    "wake_stream_stream1.wpl",
+    "wake_stream_stream2.wpl",
+    "wake_stream_stream3.wpl",
+    "wake_stream_stream4.wpl",
+    "us_carrier.wpl",
+    "us_carrier_stream0.wpl",
+    "us_carrier_stream1.wpl",
+    "us_carrier_stream2.wpl",
+    "ship_intro.wpl"
+  ],
+  "stock": "../stock_models.txt",
+  "sea": 0.0,
+  "from": [
+    0.0,
+    0.0
+  ],
+  "to": [
+    0.0,
+    0.0
+  ],
+  "tex": 256,
+  "detail": 128,
+  "stand_ins": {
+    "*": [
+      128,
+      128,
+      128,
+      255
+    ],
+    "*_bump": [
+      128,
+      128,
+      255,
+      255
+    ]
+  },
+  "notes": "Wake Island v1.1 by nine30 (a map for GTA IV): five archives (wake_main, wake_props, wake_stream, us_carrier, ship_intro) and the GTA V trees it adds to ext_veg.img, merged into one source directory; placed where the mod put it, in the open sea south-west of Alderney (the stock sea covers it). 745 of its placements are the game's own props and bushes (stock pieces, no files), 168 vegetation (16 GTA V models placed many times, the rest the game's), 368 its own models each placed once.",
+  "collision": {
+    "mode": "world",
+    "cell": 150,
+    "drop": [
+      "col_arbre_1"
+    ],
+    "seabed": 3.0,
+    "weld": 0.02,
+    "error": {
+      "col_main": 0.4,
+      "col_coast": 0.5,
+      "col_rxezse": 0.5,
+      "col_xbox*": 0.4,
+      "col_r*": 0.5,
+      "col_palm*": 0.3,
+      "col_arbre": 0.3,
+      "col_banane": 0.3,
+      "*": 0.2
+    },
+    "max_polys": 6000,
+    "notes": "v1.7.37: the mod's 52 world-space collision files cover regions (the ground, rocks, palms, the ship, the carrier's decks and rooms), not models: cut into 150 m cells carried by invisible pieces. col_arbre_1 repeats col_arbre's trees (same polygons and box)."
+  },
+  "tiles": {
+    "radius": 100,
+    "cell": 150,
+    "below_sea": 3.0,
+    "notes": "64 models over 100 m in radius (the sea floor, the ground, roads, the runway, rock lines, palm and bush clusters, the carrier's hull) cut into tiles of 150 m; render triangles wholly over 3 m under the sea dropped."
+  },
+  "plant_notes": "v1.7.37: not planted: the GTA V trees placed one by one stand on the mod's visible ground exactly, its collision runs up to 1.5 m over that ground in places (a poor guide), and its tree clusters (MW3 trees) have canopy pieces a grouping can't tell from plants; left as the mod placed them.",
+  "vehicles": "../stock_vehicles.txt",
+  "life": {
+    "peds": [
+      "m_m_pilot",
+      "m_y_airworker",
+      "m_y_nhelipilot",
+      "m_m_helipilot_01",
+      "m_y_swat",
+      "m_y_strooper",
+      "m_y_cop",
+      "m_m_securityman",
+      "m_y_construct_01",
+      "m_m_trucker_01",
+      "m_y_mechanic_02",
+      "m_m_fatcop_01"
+    ],
+    "wander": 7,
+    "weather": 2,
+    "ambience": "atoll",
+    "notes": "v1.7.37: the mod's car generators (its dinghies, jeeps, bikes, the carrier's helicopters); airmen, sailors and troopers about the player; the weather SUNNY_WINDY (2); the trainer's own wind, surf, a gull and a plane passing."
+  },
+  "arrive": [
+    -2790.0,
+    -2870.0,
+    2.85,
+    337.5,
+    450
+  ],
+  "arrive_notes": "the runway's south-east end, the whole runway ahead (the longest flat run found starts 80 m further up it)"
+}

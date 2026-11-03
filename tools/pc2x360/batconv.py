@@ -1307,16 +1307,20 @@ class Converter:
             v.w16(sg + k + 6, n)
         return sg
 
-    def _clone_shader(self, ts_info, ds):
+    def _clone_shader(self, ts_info, ds, overrides=None):
         """Clone a 360 shader (the template's, or another stock car's); fill
         parameters from donor shader ds by name hash. Parameter block laid out
         exactly as the source's: offsets | types (16-aligned) | names
-        (16-aligned) | values (16-aligned)."""
+        (16-aligned) | values (16-aligned). `overrides`: texture slots (by
+        name hash) given a texture name outright (a map terrain's layer put in
+        a plain shader's colour slot: mapdraw.py)."""
         src, ts = ts_info['res'], ts_info['off']
         foreign = src is not self.t
         d, v = self.d, self.v
         tparams = shader_params(src, ts)
         dparams = {p['hash']: p for p in shader_params(d, ds)}
+        for h, name in (overrides or {}).items():
+            dparams[h] = dict(hash=h, type=0, value=None, override=name)
         # the donor's colour map: a bump, specular or dirt slot naming it is a
         # placeholder (the Batwing's), filled from the options or the template
         colour = None
@@ -1331,6 +1335,13 @@ class Converter:
             for k in (0x44, 0x48):
                 p = src.vptr(ts + k)
                 v.w32(so + k, (VP | v.cstr(src.cstr(p))) if p is not None else 0)
+        # A preset of the same effect in another draw bucket (mapdraw's
+        # MAP_PRESETS: gta_cutout.sps is gta_default.fx in bucket 3): the
+        # bucket at +9 and the preset's name
+        if ts_info.get('bucket') is not None:
+            v.buf[so + 9] = ts_info['bucket']
+        if ts_info.get('sps_name'):
+            v.w32(so + 0x48, VP | v.cstr(ts_info['sps_name']))
         # The parameter block (offsets | types | names | values, size at +0x20)
         # is replicated byte for byte with the same 64-byte phase: the 360
         # compiler's packing has gaps no simple rule explains (tire: zeroes
@@ -1360,7 +1371,9 @@ class Converter:
             dp = dparams.get(p['hash'])
             name = None
             if dp is not None and dp['type'] == 0:
-                if dp['value'] is not None:
+                if dp.get('override'):
+                    name = dp['override']
+                elif dp['value'] is not None:
                     np_ = d.vptr(dp['value'] + 20)
                     name = d.cstr(np_) if np_ is not None else None
                 use = name is not None

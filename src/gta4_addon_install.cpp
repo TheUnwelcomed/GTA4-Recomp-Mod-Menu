@@ -1748,6 +1748,7 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     MapSet m;
     m.dir = dir;
     MapInfo& info = m.info;
+    info.dir = dir;
     for (const auto& raw : meta.lines) {
       const std::string line = Trimmed(raw);
       const size_t space = line.find(' ');
@@ -1772,9 +1773,40 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
         std::sscanf(value.c_str(), "%f %f %f %f", &info.area[0], &info.area[1], &info.area[2], &info.area[3]);
       else if (key == "prefix" && value.size() >= 3 && value.back() == '_')
         m.prefix = Lower(value);
-      else if (key == "bounds")
-        info.bounds = Lower(value);
+      else if (key == "bounds" || key == "peds") {  // (names: several collision dictionaries; the ped models)
+        std::string word;
+        auto& into = key == "bounds" ? info.bounds : info.peds;
+        for (const char c : Lower(value) + " ") {
+          if (c == ' ' || c == '\t') {
+            if (!word.empty())
+              into.push_back(word);
+            word.clear();
+          } else {
+            word += c;
+          }
+        }
+      } else if (key == "wander")
+        std::sscanf(value.c_str(), "%d", &info.wander);
+      else if (key == "weather")
+        std::sscanf(value.c_str(), "%d", &info.weather);
+      else if (key == "ambience")
+        info.ambience = Lower(value);
     }
+    // (the vehicles the mod parks: optional)
+    TextLines vehicles;
+    if (LoadText(dir / "vehicles.txt", vehicles))
+      for (const auto& raw : vehicles.lines) {
+        const std::string line = Trimmed(raw);
+        if (line.empty() || line[0] == '#')
+          continue;
+        char model[64] = {};
+        MapVehicle v;
+        if (std::sscanf(line.c_str(), "%63s %f %f %f %f", model, &v.pos[0], &v.pos[1], &v.pos[2], &v.heading) == 5) {
+          v.model = Lower(model);
+          info.vehicles.push_back(std::move(v));
+        }
+      }
+    int stock_pieces = 0;
     for (const auto& raw : place.lines) {
       const std::string line = Trimmed(raw);
       if (line.empty() || line[0] == '#')
@@ -1786,6 +1818,8 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
                       &p.pos[0], &p.pos[1], &p.pos[2], &collision) == 9) {
         p.model = Lower(model);
         p.collision = collision != 0;
+        p.stock = collision == 2;  // (the game's own model: the mod placed one of the game's props)
+        stock_pieces += p.stock;
         info.pieces.push_back(std::move(p));
       }
     }
@@ -1802,8 +1836,8 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     // so sets don't share one), else (an earlier release's set) the folder's
     // only .xbd.
     std::set<std::string> named;
-    if (!info.bounds.empty())
-      named.insert(info.bounds + ".xbd");
+    for (const auto& b : info.bounds)
+      named.insert(b + ".xbd");
     for (const auto& line : m.objs) {
       const size_t c1 = line.find(','), c2 = c1 == std::string::npos ? c1 : line.find(',', c1 + 1);
       if (c2 == std::string::npos)
@@ -1838,18 +1872,23 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     ec.clear();
     std::sort(m.files.begin(), m.files.end());
     if (info.bounds.empty() && dictionaries.size() == 1)
-      info.bounds = dictionaries.front();
+      info.bounds = dictionaries;
     else if (info.bounds.empty() && dictionaries.size() > 1)
       REXLOG_WARN("gta4-addons: map set {} has {} collision dictionaries and map.txt names none; its pieces "
                   "will have no collision",
                   dir.filename().string(), dictionaries.size());
-    else if (!info.bounds.empty() && std::none_of(m.files.begin(), m.files.end(), [&](const fs::path& f) {
-               return Lower(f.filename().string()) == info.bounds + ".xbd";
-             })) {
-      REXLOG_WARN("gta4-addons: map set {}: its collision dictionary {}.xbd is missing; its pieces will have no "
-                  "collision",
-                  dir.filename().string(), info.bounds);
-      info.bounds.clear();
+    for (auto b = info.bounds.begin(); b != info.bounds.end();) {
+      const bool have = std::any_of(m.files.begin(), m.files.end(), [&](const fs::path& f) {
+        return Lower(f.filename().string()) == *b + ".xbd";
+      });
+      if (!have) {
+        REXLOG_WARN("gta4-addons: map set {}: its collision dictionary {}.xbd is missing; the pieces in it will "
+                    "have no collision",
+                    dir.filename().string(), *b);
+        b = info.bounds.erase(b);
+      } else {
+        ++b;
+      }
     }
     if (unnamed)
       REXLOG_INFO("gta4-addons: map set {}: {} file(s) in its folder no model line names (an earlier release's); "
@@ -1859,8 +1898,11 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
       REXLOG_WARN("gta4-addons: map set {} has no name, pieces, models or files; left out", dir.string());
       continue;
     }
-    REXLOG_INFO("gta4-addons: map set {} (\"{}\"): {} pieces, {} models, {} files", info.name, info.label,
-                info.pieces.size(), m.objs.size(), m.files.size());
+    REXLOG_INFO("gta4-addons: map set {} (\"{}\"): {} pieces ({} of the game's own models), {} models, {} files, "
+                "{} collision dictionar{}; its life: {} vehicles, {} ped models ({} about), weather {}, ambience {}",
+                info.name, info.label, info.pieces.size(), stock_pieces, m.objs.size(), m.files.size(),
+                info.bounds.size(), info.bounds.size() == 1 ? "y" : "ies", info.vehicles.size(), info.peds.size(),
+                info.wander, info.weather, info.ambience.empty() ? "none" : info.ambience);
     out.push_back(std::move(m));
   }
   return out;

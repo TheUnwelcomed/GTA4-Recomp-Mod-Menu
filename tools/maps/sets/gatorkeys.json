@@ -76,5 +76,37 @@
     "cell": 150,
     "below_sea": 3.0,
     "notes": "v1.7.32: models over 100 m in radius (the terrain, roads, rocks, rails, lamps, small bits) cut into tiles of 150 m; their render triangles wholly over 3 m under the sea dropped (as the collision's are: the few huge deep-slope triangles went with them)"
+  },
+  "plant": [
+    "gtrpalm*"
+  ],
+  "plant_notes": "v1.7.37: the palm clusters' palms (gtrpalm0-19) each moved to the ground under it (plant.py: the mod places a cluster of up to 20 palms by its middle, so those on a slope's low side stood buried, those on the high side on their roots), with a trunk of collision each in place of the mod's gtrpalm_col.",
+  "vehicles": "../stock_vehicles.txt",
+  "vehicle_subs": {
+    "sparrow": "maverick"
+  },
+  "life": {
+    "peds": [
+      "f_y_tourist_01",
+      "m_y_tourist_02",
+      "m_y_runner",
+      "f_y_gymgal_01",
+      "m_y_gymguy_01",
+      "f_y_socialite",
+      "m_m_tennis",
+      "m_o_hotel_foot",
+      "f_y_waitress_01",
+      "m_y_barman_01",
+      "m_y_skatebike_01",
+      "f_y_shop_03",
+      "m_y_prich_01",
+      "f_y_prich_01",
+      "m_y_pcool_01",
+      "f_y_pcool_01"
+    ],
+    "wander": 9,
+    "weather": 0,
+    "ambience": "keys",
+    "notes": "v1.7.37: the mod's 36 car generators (sports cars at the hotel, a sailboat, a helicopter on the pad; Vice City's sparrow as the game's maverick); tourists, joggers and the resort's staff about the player; the weather EXTRASUNNY (0); the trainer's own surf, breeze, gulls and insects."
   }
 }

@@ -186,6 +186,58 @@ network session.
 
 ## Changes
 
+- **v1.7.37**: the second destination, **Wake Island**, the Gator Keys'
+  **trees** put right, and **life** on both. Wake Island (nine30's Wake
+  Island v1.1 for GTA IV: an atoll with a runway, a village, a bunkered
+  airfield, a BF2 carrier and the cargo ship from the game's intro, placed
+  where the mod put it, in the sea south-west of Alderney): the time
+  circuits get "Dec 8, 1941 (Wake Island)". The mod is five archives, 368
+  models of its own each placed once, 745 placements of the game's own
+  props and bushes, 168 of vegetation (16 GTA V trees from its
+  `ext_veg.img`), and collision in 52 world-space files by region, so
+  `mapset.py` grew: several `.ide` and `.wpl` files, one source directory;
+  pieces of the game's own models (`stock_models.txt` from the export's
+  `.ide` files, `stocknames.py`), which the trainer makes from the game's
+  model with the game's collision; the collision cut into 150 m cells
+  carried by invisible pieces of their own (`<prefix>c<n>`) and split into
+  dictionaries of ~3 MiB, the trainer waiting for every one; 64 models over
+  100 m across tiled as the Gator Keys' were (310 tiles). The terrain's
+  `gta_terrain_va_3lyr` / `4lyr` shaders (no console sample yet) are drawn
+  as one plain geometry per texture layer, each triangle given to the layer
+  that weighs most at its corners (sand, dirt and scrub by area, hard edges
+  between). The game's **object pool** holds 1300 objects (and keeps 50
+  free), too few for the set's ~1,600 pieces: the trainer makes it with
+  room for 3400 (its override of `sub_82326E10`, the pool at `0x82DE5A50`).
+  The ship's textures that are the game's own (the mod's intro ship uses
+  them) stand in grey until the stock dictionaries come in with the export.
+  The **trees**: the game's cut-out presets turned out to be its plain
+  effects in another draw bucket (`gta_cutout.sps` is `gta_default.fx` in
+  bucket 3, read off the PC files), so the trees' and fences' leaves are
+  cut out of their cards at last (`mapdraw.MAP_PRESETS`: the sample's
+  bucket and preset name changed), with back faces for the one-sided
+  cards, and an opaque shader whose colour map is a plant's alpha mask
+  (`alphamask.py`) is drawn cut out too (the Keys' monstera bushes were
+  black blobs). The Gator Keys' **palms are planted** (`plant.py`): each
+  palm of a cluster model (the mod places a cluster of twenty by its
+  middle, so those on a slope's low side stood buried, the high side's on
+  their roots) is moved to the ground its trunk passes through, its fronds
+  with it, and gets a trunk of collision - 556 plants, the tall ones up by
+  1.6 m on average, none moved to a surface its trunk does not reach (Wake
+  Island's trees stand on its visible ground as the mod placed them: left
+  alone). A texture under 64 texels on a side is made again at 64 with
+  mips (none of the game's own is smaller). **Life** (`life` in a set's
+  settings, `vehicles.txt`, `ground.bin`): the vehicles the mod parks (its
+  `.wpl` car generators: the Keys' sports cars at the hotel, its sailboat
+  and helicopter; Wake's dinghies, jeeps, bikes and the carrier's
+  helicopters) stand there while the player is within 300 m, one driven
+  off is the player's; people who belong there (tourists, joggers, the
+  resort's staff; airmen, sailors, troopers) are kept about the player and
+  walk from spot to spot over the set's own ground grid (the game's ground
+  probe does not see the pieces); the weather the place asks for holds
+  (endless sunshine; a windy atoll); and the place's own sound plays
+  (`gta4_island_sound.h`, synthesized: surf, breeze, gulls and insects on
+  the Keys; wind, heavier surf, a gull now and then and a propeller plane
+  passing every minute or two over Wake; `tools/island/` renders it).
 - **v1.7.36**: with the island solid (log 099: "works, I can drive"), the
   **black surfaces** (a tennis court, the wall by it, the hotel's walls, parts
   of the mansions): 23 models carry zero-length tangents on 432 vertices
@@ -535,6 +587,7 @@ network session.
 | `src/gta4_time_machine.h` | the DeLorean time machines' synthesized effects (keypad, circuits, flux capacitor, build-up, departure and fire trails, triple boom, vents, plutonium, Mr. Fusion, flight conversion, hover thrusters; `tools/car/render_time_machine.cpp` renders them) |
 | `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's, the Gauntlet's and the Lazar's physically informed model) and their canopy, door, gullwing, pop-up lamp, cannon, ramp and turret sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
+| `src/gta4_island_sound.h` | a place's synthesized ambience (the Keys' surf, breeze, gulls and insects; Wake's wind, surf and a plane passing), played while the player is on a map set's island (`tools/island/` renders it) |
 | `patches/liberty-trainer.patch` | the small wiring edits to the port (and one fix in its native hooks: the D3D fence wait skipped when there is no GPU fence memory) |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
 | `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI, with the rest-pose check |
@@ -548,7 +601,7 @@ describes:
 ```
 git clone https://github.com/elripalda/gta4-ps5 && cd gta4-ps5 && ./setup.sh
 git apply /path/to/patches/liberty-trainer.patch
-cp /path/to/src/gta4_trainer.* /path/to/src/gta4_addon_install.* /path/to/src/gta4_jet_engine.h /path/to/src/gta4_car_engine.h glue/rexglue-sdk-main/gta4-recomp/src/
+cp /path/to/src/* glue/rexglue-sdk-main/gta4-recomp/src/
 # then the cmake + ninja commands from ps5/BUILD.md
 # (glslangValidator must be built with ENABLE_OPT=ON: the shader overrides use -Os)
 ```
