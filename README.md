@@ -186,6 +186,19 @@ network session.
 
 ## Changes
 
+- **v1.7.40**: the **creatures' sounds** (a shark's bite with a splash over
+  it, a crocodile's splash as it slides into the water: synthesized
+  one-shots in the island ambience, `gta4_island_sound.h`, panned and
+  faded by distance), and the port's **null-call trap made to tell**:
+  v1.7.38's arrival at Wake Island (log 106) ended in the recompiler's
+  "call to invalid or unregistered function at guest address 0" on the
+  render thread, with nothing of where it came from. The trap
+  (`patches/liberty-trainer.patch`, the SDK's `function_dispatcher.cpp`)
+  now logs the caller (the game sets `lr` before a `bctrl`), the thread,
+  the argument registers and what they point to (an object's vtable
+  names its class), and the guest call chain walked up the stack; a call
+  to a null function pointer is then skipped as if it returned 0 and the
+  game goes on, so the log reaches the player instead of the crash.
 - **v1.7.39**: the **creatures** - the user's GTA V animals (the JAWS great
   white, StrideR's crocodile, indirivacua's elephant) as creatures the
   trainer moves. A V animal is a skinned ped on a skeleton the game here
@@ -636,7 +649,7 @@ network session.
 | `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's, the Gauntlet's and the Lazar's physically informed model) and their canopy, door, gullwing, pop-up lamp, cannon, ramp and turret sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
 | `src/gta4_island_sound.h` | a place's synthesized ambience (the Keys' surf, breeze, gulls and insects; Wake's wind, surf and a plane passing), played while the player is on a map set's island (`tools/island/` renders it) |
-| `patches/liberty-trainer.patch` | the small wiring edits to the port (and one fix in its native hooks: the D3D fence wait skipped when there is no GPU fence memory) |
+| `patches/liberty-trainer.patch` | the small wiring edits to the port, one fix in its native hooks (the D3D fence wait skipped when there is no GPU fence memory) and the SDK's null-call trap made to log its caller, registers and call chain and skip the call rather than end the game |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
 | `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI, with the rest-pose check; `pcwrite.py` writes GTA IV PC drawables and texture dictionaries from plain data (props made here, GTA V imports) |
 | `tools/maps/` | the map sets: `mapdraw.py`/`mapset.py` (a PC map mod as a destination), `vimport.py` (GTA V resources as PC pieces), `props.py` (Benny's sign and bar), `v_reader.py`, `plant.py`, `alphamask.py`, `collide.py`... (see `tools/maps/README.md`) |

@@ -218,3 +218,123 @@ index 887ab28..e766894 100644
    const uint64_t causal_sequence = rex::input::InputTraceCausalSequence();
    if (rex::input::IsInputTraceEnabled() && causal_sequence != 0) {
      REXLOG_INFO(
+diff --git a/glue/rexglue-sdk-main/src/system/function_dispatcher.cpp b/glue/rexglue-sdk-main/src/system/function_dispatcher.cpp
+index 67f7070..da611d0 100644
+--- a/glue/rexglue-sdk-main/src/system/function_dispatcher.cpp
++++ b/glue/rexglue-sdk-main/src/system/function_dispatcher.cpp
+@@ -13,6 +13,9 @@
+  *              role as a function dispatch table rather than a CPU emulator.
+  */
+ 
++#include <atomic>
++#include <string>
++
+ #include <rex/assert.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
+@@ -21,7 +24,10 @@
+ #include <rex/ppc/context.h>
+ #include <rex/runtime.h>
+ #include <rex/system/function_dispatcher.h>
++#include <rex/system/kernel_state.h>
+ #include <rex/system/thread_state.h>
++#include <rex/system/xmemory.h>
++#include <rex/system/xthread.h>
+ 
+ namespace rex::runtime {
+ 
+@@ -32,11 +38,92 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
+   return runtime ? runtime->function_dispatcher() : nullptr;
+ }
+ 
++// The guest call chain above a frame: each frame's back chain at 0(r1), the
++// caller's LR saved at -8 from the caller's frame (mflr r12; stw r12,-8(r1);
++// stwu ...), read only where the guest memory is committed (the hang
++// monitor's walk, windowed_app_main_sdl.cpp).
++std::string GuestCallers(const PPCContext& ctx) {
++  std::string callers;
++  auto* thread = rex::system::XThread::GetCurrentThread();
++  auto* kernel = rex::system::kernel_state();
++  if (!thread || !kernel || !kernel->memory())
++    return callers;
++  auto* memory = kernel->memory();
++  const uint32_t lo = thread->guest_stack_limit(), hi = thread->guest_stack_base();
++  if (!lo || !hi)
++    return callers;
++  auto readable = [&](uint32_t a) {
++    uint32_t protect = 0;
++    auto* heap = memory->LookupHeap(a);
++    return heap && heap->QueryProtect(a, &protect) && (protect & rex::memory::kMemoryProtectRead);
++  };
++  uint32_t sp = ctx.r1.u32;
++  for (int i = 0; i < 12; ++i) {
++    if (sp < lo || sp + 4 > hi || (sp & 3) || !readable(sp))
++      break;
++    const uint32_t back = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual(sp));
++    if (back <= sp || back < lo + 8 || back > hi || !readable(back - 8))
++      break;
++    callers += fmt::format(" < {:08X}", rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual(back - 8)));
++    sp = back;
++  }
++  return callers;
++}
++
++// The first words at what the argument registers point to (an object's
++// first word is its vtable, which names its class): "r3 -> 82xxxxxx ...".
++std::string GuestPointees(const PPCContext& ctx) {
++  std::string out;
++  auto* kernel = rex::system::kernel_state();
++  if (!kernel || !kernel->memory())
++    return out;
++  auto* memory = kernel->memory();
++  const std::pair<const char*, uint32_t> regs[] = {{"r3", ctx.r3.u32}, {"r4", ctx.r4.u32}, {"r5", ctx.r5.u32},
++                                                   {"r31", ctx.r31.u32}};
++  for (const auto& [name, a] : regs) {
++    uint32_t protect = 0;
++    auto* heap = memory->LookupHeap(a);
++    if (a < 0x10000 || (a & 3) || !heap || !heap->QueryProtect(a, &protect) ||
++        !(protect & rex::memory::kMemoryProtectRead) || !heap->QueryProtect(a + 12, &protect) ||
++        !(protect & rex::memory::kMemoryProtectRead))
++      continue;
++    const uint8_t* p = memory->TranslateVirtual(a);
++    out += fmt::format("; {} -> {:08X} {:08X} {:08X} {:08X}", name, rex::memory::load_and_swap<uint32_t>(p),
++                       rex::memory::load_and_swap<uint32_t>(p + 4), rex::memory::load_and_swap<uint32_t>(p + 8),
++                       rex::memory::load_and_swap<uint32_t>(p + 12));
++  }
++  return out;
++}
++
+ }  // namespace
+ 
++// An indirect call to no function. The game's code sets lr just before a
++// bctrl, so lr - 4 is the call and names the caller; the registers are the
++// call's arguments. A null target (an object's unfilled virtual, say) is
++// skipped as if the call returned 0 and the game goes on: v1.7.38's arrival
++// at Wake Island (log 106) ended in this trap from the render thread, the
++// game gone with it and nothing in the log of where the call came from. Any
++// other target (garbage, a jump into the middle of a function) still ends
++// the game, now with the same account of itself first.
+ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
+-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
+-            ctx.last_indirect_target);
++  const uint32_t target = ctx.last_indirect_target;
++  static std::atomic<uint32_t> seen{0};
++  const uint32_t n = seen.fetch_add(1, std::memory_order_relaxed);
++  if (target != 0 || n < 16 || n % 1000 == 0) {
++    REXLOG_ERROR("Call to {} function at guest address 0x{:08X} from 0x{:08X} (lr; thread {:08X}); r1 {:08X}, r3 "
++                 "{:08X} r4 {:08X} r5 {:08X} r6 {:08X} r7 {:08X} r8 {:08X}, r29 {:08X} r30 {:08X} r31 {:08X}; "
++                 "callers{}{}; {} such call(s) so far{}",
++                 target ? "invalid or unregistered" : "a null", target, uint32_t(ctx.lr),
++                 rex::system::XThread::GetCurrentThreadHandle(), ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
++                 ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r29.u32, ctx.r30.u32, ctx.r31.u32, GuestCallers(ctx),
++                 GuestPointees(ctx), n + 1, target ? "" : "; skipped (as if it returned 0)");
++  }
++  if (target == 0) {
++    ctx.r3.u64 = 0;
++    return;
++  }
++  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X} from 0x{:08X}", target,
++            uint32_t(ctx.lr));
+ }
+ 
+ PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
