@@ -186,6 +186,25 @@ network session.
 
 ## Changes
 
+- **v1.7.36**: with the island solid (log 099: "works, I can drive"), the
+  **black surfaces** (a tennis court, the wall by it, the hotel's walls, parts
+  of the mansions): 23 models carry zero-length tangents on 432 vertices
+  (the mod's exporter), which the console's normal-mapped shaders normalize
+  into NaN; `batconv.repair_vectors` rebuilds zero normals from the faces
+  round the vertex and zero tangents from the faces' texture mapping
+  (`unit` now also normalizes vectors off unit length by over 1%, which the
+  10-bit packing kept to a few steps), and `mapdraw.check` fails on any zero
+  or short one. The **crash on the trip home** (16 s after the island was
+  unloaded, in the game's D3D while freeing one of its texture
+  dictionaries): the resource destructor's fence wait (`sub_82A49438` →
+  `sub_82A491E0`) reads the GPU fence pointer at device +10896, which the
+  native renderer never sets (the runtime's own `sub_82A499B8` checks it);
+  a hook in the port's native hooks skips the wait when it is null. Not
+  bugs: the highway ending in the sea is the mod's bridge to Vice City; the
+  palms stand as the mod places them (clusters of up to 20 placed by their
+  middle, trunks 1-9 m underground by the mod's own trunk collision) - to be
+  planted one by one later. The palm fronds stay solid cards until the
+  mapsets export (the game's `gta_trees` / cutout shader samples) arrives.
 - **v1.7.35**: v1.7.34's collision loaded and linked (log 098: 108 of 108
   in 284 ms), and the game **froze as the car came down**: a physics worker
   looping forever in the BVH node walk (`sub_8297F0E8`, called from
@@ -516,7 +535,7 @@ network session.
 | `src/gta4_time_machine.h` | the DeLorean time machines' synthesized effects (keypad, circuits, flux capacitor, build-up, departure and fire trails, triple boom, vents, plutonium, Mr. Fusion, flight conversion, hover thrusters; `tools/car/render_time_machine.cpp` renders them) |
 | `src/gta4_car_engine.h` | the add-on cars' synthesized engines (the Batmobile's original voice; the Deimos's, the Nexus's, the Arbiter X's, the Dominator 645's, the Gauntlet's and the Lazar's physically informed model) and their canopy, door, gullwing, pop-up lamp, cannon, ramp and turret sounds (the same way; `tools/car/` renders them) |
 | `src/gta4_addon_install.h` / `.cpp` | installs the bundled add-on vehicles into the game at launch: model files into `vehicles.img`, data lines into a shadow `common.rpf` |
-| `patches/liberty-trainer.patch` | the five small wiring edits to the port |
+| `patches/liberty-trainer.patch` | the small wiring edits to the port (and one fix in its native hooks: the D3D fence wait skipped when there is no GPU fence memory) |
 | `addons/` | the add-on vehicles: what each registers, notes and limits |
 | `tools/pc2x360/` | PC → Xbox 360 vehicle converter, verified against the stock FBI, with the rest-pose check |
 | `tools/inspect/`, `tools/re/`, `tools/unarc.py` | car file inspection, the game-code disassembly helper, the mod-archive unpacker (see `tools/README.md`) |

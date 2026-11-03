@@ -50,6 +50,37 @@ index 9945830..e9e272c 100644
    const uint32_t return_address = static_cast<uint32_t>(ctx.lr);
    auto* registration = gta4::FindRegistration(return_address);
    if (!registration) {
+diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_native_hooks.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_native_hooks.cpp
+index 79d2289..30c157c 100644
+--- a/glue/rexglue-sdk-main/gta4-recomp/src/gta4_native_hooks.cpp
++++ b/glue/rexglue-sdk-main/gta4-recomp/src/gta4_native_hooks.cpp
+@@ -5680,6 +5680,26 @@ extern "C" void sub_82A441F8(PPCContext& ctx, uint8_t* base) {
+   __imp__sub_82A441F8(ctx, base);
+ }
+ 
++// D3D's wait for the GPU to pass a resource's fence (sub_82A49438, from a
++// resource's destructor, tail-calls this with the fence at resource +8). The
++// native renderer keeps no GPU fence memory: device +10896 stays null (the
++// runtime's own sub_82A499B8 checks it first), and this function read through
++// it. A texture dictionary released with a fence still on one of its textures
++// - the Gator Keys' after the trip home (log 099, v1.7.35) - crashed here.
++extern "C" void sub_82A491E0(PPCContext& ctx, uint8_t* base) {
++  constexpr uint32_t kGpuFencePointerOffset = 10896;
++  const uint32_t device = ctx.r3.u32;
++  if (IsNativeMode() && (!device || LoadU32(base, device + kGpuFencePointerOffset) == 0)) {
++    static std::atomic<uint32_t> logged{0};
++    if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
++      REXLOG_INFO("gta4-native: fence wait skipped (no GPU fence memory): device={:08X} fence={:08X}", device,
++                  ctx.r4.u32);
++    }
++    return;
++  }
++  __imp__sub_82A491E0(ctx, base);
++}
++
+ extern "C" void D3DResource_Release(PPCContext& ctx, uint8_t* base) {
+   const bool native_mode = IsNativeMode();
+   const uint32_t resource = ctx.r3.u32;
 diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp
 index a9b2c2a..4b628ee 100644
 --- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/gta4_ps5_app.cpp

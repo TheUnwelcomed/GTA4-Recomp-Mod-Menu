@@ -165,6 +165,7 @@ class MapDrawable(batconv.Converter):
         self.p = batconv.Seg()
         self.decls = {}
         self.uv_filled = 0
+        self.zero_vectors = 0
         self.texture_names = set()
         self.options = {}
         self.bone_map = {}
@@ -350,6 +351,16 @@ def check(body, flags, donor):
                     p = struct.unpack_from('>3f', x.phys, base + v * g['vb_stride'] + at[0])
                     assert p in pc_pos, ('position not in the mod', p)
                     checked += 1
+                # (every normal, tangent and binormal a direction: a zero one
+                # is drawn black by the normal-mapped shaders - v1.7.35)
+                for e in (3, 14, 15):
+                    if e not in at:
+                        continue
+                    for v in range(n):
+                        w = struct.unpack_from('>I', x.phys, base + v * g['vb_stride'] + at[e])[0]
+                        parts = [((w >> sh) & 0x3FF) for sh in (0, 10, 20)]
+                        parts = [q - 1024 if q >= 512 else q for q in parts]
+                        assert sum(q * q for q in parts) > 450 * 450, ('zero or short vector', e, v, parts)
         report.append('%d triangles, %d positions checked' % (tri_x, checked))
     return '; '.join(report)
 

@@ -324,12 +324,87 @@ UV_BITS = 0x3FC0  # texcoord sets 0-7 (usage bits 6-13)
 
 def unit(x, y, z):
     """A direction for 10:10:10 packing: some exporters leave the odd normal
-    unnormalised (lengths of 100 seen), which would wrap the 10-bit fields;
-    those are normalised, everything already in range is left exactly as is."""
-    if max(abs(x), abs(y), abs(z)) <= 1.0:
-        return x, y, z
+    unnormalised (lengths of 100 seen, which would wrap the 10-bit fields;
+    tangents of 0.1, which the packing would keep to a few steps); anything
+    off unit length by over 1% is normalised, the rest left exactly as is.
+    A zero vector stays zero (repair_vectors rebuilds those first)."""
     n = (x * x + y * y + z * z) ** 0.5
-    return (x / n, y / n, z / n) if n > 0 else (0.0, 0.0, 1.0)
+    if 0.99 <= n <= 1.01 or n < 1e-6:
+        return x, y, z
+    return x / n, y / n, z / n
+
+
+def repair_vectors(src, usage, count, stride, idx):
+    """PC vertices with their zero-length normals, tangents and binormals
+    replaced (returns the bytes and how many). The Gator Keys' models carry
+    zero tangents on a few hundred vertices (v1.7.35: a tennis court, the
+    hotel's walls, the mansions drawn black - the console's normal-mapped
+    shaders normalize them into NaN); a normal is rebuilt from the faces
+    round the vertex, a tangent from the faces' texture coordinates (the
+    usual tangent-space sums, orthogonalized to the normal; any direction
+    across the normal when the faces give none), a binormal from the two."""
+    at = dict(vertex_layout(usage, SIZE_PC)[0])
+    if not any(e in at for e in (3, 14, 15)) or count == 0:
+        return src, 0
+    import numpy as np
+    raw = np.frombuffer(src, np.uint8).reshape(count, stride)
+    pos = raw[:, at[0]:at[0] + 12].copy().view('<f4').reshape(count, 3).astype(np.float64)
+    tri = np.array(idx, np.int64).reshape(-1, 3)
+    fixed = 0
+    out = bytearray(src)
+
+    def zero(e, n):
+        v = raw[:, at[e]:at[e] + 4 * n].copy().view('<f4').reshape(count, n).astype(np.float64)
+        return v, np.linalg.norm(v[:, :3], axis=1) < 1e-3
+    normals = None
+    if 3 in at:
+        normals, bad = zero(3, 3)
+        if bad.any():
+            fn = np.cross(pos[tri[:, 1]] - pos[tri[:, 0]], pos[tri[:, 2]] - pos[tri[:, 0]])
+            acc = np.zeros((count, 3))
+            for k in range(3):
+                np.add.at(acc, tri[:, k], fn)
+            ln = np.linalg.norm(acc, axis=1)
+            acc = np.where(ln[:, None] > 1e-12, acc / np.maximum(ln[:, None], 1e-12), np.array([0.0, 0.0, 1.0]))
+            normals[bad, :3] = acc[bad]
+            for v in np.nonzero(bad)[0]:
+                struct.pack_into('<3f', out, v * stride + at[3], *normals[v, :3])
+            fixed += int(bad.sum())
+    if 14 in at or 15 in at:
+        n = normals[:, :3] if normals is not None else np.tile([0.0, 0.0, 1.0], (count, 1))
+        tan = np.zeros((count, 3))
+        if 6 in at:
+            uv = raw[:, at[6]:at[6] + 8].copy().view('<f4').reshape(count, 2).astype(np.float64)
+            p0, p1, p2 = pos[tri[:, 0]], pos[tri[:, 1]], pos[tri[:, 2]]
+            t0, t1, t2 = uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]
+            e1, e2 = p1 - p0, p2 - p0
+            d1, d2 = t1 - t0, t2 - t0
+            det = d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1]
+            ok = np.abs(det) > 1e-12
+            ft = np.zeros((len(tri), 3))
+            ft[ok] = (e1[ok] * d2[ok, 1:2] - e2[ok] * d1[ok, 1:2]) / det[ok, None]
+            for k in range(3):
+                np.add.at(tan, tri[:, k], ft)
+        tan -= n * (tan * n).sum(axis=1, keepdims=True)
+        ln = np.linalg.norm(tan, axis=1)
+        across = np.cross(n, np.where(np.abs(n[:, 2:3]) < 0.9, np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])))
+        across /= np.maximum(np.linalg.norm(across, axis=1, keepdims=True), 1e-12)
+        tan = np.where(ln[:, None] > 1e-9, tan / np.maximum(ln[:, None], 1e-12), across)
+        if 14 in at:
+            tv, bad = zero(14, 4)
+            if bad.any():
+                for v in np.nonzero(bad)[0]:
+                    w = tv[v, 3] if abs(tv[v, 3]) > 0.5 else 1.0
+                    struct.pack_into('<4f', out, v * stride + at[14], *tan[v], w)
+                fixed += int(bad.sum())
+        if 15 in at:
+            bv, bad = zero(15, 3)
+            if bad.any():
+                bn = np.cross(n, tan)
+                for v in np.nonzero(bad)[0]:
+                    struct.pack_into('<3f', out, v * stride + at[15], *bn[v])
+                fixed += int(bad.sum())
+    return bytes(out), fixed
 
 
 def convert_vertices(src, usage, count, pc_stride, fill_uv=0):
@@ -741,6 +816,7 @@ class Converter:
         self.df = rsc5.read_fragtype(donor)
         self.decls = {}
         self.uv_filled = 0
+        self.zero_vectors = 0
         self.texture_names = set()
         self.options = options or {}
         self.shader_sources = list(shader_sources)
@@ -1379,6 +1455,11 @@ class Converter:
         vsrc, idx, vcount = self._cut_faces(vsrc, src_usage, vcount, g['vb_stride'], table, tb, idx)
         vsrc = self._split_vertices(vsrc, src_usage, vcount, g['vb_stride'], table, tb)
         vsrc = self._shift_vertices(vsrc, src_usage, vcount, g['vb_stride'], table)
+        vsrc, fixed = repair_vectors(vsrc, src_usage, vcount, g['vb_stride'], idx)
+        if fixed:
+            self.zero_vectors += fixed
+            self.log('geometry: %d zero normals/tangents/binormals replaced (a normal-mapped shader draws '
+                     'them black)' % fixed)
         vdata, stride = convert_vertices(vsrc, src_usage, vcount, g['vb_stride'], fill_uv)
         if fill_uv:
             self.uv_filled += 1
