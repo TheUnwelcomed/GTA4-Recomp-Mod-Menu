@@ -85,6 +85,19 @@ MAP_FALLBACK = {
     'gta_decal_glue.sps': 'gta_decal.sps',
     'gta_terrain_va_3lyr.sps': 'gta_default.sps',
     'gta_terrain_va_4lyr.sps': 'gta_default.sps',
+    # (Route 66, v1.7.43: its decals on normal-mapped walls, dirt decals, a
+    # pylon's wires drawn as thin strips, the diner's night glass)
+    'gta_normal_decal.sps': 'gta_decal.sps',
+    'gta_normal_spec_decal.sps': 'gta_decal.sps',
+    'gta_decal_dirt.sps': 'gta_decal.sps',
+    'gta_wire.sps': 'gta_default.sps',
+    'gta_emissivenight_alpha.sps': 'gta_emissive_alpha.sps',
+    'gta_emissivestrong_alpha.sps': 'gta_emissive_alpha.sps',
+    'gta_glass_spec.sps': 'gta_alpha.sps',
+    'gta_glass_emissive.sps': 'gta_alpha.sps',
+    'gta_glass_emissive_alpha.sps': 'gta_alpha.sps',
+    'gta_normal_cutout_fence.sps': 'gta_normal_cutout.sps',
+    None: 'gta_default.sps',  # (a shader with no preset name: four of Route 66's road models)
 }
 # Effects the game has not loaded (v1.7.42). The game loads its shader
 # effects from a list at boot (sub_828CD290, the presets' .sps files, each
@@ -155,6 +168,59 @@ def pc_triangles(donor):
             idx = np.array(struct.unpack_from('<%dH' % g['ib_count'], donor.phys, g['ib_data'][1]), np.int64)
             tris.append(pos[idx.reshape(-1, 3)])
     return np.concatenate(tris) if tris else np.zeros((0, 3, 3))
+
+
+def quat_matrix(q):
+    """A unit quaternion (x, y, z, w) as a 3x3 rotation (rows), as the
+    game turns a placed model (mapset.quat_matrix's)."""
+    x, y, z, w = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def turned(donor, q):
+    """The PC drawable with a placement's rotation baked into its vertices
+    (positions, normals, tangents, binormals turned; its box and sphere
+    refigured), so that a big model the mod places turned can be cut into
+    tiles placed unturned (v1.7.43: Route 66's connection roads). A new
+    resource; the file is not touched."""
+    R = quat_matrix(q)
+    r = rsc5.Resource(bytes(donor.virt) + bytes(donor.phys), donor.flags, False, donor.type, donor.name)
+    phys = bytearray(r.phys)
+    d = rsc5.read_drawable(r, 0)
+    lo = np.full(3, np.inf)
+    hi = np.full(3, -np.inf)
+    seen = set()
+    for lod in d['lods']:
+        for m in lod:
+            for g in m['geometries']:
+                key = g['vb_data'][1]
+                if key in seen:
+                    continue
+                seen.add(key)
+                at = dict(batconv.vertex_layout(g['decl']['usage'], batconv.SIZE_PC)[0])
+                n = g['vertex_count'] or g['vb_count']
+                stride = g['vb_stride']
+                for v in range(n):
+                    o = key + v * stride
+                    for e, k in ((0, 3), (3, 3), (14, 3), (15, 3)):
+                        if e not in at:
+                            continue
+                        vec = np.array(struct.unpack_from('<3f', phys, o + at[e]))
+                        vec = R @ vec
+                        struct.pack_into('<3f', phys, o + at[e], *[float(x) for x in vec])
+                        if e == 0:
+                            lo = np.minimum(lo, vec)
+                            hi = np.maximum(hi, vec)
+    virt = bytearray(r.virt)
+    if np.isfinite(lo).all():
+        c = (lo + hi) / 2
+        rad = float(np.linalg.norm(hi - lo) / 2)
+        struct.pack_into('<4f', virt, d['off'] + 16, *[float(x) for x in c], rad)
+        struct.pack_into('<4f', virt, d['off'] + 32, *[float(x) for x in lo], 0.0)
+        struct.pack_into('<4f', virt, d['off'] + 48, *[float(x) for x in hi], 0.0)
+    return rsc5.Resource(bytes(virt) + bytes(phys), donor.flags, False, donor.type, donor.name)
 
 
 def lifted(points, lift):

@@ -95,13 +95,14 @@ def decode_dxt1(data, w, h):
     rgb = np.take_along_axis(cpal, cidx[:, :, None].repeat(3, 2), 1)
     alpha = np.take_along_axis(apal, cidx, 1)
     px = np.concatenate([rgb, alpha[:, :, None]], 2)
-    return np.clip(np.rint(px), 0, 255).astype(np.uint8).reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
+    return np.clip(np.rint(px), 0, 255).astype(np.uint8).reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)[:max(h, 1), :max(w, 1)]
 
 
 def decode_dxt5(data, w, h):
-    """-> (h, w, 4) uint8 RGBA, for checking the encoder."""
-    bw, bh = max(1, w // 4), max(1, h // 4)
-    b = np.frombuffer(data, np.uint8).reshape(-1, 16)
+    """-> (h, w, 4) uint8 RGBA, for checking the encoder (a side not a
+    multiple of 4 is stored padded to one: a V pack's 125-pixel level)."""
+    bw, bh = max(1, (w + 3) // 4), max(1, (h + 3) // 4)
+    b = np.frombuffer(data, np.uint8)[:bw * bh * 16].reshape(-1, 16)
     a0, a1 = b[:, 0].astype(np.int32), b[:, 1].astype(np.int32)
     pal = np.where((a0 > a1)[:, None],
                    np.stack([a0, a1] + [((7 - k) * a0 + k * a1) // 7 for k in range(1, 7)], 1),
@@ -122,4 +123,4 @@ def decode_dxt5(data, w, h):
     cidx = np.stack([(cb >> np.uint32(2 * k)) & np.uint32(3) for k in range(16)], 1).astype(np.int64)
     rgb = np.take_along_axis(cpal, cidx[:, :, None].repeat(3, 2), 1)
     px = np.concatenate([rgb, alpha[:, :, None]], 2)
-    return np.clip(np.rint(px), 0, 255).astype(np.uint8).reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
+    return np.clip(np.rint(px), 0, 255).astype(np.uint8).reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)[:max(h, 1), :max(w, 1)]

@@ -154,7 +154,22 @@ entity's rotation is stored inverted as IV's are; the whole scene can be
 turned and anchored (`--anchor=vx,vy,vz:tx,ty,tz --turn=deg`); a model
 placed once is written turned as placed (its placement unrotated, so it can
 be tiled and its render mesh taken as collision). What the pack lacks (the
-game's own props it places) is listed and left out.
+game's own props it places) is listed and left out. A whole V map as a
+place (v1.7.43, `sets/hyrule.json`): `--keep=cx,cy,r` keeps the disc that
+matters (Hyrule Castle and its circuit, 600 m), cutting away the triangles
+beyond it in each model and leaving out models with nothing left, and the
+set stands as an island out to sea (`sea 0`, the collision from the render
+meshes, cells of 150 m).
+
+Big models the set tiles (v1.7.43): a model over 100 m placed once but
+turned is drawn turned (`mapdraw.turned`: the resource's positions,
+normals, tangents and binormals rotated, its box and sphere refigured) so
+`mapset.py` can tile it unrotated (Route 66's road pieces). Route 66 itself
+(`sets/route66.json`: 30 .ide files, 32 .wpl, 99 world-space collision
+files, 1,485 models) is converted but its set build stopped at 4,614 tiles
+(`short_names` collisions among names cut to the same hash digits, and far
+more models than the game's table has room for): it needs an area kept,
+like Hyrule's, and bigger tiles.
 
 Creatures (v1.7.39, `creature.py`, a set's `life.creatures`): a GTA V animal
 cut into rigid parts by the bones that drive each vertex (a triangle goes
@@ -209,29 +224,40 @@ Effects the game has not loaded (v1.7.42): the game loads its shader
 effects from a list at boot (`sub_828CD290`, the presets' .sps files, into a
 table of 128) and, placing a drawable, looks each shader's effect up by the
 hash at +0x28 among those (`sub_828C9C68`); one not loaded is an error the
-game would quit on, here a null read a moment later - the Keys' freeze
-(logs 108-109): since v1.7.38 the mansion's fences were drawn with the
-export's `gta_cutout_fence` sample, which v1.7.37 had stood in as
-`gta_cutout` (the Keys loaded then), the one effect the Keys used that Wake
-Island did not. `mapdraw.UNLOADED_EFFECTS` keeps a sample of such an
-effect out of use; the trainer logs the effects the game has loaded
-(`gta4-trainer: shader effects loaded`) for the next one found.
+game would quit on, here a null read a moment later - the Keys' crash
+(logs 108, 109, 113). v1.7.42 blamed the mansion's fences' `gta_cutout_fence`
+sample (`mapdraw.UNLOADED_EFFECTS` keeps it out of use); the next log showed
+the game has all 98 effects loaded, `gta_cutout_fence` among them (the
+city's gates use it), so the hash the game read was not the file's: v1.7.43
+hooks the lookup and logs a miss with the model being placed, the effect
+name the shader carries (its offset translated through the resource map's
+chunks) and the shader's words, and the crash report carries the last 96
+notes (every model placed). The files themselves check out: every shader's
+hash is its effect name's, every object inside its virtual page and every
+buffer inside its load chunk (`straddle`-style checks), the sizes within the
+flags.
 
 The pieces' kind (v1.7.42): a model's .ide flag 0x20000 (the mods' lines
 have it, as the game's loose props do) makes it a movable object - the game
 turns the city's such entities from dummies into objects near the player,
 and `SetPhysics` (`sub_82360060`) gives the bound's archetype a mass and an
 object's type flags (+16 0x80, +20 0x7BE8); without it a building's (+16
-0x4). The game's ground probes look for buildings (`GET_GROUND_Z_FOR_3D_COORD`
-asks the physics level for the types 6): with the flag, no probe ever found
-the pieces a car stood on (every arrival check since v1.7.34), the
-teleport's wait for ground never ended, the parked cars stood in the air,
-and Wake Island collided in some cells and not others. `mapset.py` clears
-the flag from a model with collision; the trainer sets the kind on the
-place's own models before its dictionaries load (`MapSetPiecesKind`, the
-menu's "Place Pieces As"), and five seconds after a place stands surveys
-the pieces' physics (`MapPhysicsSurvey`: entity, instance, level index,
-bound, a probe). `xbdinfo.py` reads a dictionary back entry by entry.
+0x4). v1.7.42 took the probes' "no ground" for a type filter (the probe's
+types 6) and made the pieces buildings; v1.7.43 found the trainer had read
+every probe wrong (the found flag in the height's word: `README.md`), so
+the probes see objects as well - the kind stays buildings (terrain that
+nothing pushes), with the menu's "Place Pieces As" to turn it back.
+`mapset.py` clears the flag from a model with collision; the trainer sets
+the kind on the place's own models before its dictionaries load
+(`MapSetPiecesKind`), and five seconds after a place stands surveys the
+pieces' physics (`MapPhysicsSurvey`: entity, instance, level index, bound,
+a probe over each, and the probe under the player beside the place's own
+height map). `xbdinfo.py` reads a dictionary back entry by entry.
+
+The ground (`ground.bin`, v1.7.43): the collision's walkable surface on a
+4 m grid (the highest point of each cell, centimetres) is what the trainer
+lands a teleport on when the game's probe finds no ground there yet, and
+what the life and the creatures stand on (`PlaceGround`).
 
 Names: the game registers an image's files by the first 24 characters of the
 name, the extension among them (`sub_825127C0`), so `mapset.py` keeps every

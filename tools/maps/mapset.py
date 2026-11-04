@@ -731,16 +731,22 @@ def main():
     # ---- tiles: the big models, placed once and unrotated, cut up
     tcfg = cfg.get('tiles')
     tiles_of = {}
+    turned_models = {}
     if tcfg:
         for m in used:
             if float(models[m][14]) <= tcfg['radius']:
                 continue
             places = [p for p in placed if p['model'] == m]
-            assert len(places) == 1 and abs(places[0]['q'][3]) > 0.99999, \
-                'a model over %.0f m (%s) placed %d times%s: tiles need it once, unrotated' % (
-                    tcfg['radius'], m, len(places), '' if abs(places[0]['q'][3]) > 0.99999 else ', rotated')
+            assert len(places) == 1, 'a model over %.0f m (%s) placed %d times: tiles need it once' % (
+                tcfg['radius'], m, len(places))
             p = places[0]
             donor = rsc5.Resource.pc(os.path.join(src, m + '.wdr'))
+            if abs(p['q'][3]) < 0.99999:
+                # (placed turned: the turn baked into the model, its tiles placed
+                # unturned - Route 66's connection roads, v1.7.43)
+                donor = mapdraw.turned(donor, p['q'])
+                turned_models[m] = tuple(p['q'])
+                p['q'] = (0.0, 0.0, 0.0, 1.0)
             zmin = cfg['sea'] - tcfg.get('below_sea', 6.0) - p['pos'][2]
             ts = mapdraw.plan_tiles(donor, tcfg['cell'], zmin, lifts.get(m))
             x0 = ts[0]['lo'][0] - ts[0]['cell'][0] * tcfg['cell']
@@ -749,9 +755,10 @@ def main():
                 t['key'] = '%s_%d' % (m, k)
                 t['grid'] = (x0, y0, tcfg['cell'])
             tiles_of[m] = (donor, ts)
-        print('tiles: %d models over %.0f m in %d tiles of %.0f m: %s' % (
+        print('tiles: %d models over %.0f m in %d tiles of %.0f m: %s%s' % (
             len(tiles_of), tcfg['radius'], sum(len(ts) for _, ts in tiles_of.values()), tcfg['cell'],
-            ', '.join('%s %d' % (m, len(ts)) for m, (_, ts) in sorted(tiles_of.items()))))
+            ', '.join('%s %d' % (m, len(ts)) for m, (_, ts) in sorted(tiles_of.items())),
+            ('; placed turned, the turn baked in: ' + ', '.join(sorted(turned_models))) if turned_models else ''))
 
     # the game's names for the models (a tiled one's tiles), the carriers and the texture dictionaries
     game_names = [m for m in used if m not in tiles_of] + [t['key'] for _, ts in tiles_of.values() for t in ts] + \

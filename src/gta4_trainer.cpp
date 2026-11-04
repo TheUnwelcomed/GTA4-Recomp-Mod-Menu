@@ -126,6 +126,27 @@ uint64_t NowMs() {
                       .count());
 }
 
+// ---------------------------------------------------------------------------
+// The crash notes (v1.7.43). The PS5 loses the log's tail when the game
+// crashes (logs 108 and 113: the trainer's lines before the fault, written
+// seconds earlier, missing from the file), so the last things that happened
+// - each model the game placed, the trainer's map lines, a shader effect
+// the game could not find - are kept here in host memory, a ring of short
+// lines, and the port's fault handler appends them to its crash line
+// (ps5_diag.cpp, GTA4_TrainerCrashNotes: no allocation, no lock). The
+// writers race only over which line a slot holds.
+// ---------------------------------------------------------------------------
+constexpr size_t kNoteRing = 96, kNoteLine = 112;
+char g_notes[kNoteRing][kNoteLine];
+std::atomic<uint32_t> g_note_head{0};
+void Note(std::string_view text) {
+  const uint32_t n = g_note_head.fetch_add(1, std::memory_order_relaxed);
+  char* line = g_notes[n % kNoteRing];
+  const size_t len = std::min(text.size(), kNoteLine - 1);
+  std::memcpy(line, text.data(), len);
+  line[len] = 0;
+}
+
 // RAGE's atStringHash (Jenkins one-at-a-time, lowercased): model names.
 uint32_t ModelHash(std::string_view name) {
   uint32_t h = 0;
@@ -1058,6 +1079,8 @@ constexpr std::array kTcdPresets = {
     // (a place as well as a time: the map sets' own islands, out to sea)
     TcdPreset{"Oct 26, 1984 (Gator Keys)", {1984, 10, 26, 10, 0}, "gatorkeys"},
     TcdPreset{"Dec 8, 1941 (Wake Island)", {1941, 12, 8, 7, 0}, "wake"},
+    TcdPreset{"May 5, 1200 (Hyrule Castle)", {1200, 5, 5, 10, 0}, "hyrule"},
+    TcdPreset{"Jun 20, 1962 (Route 66)", {1962, 6, 20, 17, 30}, "route66"},
 };
 
 // Shared trainer state: written on the game thread, drawn on the UI thread.
@@ -1402,6 +1425,11 @@ const PassVehicle& PlayerVehicle(PPCContext& ctx, uint8_t* base, const GameConte
 // is. v1.7.10 and before guessed 60 m up when the waypoint's ground was not
 // loaded yet: the player fell from the sky, sometimes through the city.
 bool MapGuarding();  // (a place being stood under the player, v1.7.40)
+// The standing place's own ground at (x, y), from its height map (v1.7.43:
+// the game's ground probe never sees a place's pieces - log 114, Wake Island:
+// every cell in the physics world and the probe returning the water's 0.00
+// under the arrival; defined with the life, further down).
+std::optional<float> PlaceGroundUnder(float x, float y);
 struct PendingTeleport {
   bool active = false;
   float x = 0, y = 0, from = 0;  // where, and the height the ground is looked for below
@@ -1412,23 +1440,33 @@ struct PendingTeleport {
 };
 PendingTeleport g_teleport;
 
+// (v1.7.43: the native answers through its pointer and returns whether it
+// found ground - and the trainer's call put both in the same word, the flag
+// written last: every "ground" it ever read was 0 or a denormal 1.4e-45,
+// logged "0.0", and teleports put the player a metre over nothing (the
+// places' arrivals under their terrain: Wake Island's sinking, logs 111 and
+// 114; the city's docks at their luck). The answer has its own word now.)
 std::optional<float> GroundBelow(PPCContext& ctx, uint8_t* base, float x, float y, float from) {
-  const auto ground = Invoke(ctx, base, "GET_GROUND_Z_FOR_3D_COORD", {Bits(x), Bits(y), Bits(from), 0}, 3);
-  if (!ground)
+  const auto ground =
+      Invoke(ctx, base, "GET_GROUND_Z_FOR_3D_COORD", {Bits(x), Bits(y), Bits(from), 0}, 3, 0, 1, -1, {}, 1);
+  if (!ground || !ground->words[0])
     return std::nullopt;
-  const float gz = ground->f(0);
-  if (!std::isfinite(gz) || gz == 0.0f || gz > from)
+  const float gz = ground->f(1);
+  if (!std::isfinite(gz) || gz > from)
     return std::nullopt;
   return gz;
 }
 
 void PlaceOnGround(PPCContext& ctx, uint8_t* base, const GameContext& game, uint32_t car, float x, float y,
-                   float gz, std::optional<float> heading = std::nullopt) {
+                   float gz, std::optional<float> heading = std::nullopt, bool on_place = false) {
   if (car) {
     Invoke(ctx, base, "SET_CAR_COORDINATES", {car, Bits(x), Bits(y), Bits(gz + 1.0f)});
     if (heading)
       Invoke(ctx, base, "SET_CAR_HEADING", {car, Bits(*heading)});
-    Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {car});
+    if (on_place)  // (the game's probe sees none of a place's ground: the car is let fall the metre instead)
+      Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {car, Bits(0.05f)});
+    else
+      Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {car});
   } else {
     // (A metre over the ground, as the trainer's teleports have always put
     // the player: a short drop at most.)
@@ -1447,8 +1485,10 @@ void Teleport(PPCContext& ctx, uint8_t* base, const GameContext& game, float x, 
   // landmark takes the highest ground there.
   const float from = z_hint ? *z_hint + 2.0f : 1000.0f;
   const float focus = z_hint.value_or(30.0f);
+  Note(fmt::format("teleport to ({:.0f}, {:.0f}): LOAD_SCENE", x, y));
   if (NativeKnown("LOAD_SCENE"))
     Invoke(ctx, base, "LOAD_SCENE", {Bits(x), Bits(y), Bits(focus)});
+  Note("LOAD_SCENE done");
   Invoke(ctx, base, "REQUEST_COLLISION_AT_POSN", {Bits(x), Bits(y), Bits(focus)});
   // (with a known height, ground more than 3 m under it is the sea or the
   // low-detail world: the real ground there has not loaded yet)
@@ -1459,6 +1499,16 @@ void Teleport(PPCContext& ctx, uint8_t* base, const GameContext& game, float x, 
     Toast(s, "Teleported.");
     return;
   }
+  // A place standing there whose collision the probe did not find yet: its
+  // own height map (v1.7.43).
+  if (!MapGuarding())
+    if (const auto pz = PlaceGroundUnder(x, y)) {
+      PlaceOnGround(ctx, base, game, car, x, y, *pz, heading, true);
+      REXLOG_INFO("gta4-trainer: teleported to {:.1f}, {:.1f}, the place's own ground {:.1f}{}", x, y, *pz,
+                  car ? " (with the vehicle)" : "");
+      Toast(s, "Teleported.");
+      return;
+    }
   // Not loaded yet: wait there, held still, until it is.
   const float hold = z_hint.value_or(60.0f);
   if (car) {
@@ -1487,6 +1537,14 @@ void TeleportTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
   auto gz = GroundBelow(ctx, base, t.x, t.y, t.from);
   if (gz && *gz < t.lowest)
     gz.reset();
+  // A place standing under the spot whose collision the probe did not find:
+  // its own height map, now (v1.7.43).
+  bool own_ground = false;
+  if (!gz)
+    if (const auto pz = PlaceGroundUnder(t.x, t.y)) {
+      gz = pz;
+      own_ground = true;
+    }
   const bool timed_out = NowMs() > t.until;
   if (!gz && !timed_out)
     return;
@@ -1501,8 +1559,8 @@ void TeleportTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
     Invoke(ctx, base, "FREEZE_CHAR_POSITION", {game.ped, 0});
   t.active = false;
   if (gz) {
-    PlaceOnGround(ctx, base, game, t.car, t.x, t.y, *gz, t.heading);
-    REXLOG_INFO("gta4-trainer: teleport landed, ground {:.1f}", *gz);
+    PlaceOnGround(ctx, base, game, t.car, t.x, t.y, *gz, t.heading, own_ground);
+    REXLOG_INFO("gta4-trainer: teleport landed, ground {:.1f}{}", *gz, own_ground ? " (the place's own height map)" : "");
     Toast(s, "Teleported.");
   } else {
     REXLOG_WARN("gta4-trainer: teleport: the ground at {:.1f}, {:.1f} never loaded", t.x, t.y);
@@ -2851,11 +2909,12 @@ float Axis(int16_t v) {
 }
 
 std::optional<float> GroundZ(PPCContext& ctx, uint8_t* base, float x, float y, float z) {
-  const auto ground = Invoke(ctx, base, "GET_GROUND_Z_FOR_3D_COORD", {Bits(x), Bits(y), Bits(z), 0}, 3);
-  if (!ground)
+  // (the found flag in word 0, the height in word 1: see GroundBelow)
+  const auto ground = Invoke(ctx, base, "GET_GROUND_Z_FOR_3D_COORD", {Bits(x), Bits(y), Bits(z), 0}, 3, 0, 1, -1, {}, 1);
+  if (!ground || !ground->words[0])
     return std::nullopt;
-  const float gz = ground->f(0);
-  if (!std::isfinite(gz) || gz == 0.0f)
+  const float gz = ground->f(1);
+  if (!std::isfinite(gz))
     return std::nullopt;
   return gz;
 }
@@ -6485,6 +6544,9 @@ struct MapRun {
   }
 };
 MapRun g_map;
+// (v1.7.43: ms from a moment to a tick's `now`, which can be a few ms older
+// than a moment set by the menu's action in the same frame - never wrapped)
+inline uint64_t Since(uint64_t now, uint64_t moment) { return now > moment ? now - moment : 0; }
 constexpr uint64_t kMapLoadLimitMs = 45000;  // a trip waits this long for the place, then turns back
 constexpr uint64_t kMapBoundsWaitMs = 20000;  // and this long for its collision dictionaries, then places it anyway
 
@@ -6919,6 +6981,7 @@ void LogShaderEffects(uint8_t* base) {
                          Read(base, e + 36));
   }
   REXLOG_INFO("gta4-trainer: shader effects loaded: {}: {}", n, names);
+  Note(fmt::format("shader effects loaded: {}", n));
 }
 
 // What a piece's collision is to the game (v1.7.42). A model's flag word
@@ -6926,17 +6989,15 @@ void LogShaderEffects(uint8_t* base) {
 // the game makes the city's such entities dummies turned into objects near
 // the player (sub_822B9B18), and SetPhysics (sub_82360060) gives their
 // bound's archetype a mass and the type flags of an object (+16 0x80, +20
-// 0x7BE8); without the bit the archetype gets a building's (+16 0x4). The
-// game's ground probe (GET_GROUND_Z_FOR_3D_COORD, sub_82363158's call to
-// the physics level with the types 6) sees buildings, not objects: with the
-// flag (v1.7.34-41, the .ide's 0x20000) the car drove the Keys' roads while
-// no probe found them (logs 095-101: "the ground under the arrival not
-// found", the car on it), the teleport's wait never saw the ground, the
-// places' parked cars stood in the air (SET_CAR_ON_GROUND_PROPERLY probes
-// too), and Wake Island collided here and there (log 111). The sets' lines
-// no longer carry the flag; the trainer sets the kind on each of the place's
-// models before its collision dictionaries load (the archetype is made as
-// they do): buildings unless the menu asks for movable objects.
+// 0x7BE8); without the bit the archetype gets a building's (+16 0x4).
+// v1.7.42 took the probes' "no ground" under the pieces for a type filter
+// (GET_GROUND_Z_FOR_3D_COORD asks the physics level for the types 6) and
+// made them buildings; v1.7.43 found the trainer had read every probe
+// wrong (GroundBelow: the found flag in the height's word), so the probes
+// see objects too. The kind stays buildings (terrain nothing pushes about):
+// the sets' lines no longer carry the flag; the trainer sets the kind on
+// each of the place's models before its collision dictionaries load (the
+// archetype is made as they do), movable objects when the menu asks.
 std::atomic<bool> g_map_movable{false};
 void MapSetPiecesKind(uint8_t* base, bool movable) {
   auto& g = g_map;
@@ -7038,6 +7099,7 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
                                             g.wanted_pieces, g.known_count, info.stream)
                               : std::string("placed at once"));
   REXLOG_INFO("gta4-trainer: map {}: the game's pools before it: {}", info.name, DescribePools(base));
+  Note(fmt::format("map {} requested: {} pieces, {} models", info.name, g.pieces.size(), g.models.size()));
   MapSetPiecesKind(base, g_map_movable.load(std::memory_order_relaxed));
   MapRequestBounds(ctx, base);
   if (g.AnyDictionary()) {
@@ -7102,7 +7164,7 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
         const auto links = MapCountLinks(base);
         REXLOG_INFO("gta4-trainer: map {}: collision dictionary {}.xbd in after {} ms ({}): {} of {} models with "
                     "collision linked, {} with their bounds{}",
-                    g.info->name, d.name, now - g.requested_at, DescribeBoundsSlot(base, d.slot), links.linked,
+                    g.info->name, d.name, Since(now, g.requested_at), DescribeBoundsSlot(base, d.slot), links.linked,
                     links.models, links.archetypes,
                     links.first_unlinked ? fmt::format(" (not yet: {:08X}, its +0x52 {:04X})", links.first_unlinked,
                                                        links.first_unlinked_slot)
@@ -7118,16 +7180,16 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     g.next_renew = now + 6000;
     ++g.renewals;
   }
-  if (in != g.loaded_count && g.logs < 12 && (in == g.known_count || now - g.requested_at > 3000)) {
+  if (in != g.loaded_count && g.logs < 12 && (in == g.known_count || Since(now, g.requested_at) > 3000)) {
     ++g.logs;
     REXLOG_INFO("gta4-trainer: map {}: {} of {} models loaded after {} ms", g.info->name, in, g.known_count,
-                now - g.requested_at);
+                Since(now, g.requested_at));
   }
   g.loaded_count = in;
   // (the pieces wait for the dictionaries: one made before its is in gets no
   // collision of its own till the game looks again; 20 s at most, then on
   // without it, logged)
-  const bool bounds_ready = g.DictionariesIn() || now - g.requested_at > kMapBoundsWaitMs;
+  const bool bounds_ready = g.DictionariesIn() || Since(now, g.requested_at) > kMapBoundsWaitMs;
   if (g.known_count > 0 && in == g.known_count && !bounds_ready && now >= g.next_report && g.reports < 8) {
     g.next_report = now + 5000;
     ++g.reports;
@@ -7138,7 +7200,7 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     if (!g.DictionariesIn())
       REXLOG_WARN("gta4-trainer: map {}: its collision not all in after {} ms ({}); placing the pieces without "
                   "waiting longer",
-                  g.info->name, now - g.requested_at, DescribeDictionaries(base));
+                  g.info->name, Since(now, g.requested_at), DescribeDictionaries(base));
     g.loaded = true;
     g.loaded_at = now;
     if ((!g_tm.in_car || g_tm.phase == 0) && !g.guarding)
@@ -7186,6 +7248,7 @@ bool MapPlace(PPCContext& ctx, uint8_t* base) {
               g.info->name, made, failed, left_out, waiting, exact ? "exactly" : "CREATE_OBJECT, then moved",
               links.linked, links.models, g.DictionaryNames(), links.archetypes);
   REXLOG_INFO("gta4-trainer: map {}: the game's pools with it placed: {}", g.info->name, DescribePools(base));
+  Note(fmt::format("map {} placed: {} pieces made, {} not", g.info->name, made, failed));
   if (failed)
     return false;
   g.phase = 2;
@@ -7344,6 +7407,7 @@ void StandPlaceUnder(PPCContext& ctx, uint8_t* base, const GameContext& game, St
     g_tm.present = TcdDate{info.date[0], info.date[1], info.date[2], info.date[3], info.date[4]};
     Invoke(ctx, base, "SET_TIME_OF_DAY", {uint32_t(std::clamp(info.date[3], 0, 23)), uint32_t(std::clamp(info.date[4], 0, 59))});
     REXLOG_INFO("gta4-trainer: {} stood under ({:.1f}, {:.1f}, {:.1f}): {}", info.name, x, y, z, why);
+    Note(fmt::format("{} stood under ({:.0f}, {:.0f}, {:.0f}): {}", info.name, x, y, z, why));
     Toast(s, fmt::format("Standing {}...", info.label), 2500);
   }
   Teleport(ctx, base, game, x, y, z, s, heading);
@@ -7377,15 +7441,20 @@ void MapGuard(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
       g.guarding = false;  // (it stands: the teleport puts the player down on it)
       return;
     }
+    // (the guard's clock: the tick's `now` was read before the menu's action
+    // set guard_since, so in the action's own frame it is a few ms behind -
+    // v1.7.42's first Wake trip was "not ready after 18446744073709551609 ms"
+    // and sent home at once, log 114)
+    const uint64_t waited = now > g.guard_since ? now - g.guard_since : 0;
     if (g.loaded && MapPlace(ctx, base)) {
       g.guarding = false;
-      REXLOG_INFO("gta4-trainer: map {} stood after {} ms (the guard)", g.info->name, now - g.guard_since);
+      REXLOG_INFO("gta4-trainer: map {} stood after {} ms (the guard)", g.info->name, waited);
       g.check_at = now + 5000;  // (v1.7.42: the check after a menu teleport too - its physics survey)
       return;
     }
-    if (now - g.guard_since > kMapLoadLimitMs) {
+    if (waited > kMapLoadLimitMs) {
       REXLOG_WARN("gta4-trainer: map {} not ready after {} ms ({} of {} models); the player taken home instead",
-                  g.info->name, now - g.guard_since, g.loaded_count, g.known_count);
+                  g.info->name, waited, g.loaded_count, g.known_count);
       g.guarding = false;
       g_teleport.active = false;
       const std::string label = g.info->label;
@@ -7583,6 +7652,19 @@ void MapPhysicsSurvey(PPCContext& ctx, uint8_t* base, const GameContext& game) {
               "level, {} with ground under a probe at their origin; the player at ({:.1f}, {:.1f}, {:.1f})",
               standing, rows.size(), with_inst, in_level, with_ground, game.position[0], game.position[1],
               game.position[2]);
+  // (v1.7.43: the probe under the player's own feet, from just over him and
+  // from well above, beside the place's own height map there)
+  {
+    const float px = game.position[0], py = game.position[1], pz = game.position[2];
+    const auto near = GroundZ(ctx, base, px, py, pz + 2.0f);
+    const auto high = GroundZ(ctx, base, px, py, pz + 50.0f);
+    const auto own = PlaceGroundUnder(px, py);
+    REXLOG_INFO("gta4-trainer:   the ground under the player: the game's probe from 2 m up {}, from 50 m up {}; the "
+                "place's height map {}",
+                near ? fmt::format("{:.2f}", *near) : std::string("none"),
+                high ? fmt::format("{:.2f}", *high) : std::string("none"),
+                own ? fmt::format("{:.2f}", *own) : std::string("none"));
+  }
   // The physics level itself ([0x82FF5360], made at boot - sub_82478B00:
   // extents set (sub_8294BE28: +80 their centre, +96 half the longest side,
   // the octree's cube), room for 6000 objects (+38) and 1500 active (+136)):
@@ -7893,15 +7975,19 @@ void LifeSoundTick() {
 #endif
 }
 
-void LifeLoadGround(const gta4::addons::MapInfo& info) {
-  auto& g = g_life.ground;
+// A place's ground (ground.bin: the collision's walkable surface, the highest
+// point of each 4 m cell, centimetres), read once per place (v1.7.43: for the
+// teleports and the parked cars as well as the life).
+const LifeGround& PlaceGround(const gta4::addons::MapInfo& info) {
+  static std::unordered_map<const gta4::addons::MapInfo*, LifeGround> grounds;
+  auto& g = grounds[&info];
   if (g.tried)
-    return;
+    return g;
   g.tried = true;
   const auto path = info.dir / "ground.bin";
   std::ifstream f(path, std::ios::binary);
   if (!f)
-    return;
+    return g;
   char magic[4] = {};
   f.read(magic, 4);
   uint32_t cell = 0, w = 0, h = 0;
@@ -7911,7 +7997,7 @@ void LifeLoadGround(const gta4::addons::MapInfo& info) {
   f.read(reinterpret_cast<char*>(&w), 4);
   f.read(reinterpret_cast<char*>(&h), 4);
   if (std::memcmp(magic, "GRND", 4) != 0 || !f || cell == 0 || cell > 64 || w == 0 || h == 0 || w * h > 4000000u)
-    return;
+    return g;
   g.cell = int(cell);
   g.w = int(w);
   g.h = int(h);
@@ -7921,15 +8007,29 @@ void LifeLoadGround(const gta4::addons::MapInfo& info) {
   // (the grid is in the mod's coordinates: moved to the game's here)
   g.x0 += info.shift[0];
   g.y0 += info.shift[1];
-  REXLOG_INFO("gta4-trainer: life: the ground of {} read: {}x{} cells of {} m from ({:.0f}, {:.0f}){}", info.name, w, h,
+  REXLOG_INFO("gta4-trainer: the ground of {} read: {}x{} cells of {} m from ({:.0f}, {:.0f}){}", info.name, w, h,
               cell, g.x0, g.y0, g.loaded ? "" : " (short: not used)");
+  return g;
 }
+void LifeLoadGround(const gta4::addons::MapInfo& info) { g_life.ground = PlaceGround(info); }
 // The ground's height at (x, y), the game's coordinates: the set's own grid.
 std::optional<float> LifeGroundAt(float x, float y) {
   const auto z = g_life.ground.At(x, y);
   if (!z || !g_life.info)
     return std::nullopt;
   return *z + MapDz(*g_life.info);
+}
+std::optional<float> PlaceGroundUnder(float x, float y) {
+  const auto& g = g_map;
+  if (!g.info || g.phase != 2)
+    return std::nullopt;
+  const std::array<float, 3> p{x, y, g.info->sea_dst};
+  if (!OnMap(*g.info, p, 0.0f))
+    return std::nullopt;
+  const auto z = PlaceGround(*g.info).At(x, y);
+  if (!z)
+    return std::nullopt;
+  return *z + MapDz(*g.info);
 }
 
 void LifeStart(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info) {
@@ -8476,8 +8576,14 @@ void LifeTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
     }
     v.car = car->words[0];
     Invoke(ctx, base, "SET_CAR_HEADING", {v.car, Bits(v.heading)});
-    if (v.pos[2] > info.sea_dst + 1.0f)  // (on land: settled on its wheels; a boat floats where it is)
+    // (on land: the mod parked it on its road; v1.7.43: the game's probe sees
+    // none of the place's ground, so SET_CAR_ON_GROUND_PROPERLY left it where
+    // it was made, asleep in the air - the car is woken to settle instead;
+    // a boat floats where it is)
+    if (v.pos[2] > info.sea_dst + 1.0f) {
       Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {v.car});
+      Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {v.car, Bits(0.05f)});
+    }
     Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {v.hash});
     ++made;
     ++L.made_vehicles;
@@ -11877,4 +11983,104 @@ extern "C" void sub_821B5538(PPCContext& ctx, uint8_t* base) {
   if (gta4::addons::ShadowsActive())
     return;
   __imp__sub_821B5538(ctx, base);
+}
+
+// ---------------------------------------------------------------------------
+// The crash notes (v1.7.43): the ring's lines, oldest first, for the port's
+// fault handler (ps5_diag.cpp calls this weakly, with no allocation).
+// ---------------------------------------------------------------------------
+extern "C" size_t GTA4_TrainerCrashNotes(char* out, size_t cap) {
+  using namespace gta4::trainer;
+  if (!out || cap < 2)
+    return 0;
+  const uint32_t head = g_note_head.load(std::memory_order_relaxed);
+  const uint32_t count = head < kNoteRing ? head : uint32_t(kNoteRing);
+  size_t n = 0;
+  for (uint32_t k = 0; k < count; ++k) {
+    const char* line = g_notes[(head - count + k) % kNoteRing];
+    size_t len = 0;
+    while (len < kNoteLine && line[len])
+      ++len;
+    if (n + len + 2 > cap)
+      break;
+    std::memcpy(out + n, line, len);
+    n += len;
+    out[n++] = '\n';
+  }
+  out[n] = 0;
+  return n;
+}
+
+// The model module's load (sub_821C7A08: r3 the model's index, r5 the
+// resource's map): the model about to be placed goes into the notes, so a
+// crash while the game places one (logs 108, 109, 113: the Keys) names it.
+extern "C" void sub_821C7A08(PPCContext& ctx, uint8_t* base) {
+  using namespace gta4::trainer;
+  const uint32_t index = ctx.r3.u32;
+  if (index < kModelInfoCount && Span(base, kModelInfoTable + index * 4, 4)) {
+    const uint32_t mi = Read(base, kModelInfoTable + index * 4);
+    const uint32_t hash = mi && Span(base, mi, 64) ? Read(base, mi + 60) : 0;
+    std::string name;
+    for (const auto& m : g_map.models)
+      if (m.hash == hash) {
+        name = m.name;
+        break;
+      }
+    Note(fmt::format("placing model {} ({:08X}, slot {})", name.empty() ? "?" : name, hash, index));
+  }
+  __imp__sub_821C7A08(ctx, base);
+}
+
+// A shader's placement (sub_828C9C68: r3 the shader's instance data,
+// shader + 0x14; r4 the datResource being placed, +0 its chunk map). The
+// game looks the shader's effect up by the hash at +20 in its effect list;
+// one not there is a null read right after (logs 108, 109, 113). Before the
+// game looks, the hash is checked here, and a miss is logged and noted with
+// the model being placed, the shader's words and the effect's name the
+// shader carries (+0x44: an unfixed offset, translated through the map),
+// so the crash report says which file and which shader.
+extern "C" void sub_828C9C68(PPCContext& ctx, uint8_t* base) {
+  using namespace gta4::trainer;
+  constexpr uint32_t kEffectList = 0x831C3DE8;
+  const uint32_t inst = ctx.r3.u32, rsc = ctx.r4.u32;
+  if (Span(base, inst, 40) && Span(base, kEffectList, 4)) {
+    const uint32_t hash = Read(base, inst + 20);
+    bool found = false;
+    int n = 0;
+    for (uint32_t e = Read(base, kEffectList); e && Span(base, e, 88) && n < 256; e = Read(base, e + 84), ++n)
+      if (Read(base, e + 36) == hash) {
+        found = true;
+        break;
+      }
+    if (!found) {
+      const uint32_t shader = inst - 0x14;
+      std::string words;
+      if (Span(base, shader, 0x60))
+        for (uint32_t w = 0; w < 24; ++w)
+          words += fmt::format("{}{:08X}", w ? " " : "", Read(base, shader + w * 4));
+      // the effect's name: its offset (0x5xxxxxxx) through the map's chunks
+      std::string name = "?";
+      const uint32_t map = Span(base, rsc, 16) ? Read(base, rsc) : 0;
+      const uint32_t raw = Span(base, shader + 0x44, 4) ? Read(base, shader + 0x44) : 0;
+      if (map && Span(base, map, 4)) {
+        const uint32_t chunks = Read16(base, map) + Read16(base, map + 2);
+        for (uint32_t k = 0; k < chunks && k < 128 && Span(base, map + 4 + k * 12, 12); ++k) {
+          const uint32_t src = Read(base, map + 4 + k * 12), dest = Read(base, map + 8 + k * 12),
+                         size = Read(base, map + 12 + k * 12);
+          if (raw >= src && raw < src + size) {
+            name = String(base, raw - src + dest, 64);
+            break;
+          }
+        }
+      }
+      const std::string last = g_note_head.load(std::memory_order_relaxed)
+                                   ? g_notes[(g_note_head.load(std::memory_order_relaxed) - 1) % kNoteRing]
+                                   : "";
+      REXLOG_WARN("gta4-trainer: shader effect miss: hash {:08X} not in the game's {} effects; the shader at {:08X} "
+                  "names '{}' (raw {:08X}); {}; the shader's words: {}",
+                  hash, n, shader, name, raw, last, words);
+      Note(fmt::format("EFFECT MISS {:08X} '{}' shader {:08X} rsc {:08X}", hash, name, shader, rsc));
+    }
+  }
+  __imp__sub_828C9C68(ctx, base);
 }

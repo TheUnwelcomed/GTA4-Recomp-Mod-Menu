@@ -9,6 +9,7 @@ cut below the set's shallows and decimated by mapset.py as a .wbn would be).
 
 usage: python3 -I vimport.py <V dir> <out dir> [--shift=dx,dy,dz | --anchor=vx,vy,vz:tx,ty,tz --turn=deg]
                              [--skip=pat,pat...] [--no-collision=pat,...] [--samples=<dir of IV .wdr>,...]
+                             [--keep=cx,cy,r]
   V dir      the mod's stream folder (.ydr, .ytd, .ymap, .ytyp)
   out dir    where the .wdr / .wtd / .colmesh.npz / vmodels.ide / vplace.txt go
   --shift    added to every placement (the mod's V coordinates to the set's)
@@ -16,6 +17,10 @@ usage: python3 -I vimport.py <V dir> <out dir> [--shift=dx,dy,dz | --anchor=vx,v
              turned by --turn degrees about it (counter-clockwise seen from above)
   --skip     models left out (fnmatch patterns): lights with no mesh, cables
   --samples  directories of IV .wdr files for the shader samples (the set's own)
+  --keep     only the triangles within r m of (cx, cy) in the set's coordinates
+             (a pack's distant scenery cut away: Hyrule's ring of mountains
+             round a 2 km lake, the castle and its track kept; a model placed
+             more than once is left whole)
   --txd      texture dictionaries shared by groups of models, "name:pat,pat;name:pat"
              (fnmatch on the model name, the first match; the rest keep one of
              their own): the set makes one dictionary per name, so textures
@@ -248,6 +253,38 @@ def bake_rotation(dr, q):
                         a[:, :3] = a[:, :3] @ R.T
 
 
+def cut_outside(dr, pos, keep):
+    """Drops the drawable's triangles (every LOD) whose centre lies more
+    than keep[2] m from (keep[0], keep[1]), the model placed at pos (its
+    rotation baked). Returns (kept, dropped)."""
+    kept = dropped = 0
+    cx, cy, r = keep
+    for lod in dr['lods']:
+        for m in lod:
+            for g in m['geometries']:
+                p = g['components'].get('position')
+                if p is None or len(g['indices']) == 0:
+                    continue
+                idx = g['indices'].reshape(-1, 3)
+                c = p[:, :2][idx].mean(axis=1) + np.array(pos[:2])
+                inside = (c[:, 0] - cx) ** 2 + (c[:, 1] - cy) ** 2 <= r * r
+                kept += int(inside.sum())
+                dropped += int((~inside).sum())
+                if inside.all():
+                    continue
+                idx = idx[inside]
+                # (the vertices left unused go too: the model's box and its
+                # vertex count are what is drawn)
+                used = np.unique(idx)
+                remap = np.full(len(p), -1, np.int64)
+                remap[used] = np.arange(len(used))
+                g['indices'] = remap[idx].reshape(-1).astype(g['indices'].dtype)
+                for k, arr in list(g['components'].items()):
+                    if hasattr(arr, 'shape') and len(arr) == len(p):
+                        g['components'][k] = arr[used]
+    return kept, dropped
+
+
 def collision_soup(dr, path):
     """The first LOD's triangles (the model's space) as the piece's collision."""
     vs, ts, base = [], [], 0
@@ -298,6 +335,7 @@ def main():
         return p, q
     skip = [p for p in opts.get('--skip', '').split(',') if p]
     no_col = [p for p in opts.get('--no-collision', '').split(',') if p]
+    keep = [float(v) for v in opts['--keep'].split(',')] if '--keep' in opts else None
     sample_dirs = [p for p in opts.get('--samples', '').split(',') if p]
     txd_groups = []
     for grp in opts.get('--txd', '').split(';'):
@@ -359,10 +397,17 @@ def main():
         dr = v_reader.read_ydr(ydr[name])
         if placed[name] == 1:
             e = next(e for n, e in rows if n == name)
-            _, q = place(e['pos'], e['rot'])
+            p1, q = place(e['pos'], e['rot'])
             if abs(q[3]) < 0.999999:
                 bake_rotation(dr, q)
                 baked[name] = True
+            if keep:
+                kept, dropped = cut_outside(dr, p1, keep)
+                if dropped:
+                    report['triangles cut away beyond %.0f m: %d' % (keep[2], dropped)] += dropped
+                if not kept:
+                    print('%s: nothing within %.0f m of (%.0f, %.0f); left out' % (name, keep[2], keep[0], keep[1]))
+                    continue
         d, used, notes, tris = convert_drawable(name, dr, lib, print)
         report.update(notes)
         if not d.lods[0]:

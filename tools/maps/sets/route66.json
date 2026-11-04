@@ -1,0 +1,150 @@
+{
+  "name": "route66",
+  "label": "Jun 20, 1962 (Route 66)",
+  "date": [
+    1962,
+    6,
+    20,
+    17,
+    30
+  ],
+  "prefix": "r6_",
+  "ide": [
+    "09109cab-route_six_veg_1.ide",
+    "18a0a8b8-route_six_plus_2.ide",
+    "1de81f95-route_six_veg_2.ide",
+    "2b230891-route66.ide",
+    "3b297391-route_six_six.ide",
+    "4e88a4f9-route_six_props.1.ide",
+    "6f64048e-route_six_pyl.ide",
+    "6fe34116-route_six_cnx_1_plus.ide",
+    "8cbbd9dc-route_six_can.ide",
+    "cb174eb1-route_six_cnx_2_v.1.ide",
+    "de7a9703-route_six_rep.ide",
+    "e6caf223-route_six_chn.ide",
+    "f2ace3af-route_six_cnx.2.ide",
+    "route_six_bush.ide",
+    "route_six_circuit.ide",
+    "route_six_circuit_1.ide",
+    "route_six_circuit_2.ide",
+    "route_six_cnx.1.ide",
+    "route_six_cnx_2_bsh.ide",
+    "route_six_cnx_2_rck.ide",
+    "route_six_cnx_3.ide",
+    "route_six_cnx_4.ide",
+    "route_six_cnx_lc.ide",
+    "route_six_cnx_lcr.ide",
+    "route_six_cnx_lcv.ide",
+    "route_six_cnx_v.1.ide",
+    "route_six_cnx_v.2.ide",
+    "route_six_colline.ide",
+    "route_six_mtn.ide",
+    "route_six_rck.ide"
+  ],
+  "wpl": [
+    "167fe0e9-route_six_cars.wpl",
+    "1f3200e6-route_six_pyl.wpl",
+    "2998aa43-route_six_cnx_2_v.1.wpl",
+    "35552a69-route_six_veg_1.wpl",
+    "432dcd78-route_six_plus_2.wpl",
+    "55698824-route_six_veg_2.wpl",
+    "7abcea0d-route_six_props.1.wpl",
+    "7f35f4f9-route_six_cnx_1_plus.wpl",
+    "8a19dcd3-route_six_cnx.2.wpl",
+    "8d0b2790-route_six_can.wpl",
+    "9273ba21-route_six_cnx_2_rck.wpl",
+    "9fdbcaa6-route66.wpl",
+    "c9bb69b1-route_six_cnx_lcr.wpl",
+    "f970cdd9-route_six_rep.wpl",
+    "fd27ac3f-route_six_six.wpl",
+    "route66_stream0.wpl",
+    "route_six_bush.wpl",
+    "route_six_chn.wpl",
+    "route_six_circuit.wpl",
+    "route_six_circuit_1.wpl",
+    "route_six_circuit_2.wpl",
+    "route_six_cnx.1.wpl",
+    "route_six_cnx_2_bsh.wpl",
+    "route_six_cnx_3.wpl",
+    "route_six_cnx_4.wpl",
+    "route_six_cnx_lc.wpl",
+    "route_six_cnx_lcv.wpl",
+    "route_six_cnx_v.1.wpl",
+    "route_six_cnx_v.2.wpl",
+    "route_six_colline.wpl",
+    "route_six_mtn.wpl",
+    "route_six_rck.wpl"
+  ],
+  "stock": "../stock_models.txt",
+  "sea": 0.0,
+  "from": [
+    0.0,
+    0.0
+  ],
+  "to": [
+    0.0,
+    0.0
+  ],
+  "to_notes": "v1.7.43: left where the mod has it - the road runs through the game's southern sea from x -2958 to 2382 at y about -2130, its circuit off Alderney's west and its connections to the city left in; one place stands at a time, so its overlap with the Keys', Wake's and Hyrule's water is no matter",
+  "tex": 256,
+  "detail": 128,
+  "stand_ins": {
+    "*": [
+      128,
+      128,
+      128,
+      255
+    ],
+    "*_bump": [
+      128,
+      128,
+      255,
+      255
+    ]
+  },
+  "notes": "Route 66 by nine30 (GTAIV_route_66_by_nine30.zip, 2013): 29 archives (route66.img: the village - motel, diner, Bagdad Cafe, garages, wrecks, signs; route_six_*: the road 'six', the canyon, hills, mountains, rocks, vegetation, pylons, the circuit, the connections to Liberty City), 1,485 placements of its own models plus the village's 69 and a streamed 50.",
+  "collision": {
+    "mode": "world",
+    "cell": 150,
+    "drop": [],
+    "seabed": 3.0,
+    "weld": 0.02,
+    "error": {
+      "*": 0.3
+    },
+    "max_polys": 6000,
+    "notes": "the mod's 99 world-space collision files (COL_*.wbn) cut into 150 m cells carried by invisible pieces, as Wake Island's"
+  },
+  "tiles": {
+    "radius": 100,
+    "cell": 150,
+    "below_sea": 3.0
+  },
+  "stream": 700,
+  "vehicles": "../stock_vehicles.txt",
+  "life": {
+    "peds": [
+      "m_m_trucker_01",
+      "m_y_mechanic_02",
+      "m_m_fatcop_01",
+      "m_y_cop",
+      "f_y_hooker_01",
+      "m_m_midtown_01",
+      "m_y_tourist_02",
+      "f_y_tourist_01",
+      "m_m_pindus_01"
+    ],
+    "wander": 6,
+    "weather": 0,
+    "ambience": "keys",
+    "creatures": {}
+  },
+  "arrive": [
+    -470.0,
+    -2121.0,
+    3.5,
+    90.0,
+    300
+  ],
+  "arrive_notes": "on the road between the motel (north of it) and the diner (south), facing east along Route 66"
+}

@@ -186,6 +186,45 @@ network session.
 
 ## Changes
 
+- **v1.7.43**: **the ground probe read wrong since it was first used**
+  (logs 111, 114: "fell through into water", "spots I sink straight
+  through"): `GET_GROUND_Z_FOR_3D_COORD` answers through its pointer and
+  returns whether it found ground, and `Invoke` aimed the pointer at the
+  result's word 0, where the native then wrote the flag - every height
+  the trainer ever read was 0 or a denormal 1.4e-45 (logged "0.0"), so
+  every teleport landed a metre over nothing (under a place's terrain),
+  the DeLorean's flight took its height over the ground for its height
+  over the sea, and the v1.7.42 chase of "pieces the probes do not see"
+  was chasing this (log 114's survey: 10 of 22 cells "found" - the flag).
+  `GroundBelow`/`GroundZ` take the height from word 1 (`output_word`),
+  the flag from word 0; a place still without collision under a teleport
+  gets its own height map (`PlaceGround`, `ground.bin`, shared with the
+  life: `PlaceGroundUnder`), and the places' parked cars are woken to
+  settle (`SET_CAR_FORWARD_SPEED` 0.05). **The guard's clock** (`Since`):
+  a tick's `now` read before the menu's action set `guard_since` wrapped
+  to 2^64-7 ms and sent the player home at once (log 114's first trip).
+  **The crash report names what the game was doing** (log 113's Keys
+  crash: the same effect-lookup null read as 108-109, with every effect
+  the Keys use loaded - 98, `gta_cutout_fence` among them - and the
+  trainer's lines before it lost: the PS5 loses the log's tail on a
+  crash): a ring of the last 96 notes (`Note`: each model the game
+  places, hooked at the model module's load `sub_821C7A08`; the map
+  lines; a shader effect miss, hooked at `sub_828C9C68` with the resource,
+  the hash, the name the shader carries translated through the map's
+  chunks and its words) that the port's fault handler appends to its
+  crash line (`GTA4_TrainerCrashNotes`, `ps5_diag.cpp`, weak), and the
+  crash hook closes the log (`rex::ShutdownLogging`) before `_exit`.
+  **Hyrule Castle** (`sets/hyrule.json`, `hyrule_place.txt`): the Zelda
+  pack's castle island through `vimport.py --keep` (a 600 m disc kept,
+  triangles beyond it cut) as a place at (300, -2300); the presets for it
+  and Route 66 (converted, 1,485 models; its set build stopped at 4,614
+  tiles - `short_names` collisions and the model table's room - so it is
+  not in this release). `dxt.py` decodes levels whose sides are not
+  multiples of 4; `mapdraw.turned` bakes a placement's rotation into a
+  model placed once but turned, so `mapset` can tile it; `mapdraw`
+  falls back for the PC decal, wire, emissive-night and glass-spec
+  presets. `tools/car/beyond_body.py`: the Batman Beyond Batmobile's body
+  lofted from cross-sections (in progress).
 - **v1.7.42**: the **Keys' freeze found** (logs 108-109): the game loads
   its shader effects from a list at boot (`sub_828CD290`, into a table of
   128) and looks each model's shaders' effects up by name hash as the

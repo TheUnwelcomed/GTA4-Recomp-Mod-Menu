@@ -151,6 +151,43 @@ index a9b2c2a..4b628ee 100644
  }
  
  }  // namespace gta4ps5
+diff --git a/glue/rexglue-sdk-main/src/core/ps5_diag.cpp b/glue/rexglue-sdk-main/src/core/ps5_diag.cpp
+index 766b018..6928a0d 100644
+--- a/glue/rexglue-sdk-main/src/core/ps5_diag.cpp
++++ b/glue/rexglue-sdk-main/src/core/ps5_diag.cpp
+@@ -23,6 +23,8 @@ std::atomic<uint64_t> counters[kCount];
+ WaitSlot wait_slots[kWaitSlots];
+ uintptr_t guest_arena_lo = 0, guest_arena_hi = 0;
+ void (*crash_hook)(const char* what) = nullptr;
++// The trainer's crash notes (gta4_trainer.cpp), absent in a build without it.
++extern "C" __attribute__((weak)) size_t GTA4_TrainerCrashNotes(char* out, size_t cap);
+ void (*title_exit_hook)() = nullptr;
+ 
+ namespace {
+@@ -307,10 +309,23 @@ void UnhandledHostFault(uintptr_t rip, uintptr_t address, uintptr_t rsp) {
+     }
+   }
+   line.Add("\n");
++  // The trainer's crash notes (gta4_trainer.cpp: the last models the game
++  // placed, its last map lines, a shader effect it could not find), when the
++  // trainer is linked in: the log's own tail is lost on a crash.
++  static char notes[12 * 1024];
++  size_t note_bytes = 0;
++  if (GTA4_TrainerCrashNotes)
++    note_bytes = GTA4_TrainerCrashNotes(notes, sizeof(notes));
+   const char* path = log_path[0] ? log_path : "/app0/logs/crash.log";
+   const int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);
+   if (fd >= 0) {
+     (void)write(fd, line.text, line.size);
++    if (note_bytes) {
++      static const char head[] = "[ps5 crash] the last notes, oldest first:\n";
++      (void)write(fd, head, sizeof(head) - 1);
++      (void)write(fd, notes, note_bytes);
++    }
++    fsync(fd);
+     close(fd);
+   }
+ }
 diff --git a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp b/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
 index 887ab28..e766894 100644
 --- a/glue/rexglue-sdk-main/src/kernel/xam/xam_input.cpp
@@ -338,3 +375,18 @@ index 67f7070..da611d0 100644
  }
  
  PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
+diff --git a/glue/rexglue-sdk-main/src/ui/windowed_app_main_sdl.cpp b/glue/rexglue-sdk-main/src/ui/windowed_app_main_sdl.cpp
+index ef82f7f..4e06601 100644
+--- a/glue/rexglue-sdk-main/src/ui/windowed_app_main_sdl.cpp
++++ b/glue/rexglue-sdk-main/src/ui/windowed_app_main_sdl.cpp
+@@ -532,6 +532,10 @@ int main(int argc, char* argv[]) {
+   rex::ps5diag::crash_hook = [](const char*) {
+     Ps5Notify("The game crashed - send /app0/logs to the developer");
+     spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& l) { l->flush(); });
++    // The log's last seconds were missing from the file after crashes (the
++    // trainer's lines written just before, logs 108 and 113): the file is
++    // closed here, so what was flushed reaches the disk before the exit.
++    rex::ShutdownLogging();
+     sleep(2);
+     _exit(1);
+   };
