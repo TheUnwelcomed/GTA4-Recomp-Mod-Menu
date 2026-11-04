@@ -106,6 +106,11 @@ keeps going while you browse.
     (`src/gta4_beyond_engine.h`): the twin turbines' whine with Doppler as
     it comes, the hover thrum, the air rush, the boost, the canopy, the
     cloak, a launch
+  - **Dodge Challenger SRT Hellcat** (Ddiaz Design's model, v1.7.44): the
+    2019 car from a glTF model (`tools/car/gltf_car.py`: the body, interior
+    and wheels written as a PC vehicle and converted on the FBI Buffalo's
+    physics), in its IndiGo blue; its 6.2-litre supercharged Hemi
+    synthesized with the blower's whine
   - Each car has its own engine, synthesized in the trainer (no recordings):
     the Batmobile's turbine over a V8, the F-16's jet, and for the Deimos,
     the Nexus, the Arbiter X and the Dominator 645 a physically informed
@@ -208,7 +213,22 @@ network session.
   state, the canopy through `Canopy` with Y held back until the car has
   settled, the missiles through `LaunchRocket` with the launcher's point
   and sound as parameters, the summon as an autopilot to a spot beside the
-  player; `addons/beyond`). The body (`beyond_body.py`) now sits with its
+  player; `addons/beyond`). **The Dodge Challenger SRT Hellcat**
+  (`addons/hellcat`): a glTF reader (`tools/car/gltf_read.py`) and a
+  builder (`gltf_car.py`, `specs/hellcat.json`) that writes a Sketchfab
+  model as a PC vehicle - the model's axes and scale set from its wheels'
+  node names and its length, the origin at the wheelbase's middle over the
+  hubs, the body's materials as paint, glass, generic and cut-out mesh
+  shaders with its PNGs encoded into a dictionary, tangents computed, the
+  front-left wheel as the fragment's wheel child (`pcwrite.Fragment` now
+  writes one, sharing the main drawable's shader group) with the four
+  wheel bones at their centres, and the seats as points - then converts it
+  on the FBI Buffalo's template (its physics wheels at the model's radii).
+  Its engine (`gta4_car_engine.h`, `kHellcat`): the physically informed
+  model's cross-plane V8 with a supercharger term (the blower's lobes
+  passing at 7.08 times the crank's rate, its partials louder under load).
+  Its colour (74: IV's deep blue, nearest the model's IndiGo) from the
+  game's own table. The body (`beyond_body.py`) now sits with its
   underside at the template's origin (the Infernus's hubs: half a metre
   over the road on the hidden wheels), has a cockpit tub under the
   fuselage and a well under the canopy so the pilot fits (seats at the
@@ -830,5 +850,10 @@ one in `/data/homebrew/` — your installed game, saves and settings stay.
   (Time Travel IV 2.0a): the DeLorean DMC-12 and the time machines.
 - **johndoe968** (original model) and **Milcin** (IV port): the Imponte
   Arbiter X.
+- **Ddiaz Design**: the Dodge Challenger SRT Hellcat. This work is based on
+  "2019 Dodge Challenger SRT Hellcat"
+  (https://sketchfab.com/3d-models/2019-dodge-challenger-srt-hellcat-f210ad5e17e04b2389b1c3628477105c)
+  by Ddiaz Design (https://sketchfab.com/ddiaz-design) licensed under
+  CC-BY-NC-SA-4.0 (http://creativecommons.org/licenses/by-nc-sa/4.0/).
 
 Single-player fun only. Don't bring it into other people's sessions.

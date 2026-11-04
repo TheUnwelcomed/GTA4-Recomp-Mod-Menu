@@ -86,6 +86,10 @@ struct Physical {
   // boost builds (its level, its pitch at full boost).
   float knock = 0.0f, knock_hz = 0.0f;
   float turbo = 0.0f, turbo_hz = 0.0f;
+  // A supercharger's (v1.7.44, the Hellcat's twin-screw): the whine of its
+  // rotors' lobes passing, at blower_per times the crank's rate (the drive
+  // ratio times the lobes), its level, louder under load (the bypass shut).
+  float blower = 0.0f, blower_per = 0.0f;
 };
 
 // What makes one engine sound like itself.
@@ -208,8 +212,22 @@ constexpr Physical kDeloreanEngine{6, {0, 90, 240, 330, 480, 570}, {0, 1, 0, 1, 
                                    245.0f, 1.15f, 0.55f, 1.2f, 0.45f, -0.25f, 0.25f, -0.3f, 0.48f,
                                    1000.0f, 170.0f, 0.25f, 0.85f, 0.32f, 0.045f, 0.18f, 0.3f, 210.0f,
                                    0.12f, 2100.0f, 0.0f, 0.035f, 0.0f, 0.0f, 1.89f};
+// The Dodge Challenger SRT Hellcat (2019): the 6.2-litre supercharged Hemi
+// V8, Chrysler's firing order 1-8-4-3-6-5-7-2 with the odd cylinders on the
+// left bank (the Gauntlet's 440's uneven banks: 270, 180, 90, 180 degrees
+// apart), a 2.4-litre IHI twin-screw blower on top (its rotors' whine rising
+// with the revs, loudest with the throttle down), a mild modern cam (a steady
+// idle at 700), cast-iron manifolds into big true duals with active valves
+// (deep and open flat out), fuel injection; redline 6,200. (v1.7.44)
+constexpr Physical kHellcatEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0, 1, 1, 0, 1, 0, 0, 1},
+                                  262.0f, 1.5f, 0.75f, 2.7f, 0.55f, -0.25f, 0.25f, -0.3f, 0.1f,
+                                  700.0f, 85.0f, 0.4f, 1.3f, 0.4f, 0.04f, 0.3f, 0.2f, 160.0f,
+                                  0.1f, 2000.0f, 0.3f, 0.03f, 0.0f, 0.0f, 1.45f,
+                                  0.0f, 0.0f, 0.0f, 0.0f, 1.1f, 7.08f};
 constexpr Character kDeimos{.idle_rpm = 950.0f, .limit_rpm = 7700.0f, .pops = 8.0f, .flare = 2.0f,
                             .physical = &kDeimosEngine};
+constexpr Character kHellcat{.idle_rpm = 700.0f, .limit_rpm = 6200.0f, .pops = 7.0f, .flare = 1.8f,
+                             .physical = &kHellcatEngine};
 constexpr Character kDelorean{.idle_rpm = 800.0f, .limit_rpm = 6000.0f, .pops = 4.0f, .flare = 1.8f,
                               .physical = &kDeloreanEngine};
 constexpr Character kGauntlet{.idle_rpm = 800.0f, .limit_rpm = 5800.0f, .pops = 11.0f, .flare = 1.9f,
@@ -836,6 +854,19 @@ class EngineSynth {
       const float amp = p.turbo * spool_ * spool_ * 0.012f;
       mech += Sin(turbo_ph_) * amp + turbo_bp_.Bandpass(Noise(), 3.14159265f * f / kRate, 0.15f) * amp * 2.0f;
     }
+    // a supercharger: its rotors' lobes passing, the whine's partials rising
+    // with the revs, louder with the throttle (the bypass valve shut), and
+    // the charge's rush
+    if (p.blower > 0.0f && running_ && !cranking) {
+      const float f = rpm_real / 60.0f * p.blower_per;
+      blower_ph_ = Wrap(blower_ph_ + f * dt);
+      const float amp = p.blower * (0.2f + 0.8f * load) * (0.25f + 0.75f * r) * 0.01f;
+      const float ph = blower_ph_ * 6.2831853f;
+      mech += (std::sin(ph) * 0.5f + std::sin(2.0f * ph) * 0.35f + std::sin(3.0f * ph) * 0.22f +
+               std::sin(4.0f * ph) * 0.12f) * amp;
+      mech += blower_bp_.Bandpass(Noise(), 3.14159265f * std::min(2.0f * f, 6000.0f) / kRate, 0.25f) * amp * 1.5f *
+              load;
+    }
     // the starter: its motor's whir while it turns the engine over
     if (cranking) {
       starter_ph_ = Wrap(starter_ph_ + 190.0f * dt);
@@ -921,9 +952,9 @@ class EngineSynth {
   float hyd_t_ = 1.0f, hyd_len_ = 0.0f, pump_ph_ = 0, land_t_ = 1.0f, land_ph_ = 0;
   bool hyd_opening_ = false;
   float servo_ = 0, servo_ph_ = 0, ring_ph_ = 0;
-  float knock_ = 0, spool_ = 0, turbo_ph_ = 0;
+  float knock_ = 0, spool_ = 0, turbo_ph_ = 0, blower_ph_ = 0;
   Svf crack_hi_, blast_lp_, rumble_lp_tail_, breech_bp_, brake_bp_, brake_lp_, pop_bp_, fluid_bp_, lock_bp_,
-      lock2_bp_, land_lp_, land_bp_, servo_bp_, servo_lp_, knock_hi_, knock_lo_, turbo_bp_;
+      lock2_bp_, land_lp_, land_bp_, servo_bp_, servo_lp_, knock_hi_, knock_lo_, turbo_bp_, blower_bp_;
   uint32_t seed_ = 0x7F4A7C15u;
   Svf thump_lp_, exhaust_bp_, rumble_lp_, howl_bp_, rasp_l_, rasp_r_, roar_l_, roar_r_, jet_l_, jet_r_, crack_bp_,
       hiss_bp_, click_bp_, clunk_lp_, motor_bp_, door_hi_bp_, door_mid_bp_, door_lo_lp_, slam_bp_, slam_lp_,

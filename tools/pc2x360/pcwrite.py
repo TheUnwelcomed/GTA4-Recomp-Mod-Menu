@@ -294,23 +294,31 @@ class Drawable:
         flags = write_resource(path, TYPE_WDR, v.buf, p.buf)
         return dict(flags=flags, vsize=len(v.buf), psize=len(p.buf), radius=self.radius, bbox=self.bbox)
 
-    def emit(self, v, p, skeleton=None):
+    def emit(self, v, p, skeleton=None, shader_group=None):
         """The drawable into the segments; returns its root's offset. A
         vehicle's `skeleton` (v1.7.43): [(name, parent index, (x, y, z))],
         parents first, each bone's position in the car - written as the PC
-        files have it (bones of 0xE0 bytes, the three matrix arrays)."""
+        files have it (bones of 0xE0 bytes, the three matrix arrays).
+        `shader_group`: an emitted drawable's group to point at instead of
+        writing one (a fragment's wheel child shares the main drawable's,
+        its shaders the same list: v1.7.44); the offset of the group
+        written is kept in `sg_off`."""
         assert self.lods[0], 'no geometry'
         root = v.alloc(0x90)
         blockmap = v.alloc(0x10)
-        sg = v.alloc(0x40)
-        v.w32(sg, VFT['shader_group'])
-        shader_offs = [self._write_shader(v, *s) for s in self.shaders]
-        lst = v.alloc(4 * len(shader_offs))
-        for i, so in enumerate(shader_offs):
-            v.w32(lst + 4 * i, VP | so)
-        v.w32(sg + 8, VP | lst)
-        v.w16(sg + 12, len(shader_offs))
-        v.w16(sg + 14, len(shader_offs))
+        if shader_group is None:
+            sg = v.alloc(0x40)
+            v.w32(sg, VFT['shader_group'])
+            shader_offs = [self._write_shader(v, *s) for s in self.shaders]
+            lst = v.alloc(4 * len(shader_offs))
+            for i, so in enumerate(shader_offs):
+                v.w32(lst + 4 * i, VP | so)
+            v.w32(sg + 8, VP | lst)
+            v.w16(sg + 12, len(shader_offs))
+            v.w16(sg + 14, len(shader_offs))
+        else:
+            sg = shader_group
+        self.sg_off = sg
         all_points = []
         lod_colls = []
         masks = []
@@ -452,12 +460,19 @@ class Fragment:
     skeleton at +0xB4, the bounding sphere at +0x10 - no physics children
     and no bound: the console converter (batconv.Converter) takes those from
     its stock template, and a car with no wheel meshes hides the template's.
+    `wheel` (v1.7.44): a second Drawable (sharing the first's shader list:
+    `wheel.shaders = drawable.shaders`) with the wheel's mesh about its
+    centre, the axle along x, written as one fragment child on the bone
+    `wheel_bone` (its index in the skeleton), the way the PC vehicles carry
+    their wheel: the converter draws it at every wheel.
 
         Fragment(drawable, skeleton).write('out/car.wft', pattern='some.wft')
     """
-    def __init__(self, drawable, skeleton):
+    def __init__(self, drawable, skeleton, wheel=None, wheel_bone=None):
         self.drawable = drawable
         self.skeleton = skeleton
+        self.wheel = wheel
+        self.wheel_bone = wheel_bone
 
     def write(self, path, pattern):
         pat = rsc5.Resource.pc(pattern)
@@ -474,6 +489,21 @@ class Fragment:
         v.w32(0xB4, VP | d)
         blockmap = v.alloc(0x10)
         v.w32(4, VP | blockmap)
+        if self.wheel is not None:
+            assert self.wheel.shaders is self.drawable.shaders, 'the wheel must share the drawable\'s shader list'
+            wd = self.wheel.emit(v, p, None, shader_group=self.drawable.sg_off)
+            # one child (fragTypeChild, 0x310 bytes as the PC files have them):
+            # its mass, its bone, its drawable
+            child = v.alloc(0x310)
+            v.w32(child, 0x613BDB48)
+            v.f32(child + 4, 40.0, 40.0)
+            v.w16(child + 0x0C, 0)
+            v.w16(child + 0x0E, int(self.wheel_bone))
+            v.w32(child + 0x90, VP | wd)
+            lst = v.alloc(4)
+            v.w32(lst, VP | child)
+            v.w32(0xD4, VP | lst)
+            v.buf[0x1F3] = 1
         lo, hi = (np.array(x, np.float32) for x in self.drawable.bbox)
         c = (lo + hi) / 2
         r = float(np.sqrt(((hi - c) ** 2).sum()))

@@ -1,0 +1,16 @@
+{
+  "name": "hellcat",
+  "label": "2019 Dodge Challenger SRT Hellcat",
+  "credit": "This work is based on \"2019 Dodge Challenger SRT Hellcat\" (https://sketchfab.com/3d-models/2019-dodge-challenger-srt-hellcat-f210ad5e17e04b2389b1c3628477105c) by Ddiaz Design (https://sketchfab.com/ddiaz-design) licensed under CC-BY-NC-SA-4.0 (http://creativecommons.org/licenses/by-nc-sa/4.0/)",
+  "template": "fbi",
+  "length": 5.027,
+  "axes": ["-x", "z", "y"],
+  "wheels": {"wheel_lf": "3DWheel Front L", "wheel_rf": "3DWheel Front R", "wheel_lr": "3DWheel Rear L", "wheel_rr": "3DWheel Rear R"},
+  "wheel_mesh": "wheel_lf",
+  "origin": {"z_over_hubs": 0.15},
+  "seats": {"seat_dside_f": [-0.37, 0.25, -0.12], "seat_pside_f": [0.37, 0.25, -0.12]},
+  "materials": {"Base_063": "paint", "Glass_320": "glass"},
+  "radii": {"wheel_lf": 0.38, "wheel_rf": 0.38, "wheel_lr": 0.40, "wheel_rr": 0.40},
+  "texture_side": 1024,
+  "colours": "74,0,0"
+}

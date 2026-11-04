@@ -963,6 +963,7 @@ constexpr std::array kVehicles = {
     VehicleChoice{"DeLorean Time Machine (Part III)", "DELTHR"},
     VehicleChoice{"Batwing", "BATWING", 16.0f},
     VehicleChoice{"Batman Beyond Batmobile", "BEYOND", 7.0f},
+    VehicleChoice{"Dodge Challenger SRT Hellcat", "HELLCAT"},
 };
 // The game's own vehicles come first in the list; the add-ons from here.
 constexpr int kFirstAddon = [] {
@@ -1218,6 +1219,7 @@ bool g_have_nexus = false, g_have_arbiter = false, g_have_dominator = false;
 bool g_have_lazar = false, g_have_gauntlet = false;
 bool g_have_dmc12 = false, g_have_bttf1 = false, g_have_bttf2 = false, g_have_bttf3 = false, g_have_bttf2h = false;
 bool g_have_beyond = false;  // the Batman Beyond Batmobile (v1.7.44)
+bool g_have_hellcat = false;  // the Challenger SRT Hellcat (v1.7.44)
 std::atomic<bool> g_beyond_cloaked{false};  // (for the menu's line)
 bool HaveTimeMachines() { return g_have_bttf1 || g_have_bttf2 || g_have_bttf3; }
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
@@ -1241,7 +1243,7 @@ bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_batwing || g_have_deimos ||
          g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator || g_have_lazar ||
-         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || g_have_beyond || s.car_lights;
+         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || g_have_beyond || g_have_hellcat || s.car_lights;
 }
 
 // The sections the menu's tab strip shows, L1/R1 going through them.
@@ -5071,6 +5073,8 @@ gta4::car::EngineSynth g_bat_synth{gta4::car::kBatmobile}, g_deimos_synth{gta4::
 gta4::car::EngineSynth g_nexus_synth{gta4::car::kNexus}, g_arbiter_synth{gta4::car::kArbiter},
     g_dominator_synth{gta4::car::kDominator};
 gta4::car::EngineSynth g_lazar_synth{gta4::car::kLazar}, g_gauntlet_synth{gta4::car::kGauntlet};
+// The Hellcat (v1.7.44): its supercharged Hemi.
+gta4::car::EngineSynth g_hellcat_synth{gta4::car::kHellcat};
 // The DeLoreans: each its own voice of the same PRV V6.
 gta4::car::EngineSynth g_dmc_synth{gta4::car::kDelorean}, g_bttf1_synth{gta4::car::kDelorean},
     g_bttf2_synth{gta4::car::kDelorean}, g_bttf3_synth{gta4::car::kDelorean};
@@ -5119,6 +5123,8 @@ CarEngineState g_dominator_engine{&g_dominator_synth, "Dominator 645", "DOM645T"
 CarEngineState g_lazar_engine{&g_lazar_synth, "Lazar 3", "LAZAR3", {5.5f, 10.0f, 15.0f, 21.0f, 28.0f}, 0.42f, true};
 CarEngineState g_gauntlet_engine{&g_gauntlet_synth, "Gauntlet Classic", "GAUNTLETC",
                                  {13.0f, 23.0f, 34.0f, 46.0f, 61.0f}, 0.38f};
+// The Hellcat: 707 hp through an eight-speed, here five, geared long.
+CarEngineState g_hellcat_engine{&g_hellcat_synth, "Hellcat", "HELLCAT", {16.0f, 27.0f, 39.0f, 52.0f, 68.0f}, 0.40f};
 // The DMC-12's five-speed: about 110 mph flat out (88 needs fourth).
 constexpr std::array<float, 5> kDmcGears = {14.0f, 24.0f, 34.0f, 43.0f, 50.0f};
 CarEngineState g_dmc_engine{&g_dmc_synth, "DeLorean DMC-12", "DELNOR", kDmcGears, 0.38f};
@@ -9317,7 +9323,8 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
   const float dt = m.last_ms ? std::clamp(float(now - m.last_ms) / 1000.0f, 0.0f, 0.05f) : 0.0f;
   m.last_ms = now;
   m.y_taken = m.exit_pulse = false;
-  const bool busy = m.in_car || m.parked || m.summoning || m.sounding || m.spawn_pending || s.beyond_summon ||
+  // (a car left hovering out of earshot is looked at a few times a second)
+  const bool busy = m.in_car || m.summoning || m.sounding || m.spawn_pending || s.beyond_summon ||
                     s.beyond_toggle_cloak;
   if (!busy && now < m.next_probe)
     return 0;
@@ -9558,7 +9565,7 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
     up = pad.right_trigger / 255.0f - pad.left_trigger / 255.0f;
   }
   BeyondFly(ctx, base, m, want_fwd, turn, up, dt);
-  BeyondFlames(ctx, base, m.car, m.boost > 0.3f || std::fabs(m.fwd) > 35.0f);
+  BeyondFlames(ctx, base, m.car, !m.cloaked && (m.boost > 0.3f || std::fabs(m.fwd) > 35.0f));
   g_beyond_synth.SetListener(false, 1.0f, 0.0f);
   g_beyond_synth.SetTarget(m.spool, std::fabs(m.fwd), m.boost, 0.5f);
   if (m.y_taken)
@@ -11552,9 +11559,9 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool tm_due = HaveTimeMachines() && (g_tm.in_car || g_tm.phase != 0 || g_tm.fires_out || g_tm.vents_out ||
                                              g_tm.frost_until || now >= g_tm.next_probe || g_flash_until > now ||
                                              VeilLevel(now) > 0.0f);
-  const bool beyond_due = g_have_beyond && (g_beyond.in_car || g_beyond.parked || g_beyond.summoning ||
-                                            g_beyond.sounding || g_beyond.spawn_pending || s.beyond_summon ||
-                                            s.beyond_toggle_cloak || now >= g_beyond.next_probe);
+  const bool beyond_due = g_have_beyond && (g_beyond.in_car || g_beyond.summoning || g_beyond.sounding ||
+                                            g_beyond.spawn_pending || s.beyond_summon || s.beyond_toggle_cloak ||
+                                            now >= g_beyond.next_probe);
   const bool beyond_canopy_due =
       g_have_beyond && (CanopyBusy(g_beyond_canopy) || now >= g_beyond_canopy.next_probe);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
@@ -11569,13 +11576,14 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool dominator_engine_due = engine_due(g_have_dominator, g_dominator_engine);
   const bool lazar_engine_due = engine_due(g_have_lazar, g_lazar_engine);
   const bool gauntlet_engine_due = engine_due(g_have_gauntlet, g_gauntlet_engine);
+  const bool hellcat_engine_due = engine_due(g_have_hellcat, g_hellcat_engine);
   const bool dmc_engine_due = engine_due(g_have_dmc12, g_dmc_engine);
   const bool bttf1_engine_due = engine_due(g_have_bttf1, g_bttf1_engine);
   const bool bttf2_engine_due = engine_due(g_have_bttf2, g_bttf2_engine);
   const bool bttf3_engine_due = engine_due(g_have_bttf3, g_bttf3_engine);
   const bool any_engine_due = bat_engine_due || deimos_engine_due || nexus_engine_due || arbiter_engine_due ||
                               dominator_engine_due || lazar_engine_due || gauntlet_engine_due || dmc_engine_due ||
-                              bttf1_engine_due || bttf2_engine_due || bttf3_engine_due;
+                              bttf1_engine_due || bttf2_engine_due || bttf3_engine_due || hellcat_engine_due;
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   const bool heat_due = g_heat_pending > 0.0f;
@@ -11646,12 +11654,13 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_bttf3 = installed("DELTHR");
     g_have_bttf2h = installed("DELHOV");
     g_have_beyond = installed("BEYOND");
+    g_have_hellcat = installed("HELLCAT");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Batwing {}, Deimos {}, Dominator 645 {}, "
                 "Nexus {}, Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}, DMC-12 {}, time machines {}/{}/{} "
-                "(v1.7.21 flying form {}), Beyond Batmobile {}",
+                "(v1.7.21 flying form {}), Beyond Batmobile {}, Hellcat {}",
                 g_have_batmobile, g_have_f16, g_have_batwing, g_have_deimos, g_have_dominator, g_have_nexus,
                 g_have_arbiter, g_have_lazar, g_have_gauntlet, g_have_dmc12, g_have_bttf1, g_have_bttf2, g_have_bttf3,
-                g_have_bttf2h, g_have_beyond);
+                g_have_bttf2h, g_have_beyond, g_have_hellcat);
   }
 
   bool acted = false;
@@ -11777,6 +11786,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       CarEngine(ctx, base, game, pad, g_lazar_engine, 0.0f);
     if (gauntlet_engine_due)
       CarEngine(ctx, base, game, pad, g_gauntlet_engine, 0.0f);
+    if (hellcat_engine_due)
+      CarEngine(ctx, base, game, pad, g_hellcat_engine, 0.0f);
     if (dmc_engine_due)
       CarEngine(ctx, base, game, pad, g_dmc_engine, 0.0f);
     if (bttf1_engine_due)
