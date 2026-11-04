@@ -13,7 +13,8 @@
     "vc_gtrky.ide",
     "custom.ide",
     "vmodels.ide",
-    "creature.ide"
+    "creature.ide",
+    "vprops.ide"
   ],
   "wpl": [
     "vc_gtrky.wpl",

@@ -181,8 +181,13 @@ lights, patio tables, its pool table and cash). With the V props' names
 name) and a table of IV stand-ins (`sets/mansion_subs.json`, with a height
 nudge where the IV origin is not at the base and one placement in n for
 plants in drifts), each becomes a placement line of the IV model among the
-set's `extra` files (`gatorkeys_dressing.txt`). No stand-ins: palms (none in
-Liberty City), cacti, weeds, ivy, the coke lab.
+set's `extra` files (`gatorkeys_dressing.txt`). The palms, cacti and the
+coke lab, which Liberty City has nothing like, are the set's own models
+(`vprops.py`, 30 of them: meshes from tubes, boxes and cards, textures
+drawn or the mod's own, collision from the trunks and furniture; a prop
+placed more than once keeps its collision in the model's space -
+`mapset.py`'s `own_local`). Still none: weeds, ivy, loungers, the arena
+walls, the gate leaves, the pack's unnamed hash `7C4C9B91` (190 of them).
 
 Textures by reference (v1.7.41): a shader cloned from a console sample names
 its textures by reference, whatever the sample did. A few of the export's
@@ -197,7 +202,36 @@ x -2860..-2675 had its collision loaded and linked, and the game never
 collided with it, while the apron cell east of it (x -2712..) did (log 107).
 So the sets keep clear of about x -2700 (and, in case the east is the same,
 +2700): Wake stands 500 m east of where the mod has it, the Keys 300 m west
-of where they stood (`to` in their settings).
+of where they stood (`to` in their settings). Moved, the runway still had no
+ground (log 111): see the pieces' kind below.
+
+Effects the game has not loaded (v1.7.42): the game loads its shader
+effects from a list at boot (`sub_828CD290`, the presets' .sps files, into a
+table of 128) and, placing a drawable, looks each shader's effect up by the
+hash at +0x28 among those (`sub_828C9C68`); one not loaded is an error the
+game would quit on, here a null read a moment later - the Keys' freeze
+(logs 108-109): since v1.7.38 the mansion's fences were drawn with the
+export's `gta_cutout_fence` sample, which v1.7.37 had stood in as
+`gta_cutout` (the Keys loaded then), the one effect the Keys used that Wake
+Island did not. `mapdraw.UNLOADED_EFFECTS` keeps a sample of such an
+effect out of use; the trainer logs the effects the game has loaded
+(`gta4-trainer: shader effects loaded`) for the next one found.
+
+The pieces' kind (v1.7.42): a model's .ide flag 0x20000 (the mods' lines
+have it, as the game's loose props do) makes it a movable object - the game
+turns the city's such entities from dummies into objects near the player,
+and `SetPhysics` (`sub_82360060`) gives the bound's archetype a mass and an
+object's type flags (+16 0x80, +20 0x7BE8); without it a building's (+16
+0x4). The game's ground probes look for buildings (`GET_GROUND_Z_FOR_3D_COORD`
+asks the physics level for the types 6): with the flag, no probe ever found
+the pieces a car stood on (every arrival check since v1.7.34), the
+teleport's wait for ground never ended, the parked cars stood in the air,
+and Wake Island collided in some cells and not others. `mapset.py` clears
+the flag from a model with collision; the trainer sets the kind on the
+place's own models before its dictionaries load (`MapSetPiecesKind`, the
+menu's "Place Pieces As"), and five seconds after a place stands surveys
+the pieces' physics (`MapPhysicsSurvey`: entity, instance, level index,
+bound, a probe). `xbdinfo.py` reads a dictionary back entry by entry.
 
 Names: the game registers an image's files by the first 24 characters of the
 name, the extension among them (`sub_825127C0`), so `mapset.py` keeps every

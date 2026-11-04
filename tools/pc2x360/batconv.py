@@ -475,6 +475,13 @@ def shader_sps(r, s):
     return r.cstr(p) if p is not None else None
 
 
+def shader_effect(r, s):
+    """The effect's name (+0x44; its hash at +0x28 is what the game looks
+    the effect up by when the drawable is placed)."""
+    p = r.vptr(s + 0x44)
+    return r.cstr(p) if p is not None else None
+
+
 def bones(r, skel):
     bo = r.vptr(skel)
     n = r.u16(skel + 20)

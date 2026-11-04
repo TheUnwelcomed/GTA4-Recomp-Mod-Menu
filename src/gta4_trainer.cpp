@@ -1028,7 +1028,7 @@ enum class Action {
   kGiveLoadout, kRemoveWeapons,
   kOpenTimeMachine, kTmPreset, kTmField, kTmCircuits, kTmRefuel, kTmHover,
   kOpenSpawnStandard, kCompleteMission, kTogglePerformance, kJetRoute,
-  kTmUnloadMap, kJetLandMode,
+  kTmUnloadMap, kTmPieces, kJetLandMode,
 };
 struct Item {
   std::string_view label;
@@ -1089,6 +1089,7 @@ struct State {
   TcdDate tm_dest;
   int tm_preset = 1;
   std::string tm_map;  // the destination's place (a map set's name), or none: the city
+  bool map_movable = false;  // a place's pieces as movable objects (v1.7.41 and before) rather than buildings (v1.7.42)
   bool tm_toggle_circuits = false, tm_refuel = false, tm_toggle_hover = false;
   // Async vehicle spawn.
   int pending_model = -1;
@@ -1325,7 +1326,8 @@ std::vector<Item> PageItems(const State& s) {
                {"Time Circuits On/Off (d-pad down in the car)", Action::kTmCircuits},
                {"Refuel: Plutonium / Mr. Fusion (L1 in the car)", Action::kTmRefuel},
                {"Part II: Fly / Land (d-pad right in the car)", Action::kTmHover},
-               {"Unload Map Destination", Action::kTmUnloadMap}};  // (label filled in by PublishDraw)
+               {"Unload Map Destination", Action::kTmUnloadMap},  // (label filled in by PublishDraw)
+               {"Place Pieces As", Action::kTmPieces}};           // (label filled in by PublishDraw)
       break;
     case Page::kWeapons:
       items = {{"Give Weapon Loadout", Action::kGiveLoadout},
@@ -6892,8 +6894,79 @@ void MapDropPiece(PPCContext& ctx, uint8_t* base, MapStanding& p) {
 
 // The place's models requested (another place deleted first). Models the
 // game does not have (not in its images) are left out, their pieces with them.
+// The shader effects the game has loaded (v1.7.42): a list at [0x831C3DE8],
+// each effect its name at +32, the name's hash at +36, the next at +84
+// (grcEffect's constructor sub_828CA888 links it; sub_828CAA60 loads one by
+// name from the shader directory; sub_828CD290 loads those a list file
+// names at boot, into a table of 128). A drawable placed names its shaders'
+// effects by that hash (sub_828C9C68); one not in the list is a null read
+// there (logs 108-109: the Keys' fences, drawn with gta_cutout_fence) - so
+// the list is logged once, for mapdraw.py's UNLOADED_EFFECTS.
+void LogShaderEffects(uint8_t* base) {
+  static bool logged = false;
+  if (logged)
+    return;
+  logged = true;
+  constexpr uint32_t kEffectList = 0x831C3DE8;
+  if (!Span(base, kEffectList, 4))
+    return;
+  std::string names;
+  int n = 0;
+  for (uint32_t e = Read(base, kEffectList); e && Span(base, e, 88) && n < 256; e = Read(base, e + 84)) {
+    ++n;
+    const uint32_t name = Read(base, e + 32);
+    names += fmt::format("{}{} ({:08X})", names.empty() ? "" : ", ", Span(base, name, 1) ? String(base, name) : "?",
+                         Read(base, e + 36));
+  }
+  REXLOG_INFO("gta4-trainer: shader effects loaded: {}: {}", n, names);
+}
+
+// What a piece's collision is to the game (v1.7.42). A model's flag word
+// (+64 of its info, from its .ide line) has bit 0x4 for a movable object -
+// the game makes the city's such entities dummies turned into objects near
+// the player (sub_822B9B18), and SetPhysics (sub_82360060) gives their
+// bound's archetype a mass and the type flags of an object (+16 0x80, +20
+// 0x7BE8); without the bit the archetype gets a building's (+16 0x4). The
+// game's ground probe (GET_GROUND_Z_FOR_3D_COORD, sub_82363158's call to
+// the physics level with the types 6) sees buildings, not objects: with the
+// flag (v1.7.34-41, the .ide's 0x20000) the car drove the Keys' roads while
+// no probe found them (logs 095-101: "the ground under the arrival not
+// found", the car on it), the teleport's wait never saw the ground, the
+// places' parked cars stood in the air (SET_CAR_ON_GROUND_PROPERLY probes
+// too), and Wake Island collided here and there (log 111). The sets' lines
+// no longer carry the flag; the trainer sets the kind on each of the place's
+// models before its collision dictionaries load (the archetype is made as
+// they do): buildings unless the menu asks for movable objects.
+std::atomic<bool> g_map_movable{false};
+void MapSetPiecesKind(uint8_t* base, bool movable) {
+  auto& g = g_map;
+  int set = 0, cleared = 0;
+  std::vector<bool> own(g.models.size(), false);  // (the set's own models: the game's props keep their kind)
+  for (const auto& p : g.pieces)
+    if (!p.stock && p.collision && p.model >= 0 && size_t(p.model) < own.size())
+      own[size_t(p.model)] = true;
+  for (size_t k = 0; k < g.models.size(); ++k) {
+    const auto& mdl = g.models[k];
+    const uint32_t mi = own[k] && mdl.known ? FindModelInfo(base, mdl.hash) : 0;
+    if (!mi || !Span(base, mi, 96, true))
+      continue;
+    const uint32_t flags = Read(base, mi + 64);
+    if (movable && !(flags & 4)) {
+      Write(base, mi + 64, flags | 4);
+      ++set;
+    } else if (!movable && (flags & 4)) {
+      Write(base, mi + 64, flags & ~4u);
+      ++cleared;
+    }
+  }
+  if (g.info)
+    REXLOG_INFO("gta4-trainer: map {}: its pieces {} ({} models' movable bit set, {} cleared)", g.info->name,
+                movable ? "movable objects" : "buildings", set, cleared);
+}
+
 bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& info) {
   auto& g = g_map;
+  LogShaderEffects(base);
   if (g.info == &info && g.phase != 0)
     return true;
   if (g.info)
@@ -6965,6 +7038,7 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
                                             g.wanted_pieces, g.known_count, info.stream)
                               : std::string("placed at once"));
   REXLOG_INFO("gta4-trainer: map {}: the game's pools before it: {}", info.name, DescribePools(base));
+  MapSetPiecesKind(base, g_map_movable.load(std::memory_order_relaxed));
   MapRequestBounds(ctx, base);
   if (g.AnyDictionary()) {
     const auto links = MapCountLinks(base);
@@ -7306,6 +7380,7 @@ void MapGuard(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
     if (g.loaded && MapPlace(ctx, base)) {
       g.guarding = false;
       REXLOG_INFO("gta4-trainer: map {} stood after {} ms (the guard)", g.info->name, now - g.guard_since);
+      g.check_at = now + 5000;  // (v1.7.42: the check after a menu teleport too - its physics survey)
       return;
     }
     if (now - g.guard_since > kMapLoadLimitMs) {
@@ -7421,6 +7496,124 @@ void SafehouseTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Stat
 // island showed its buildings but not its terrain): how many still exist and
 // are drawn, those near the player not drawn, and the ground the game finds
 // under the arrival against the place's own.
+// An object's entity from its script handle: the object pool ([0x82DE5A50]:
+// +0 the objects, +4 a flag byte each, +12 an object's size; a handle is its
+// slot << 8 | the flag), as VehicleAddress reads the vehicles'.
+uint32_t ObjectAddress(uint8_t* base, uint32_t handle) {
+  constexpr uint32_t kObjectPoolPointer = 0x82DE5A50;
+  if (!handle || !Span(base, kObjectPoolPointer, 4))
+    return 0;
+  const uint32_t pool = Read(base, kObjectPoolPointer);
+  if (!Span(base, pool, 16))
+    return 0;
+  const uint32_t slot = handle >> 8, storage = Read(base, pool), flags = Read(base, pool + 4),
+                 size = Read(base, pool + 12);
+  if (!Span(base, flags + slot, 1) || *rex::memory::GuestPtr(base, flags + slot) != (handle & 0xFF))
+    return 0;
+  const uint32_t object = storage + slot * size;
+  return Span(base, object, 96) ? object : 0;
+}
+
+// The physics of the place's own collision pieces as the game holds them
+// (v1.7.42: Wake Island's runway and most of its cells had no collision in
+// v1.7.41 while the apron had, log 111; the game's ground probe found no
+// ground under the runway cell). An object made by CREATE_OBJECT gets its
+// physics in sub_82500400: the model's bound dictionary asked for and loaded
+// (its +0x52 slot), then the entity's vtable +164 makes its physics instance
+// (entity +0x38: a phInst - +4 its archetype, +8 its index in the physics
+// level, 0xFFFF outside it) from the model's archetype (+0x04; +0xC its
+// bound), and vtable +168 puts the instance in the level when its index is
+// 0xFFFF. For each piece near the player: whether it stands, has an
+// instance, the instance's level index, its archetype's bound (type 10 a
+// mesh, 12 a composite) and whether a probe from 80 m over its origin finds
+// ground - the pieces the game collides with against those it does not.
+void MapPhysicsSurvey(PPCContext& ctx, uint8_t* base, const GameContext& game) {
+  auto& g = g_map;
+  if (!g.info)
+    return;
+  struct Row {
+    float d = 0;
+    const MapStanding* p = nullptr;
+  };
+  std::vector<Row> rows;
+  for (const auto& p : g.pieces) {
+    if (!p.collision || p.stock || !p.object)
+      continue;
+    const float dx = p.pos[0] - game.position[0], dy = p.pos[1] - game.position[1];
+    rows.push_back({std::sqrt(dx * dx + dy * dy), &p});
+  }
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.d < b.d; });
+  int standing = 0, with_inst = 0, in_level = 0, with_ground = 0, listed = 0;
+  for (const auto& r : rows) {
+    const auto& p = *r.p;
+    const uint32_t entity = ObjectAddress(base, p.object);
+    const uint32_t mi = FindModelInfo(base, p.hash);
+    const uint32_t archetype = mi && Span(base, mi, 96) ? Read(base, mi + kModelInfoArchetype) : 0;
+    const uint32_t slot = mi && Span(base, mi, 96) ? Read16(base, mi + kModelInfoBoundsSlot) : 0xFFFF;
+    const uint32_t inst = entity ? Read(base, entity + 0x38) : 0;
+    const bool inst_ok = inst && Span(base, inst, 16);
+    const uint32_t level = inst_ok ? Read16(base, inst + 8) : 0xFFFF;
+    const uint32_t inst_arch = inst_ok ? Read(base, inst + 4) : 0;
+    const uint32_t bound = inst_arch && Span(base, inst_arch, 16) ? Read(base, inst_arch + 0xC) : 0;
+    const uint32_t btype = bound && Span(base, bound, 0x80) ? (Read(base, bound + 4) >> 24) : 0;
+    std::string box;
+    if (bound && Span(base, bound, 0x80))
+      box = fmt::format(" z {:.1f}..{:.1f}", ReadFloat(base, bound + 0x28), ReadFloat(base, bound + 0x18));
+    float ex = 0, ey = 0, ez = 0;
+    if (entity) {
+      const uint32_t m = Read(base, entity + 0x20);
+      if (m && Span(base, m, 64))
+        ex = ReadFloat(base, m + 48), ey = ReadFloat(base, m + 52), ez = ReadFloat(base, m + 56);
+    }
+    const auto ground = GroundZ(ctx, base, p.pos[0], p.pos[1], p.pos[2] + 80.0f);
+    standing += entity != 0;
+    with_inst += inst_ok;
+    in_level += inst_ok && level != 0xFFFF;
+    with_ground += ground.has_value();
+    if (listed < 40 && r.d < 600.0f) {
+      ++listed;
+      REXLOG_INFO("gta4-trainer:   {} {:.0f} m: entity {:08X} at ({:.1f}, {:.1f}, {:.1f}); model slot {:04X} archetype "
+                  "{:08X}; inst {:08X} level {:04X} archetype {:08X} bound {:08X} type {}{}; ground {}",
+                  p.model >= 0 ? g.models[size_t(p.model)].name : std::string("?"), r.d, entity, ex, ey, ez, slot,
+                  archetype, inst, level, inst_arch, bound, btype, box,
+                  ground ? fmt::format("{:.2f}", *ground) : std::string("none"));
+    }
+  }
+  REXLOG_INFO("gta4-trainer:   physics: {} of the place's {} collision pieces stand, {} with an instance, {} in the "
+              "level, {} with ground under a probe at their origin; the player at ({:.1f}, {:.1f}, {:.1f})",
+              standing, rows.size(), with_inst, in_level, with_ground, game.position[0], game.position[1],
+              game.position[2]);
+  // The physics level itself ([0x82FF5360], made at boot - sub_82478B00:
+  // extents set (sub_8294BE28: +80 their centre, +96 half the longest side,
+  // the octree's cube), room for 6000 objects (+38) and 1500 active (+136)):
+  // its cube and its first words, for the counts.
+  // The pools an object's physics instance comes from (CObject's physics
+  // init, sub_82328520: a frag's from [0x8309D588] (864 of 176 bytes), the
+  // rest from [0x8309D584] (4690 of 96, sub_826225E0) - none free, no
+  // physics): their counts and how many are in use (+20).
+  for (const auto& [name, ptr] : {std::pair{"instances", 0x8309D584u}, std::pair{"frag instances", 0x8309D588u}}) {
+    if (!Span(base, ptr, 4))
+      continue;
+    const uint32_t pool = Read(base, ptr);
+    if (pool && Span(base, pool, 24))
+      REXLOG_INFO("gta4-trainer:   the {} pool {:08X}: {} of {} in use ({} bytes each)", name, pool,
+                  Read(base, pool + 20), Read(base, pool + 8), Read(base, pool + 12));
+  }
+  constexpr uint32_t kPhysicsLevelPointer = 0x82FF5360;
+  if (Span(base, kPhysicsLevelPointer, 4)) {
+    const uint32_t level = Read(base, kPhysicsLevelPointer);
+    if (level && Span(base, level, 0x100)) {
+      std::string words;
+      for (uint32_t w = 0; w < 48; ++w)
+        words += fmt::format("{}{:08X}", w % 8 ? " " : " | ", Read(base, level + w * 4));
+      REXLOG_INFO("gta4-trainer:   the physics level {:08X}: centre ({:.0f}, {:.0f}, {:.0f}), half-side {:.0f}, room "
+                  "for {} objects, {} active; words{}",
+                  level, ReadFloat(base, level + 80), ReadFloat(base, level + 84), ReadFloat(base, level + 88),
+                  ReadFloat(base, level + 96), Read16(base, level + 38), Read16(base, level + 136), words);
+    }
+  }
+}
+
 void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
   auto& g = g_map;
   g.check_at = 0;
@@ -7560,6 +7753,7 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
     return true;
   });
   dump("stock prop bm_plank01", plank, plank_info ? stock : -1);
+  MapPhysicsSurvey(ctx, base, game);
 }
 
 // ---------------------------------------------------------------------------
@@ -9757,6 +9951,13 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
         Toast(s, "Destination set.", 1000);
       }
       break;
+    case Action::kTmPieces:
+      s.map_movable = !s.map_movable;
+      g_map_movable.store(s.map_movable, std::memory_order_relaxed);
+      Toast(s, s.map_movable ? "Pieces as movable objects: from the next place loaded."
+                             : "Pieces as buildings: from the next place loaded.",
+            2500);
+      break;
     case Action::kTmUnloadMap: {
       if (!g_map.info) {
         Toast(s, "No map destination is loaded.", 1500);
@@ -10130,6 +10331,9 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
                        ? "Unload " + g_map.info->label + " (loading its ground)"
                        : fmt::format("Unload {} (loading {} of {})", g_map.info->label, g_map.loaded_count,
                                      g_map.known_count);
+          if (i == 10)
+            text = s.map_movable ? "Place Pieces As: Movable Objects (the ground probe misses them)"
+                                 : "Place Pieces As: Buildings (default)";
         }
         model.lines.push_back({std::move(text), i == s.selected, false});
       }

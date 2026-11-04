@@ -106,7 +106,7 @@ import plant  # noqa: E402
 import rsc5  # noqa: E402
 
 XTD_TYPE, XDR_TYPE, XBD_TYPE = 7, 109, 32
-DYNAMIC_FLAG = 0x20000  # (an IDE flag: a movable object's archetype for the model's bound)
+DYNAMIC_FLAG = 0x20000  # (an IDE flag: a movable object - cleared from a model with collision since v1.7.42)
 NAME_LIMIT = 20  # a file's name with its 4-character extension within the game's 24
 DICTIONARY_BYTES = 3 << 20  # a collision dictionary's size, about, before another is started
 CARRIER_FLAGS = 0xC00000    # a carrier's .ide flags (the mods' usual, GIMS's default)
@@ -656,19 +656,25 @@ def main():
     soup_material = collections.Counter()
     for b in piece_files.values():
         soup_material.update(np.unique(collide.soup(b)[2]).tolist())
+    own_local = {}  # the set's own props placed more than once: collision in the model's space
     for f in sorted(os.listdir(src)):
         if not f.endswith('.colmesh.npz'):
             continue
         name = f[:-len('.colmesh.npz')].lower()
         if name not in where:
             continue
-        if mode == 'model' and count_of[name] != 1:
-            print('collision: %s placed %d times: its own left out (collision per model needs one placement)'
-                  % (name, count_of[name]))
-            continue
         z = np.load(os.path.join(src, f))
-        v = z['v'].astype(np.float64) @ quat_matrix(where[name]['q']).T + np.array(where[name]['pos'])
+        if not len(z['t']):
+            print('collision: %s has none (an empty mesh), skipped' % name)
+            continue
         m = np.full(len(z['t']), soup_material.most_common(1)[0][0] if soup_material else 0, np.uint32)
+        if mode == 'model' and count_of[name] != 1:
+            # (placed more than once: its collision stays in the model's
+            # space as it came, the bound the game instances with each
+            # placement - vprops.py's palms and the lab's bricks, v1.7.42)
+            own_local[name] = (z['v'].astype(np.float64), z['t'].astype(np.int64), m)
+            continue
+        v = z['v'].astype(np.float64) @ quat_matrix(where[name]['q']).T + np.array(where[name]['pos'])
         b = dict(type='soup', v=v, t=z['t'].astype(np.int64), m=m)
         pieces_world.append(b)
         piece_files[name] = b
@@ -925,6 +931,17 @@ def main():
                 route(m, v, t, mt)
                 trunk_tris += len(t)
         print('planting: %d triangles of trunk collision (material %08X)' % (trunk_tris, material))
+    for name, (v, t, m) in sorted(own_local.items()):
+        if name not in used:
+            continue
+        tri_in += len(t)
+        v, t, m = collide.weld(v, t, m, col.get('weld', 0.02))
+        tri_out += len(t)
+        materials.update(np.unique(m).tolist())
+        gathered.setdefault(mname[name], []).append((v, t, m))
+    if own_local:
+        print('collision: %d of the set\'s own props placed more than once, their bounds in the model\'s space: %s' % (
+            len(own_local), ', '.join('%s x%d' % (n, count_of[n]) for n in sorted(own_local))))
     assert not unplaced, 'collision with no placed model: %s (drop it)' % ', '.join(unplaced)
     entries = []
     worst = 0.0
@@ -966,13 +983,18 @@ def main():
         print('carriers: %d drawables (from %s), every one read back' % (len(carriers), donor_name))
 
     # ---- the models' lines, the pieces, the destination
-    # (flag 0x20000 on a model with collision, as the stock props with
-    # dictionary bounds have it - rubbish.ide's BM_plank01 0xC20000: the game
-    # makes its archetype a movable object's, its mass from the bound's
-    # volume (SetPhysics, sub_82360060), where without it a fixed one; the
-    # pieces are frozen either way. It does not get a model its bound: the
-    # dictionary's loading does (see bounds above; v1.7.33's island had the
-    # flag and still no collision, its dictionary never loaded)
+    # (flag 0x20000 - a movable object, as the stock props with dictionary
+    # bounds have it, rubbish.ide's BM_plank01 0xC20000 - is cleared from a
+    # model with collision (v1.7.42). With it the game gives the bound's
+    # archetype an object's type flags (SetPhysics, sub_82360060: +16 0x80),
+    # which its ground probes do not look for (GET_GROUND_Z_FOR_3D_COORD asks
+    # for the types 6): v1.7.34-41's pieces were driven on while no probe
+    # found them, the teleport waited for ground that never came, the parked
+    # cars stood in the air. Without it the archetype is a building's (+16
+    # 0x4), as the mods' PC lines have them. It does not get a model its
+    # bound either way: the dictionary's loading does (see bounds above).
+    # The trainer sets the kind again before the dictionaries load (its menu
+    # can ask for movable objects, the old way).
     with_flag = 0
     with open(os.path.join(out, 'objs.ide'), 'w', newline='\r\n') as f:
         def write(line, name):
@@ -980,8 +1002,8 @@ def main():
             line = list(line)
             line[0] = name
             if name in with_bounds:
-                line[3] = str(int(line[3]) | DYNAMIC_FLAG)
-                with_flag += 1
+                with_flag += int(line[3]) & DYNAMIC_FLAG != 0
+                line[3] = str(int(line[3]) & ~DYNAMIC_FLAG)
             f.write(', '.join(line) + '\n')
 
         for m in used:
@@ -1002,8 +1024,9 @@ def main():
             line = [key, carrier_txd, str(CARRIER_DRAW), str(CARRIER_FLAGS), '0'] + \
                 ['%.4f' % x for x in (*lo_, *hi_, *centre, radius)] + ['null']
             write(line, key)
-    print('model lines: %d, %d with flag 0x%X (their collision from %s)' % (
-        len(game_names), with_flag, DYNAMIC_FLAG, ', '.join(d + '.xbd' for d in dict_names)))
+    print('model lines: %d, %d with collision as buildings (%d had the movable flag 0x%X in the mod; their '
+          'collision from %s)' % (len(game_names), len(with_bounds), with_flag, DYNAMIC_FLAG,
+                                  ', '.join(d + '.xbd' for d in dict_names)))
     with open(os.path.join(out, 'place.txt'), 'w') as f:
         f.write('# model qx qy qz qw x y z collision (the mod\'s coordinates; collision 2: the game\'s own model)\n')
         count = collections.Counter()

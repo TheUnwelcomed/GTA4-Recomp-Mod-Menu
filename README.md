@@ -186,6 +186,46 @@ network session.
 
 ## Changes
 
+- **v1.7.42**: the **Keys' freeze found** (logs 108-109): the game loads
+  its shader effects from a list at boot (`sub_828CD290`, into a table of
+  128) and looks each model's shaders' effects up by name hash as the
+  model is placed (`sub_828C9C68`); one not loaded is an error it would
+  quit on, here a null read a moment later. Since v1.7.38 the mansion's
+  fences (gtrman2, gtrpad2) were drawn with the export's
+  `gta_cutout_fence` sample, the one effect the Keys used and Wake never
+  did; `mapdraw.UNLOADED_EFFECTS` keeps such a sample out of use (the
+  preset falls back as before: `gta_cutout`), and the trainer logs the
+  effects the game has (`LogShaderEffects`, the list at `0x831C3DE8`).
+  **The pieces are buildings** to the game, not movable objects: the
+  mods' .ide flag 0x20000 (model flags +64 bit 0x4) had `SetPhysics`
+  give each bound's archetype an object's type flags (+16 0x80), which
+  the game's ground probes do not look for (`GET_GROUND_Z_FOR_3D_COORD`
+  asks the physics level for the types 6, buildings among them) - so
+  every arrival check since v1.7.34 found no ground under a car standing
+  on it, the teleport's wait never saw the ground come, the places'
+  parked cars stood in the air (`SET_CAR_ON_GROUND_PROPERLY` probes too),
+  and Wake Island collided in some cells and not others (log 111).
+  `mapset.py` clears the flag; the trainer sets the kind on the place's
+  own models before its dictionaries load (`MapSetPiecesKind`; the
+  DELOREAN page's "Place Pieces As" can ask for movable objects again).
+  **The physics survey** (`MapPhysicsSurvey`, 5 s after any stand): each
+  collision piece near the player - its entity (`ObjectAddress`), its
+  physics instance (entity +0x38), the instance's level index, its
+  archetype's bound, a ground probe over it - and the instance pools and
+  the physics level's cube and room (`[0x82FF5360]`: 6000 objects, 1500
+  active). **The mansion's own props** (`vprops.py`, the user's "remake
+  the cacti, the coke lab, the palms"): 30 models made from tubes, boxes
+  and cards with drawn or borrowed textures - five palms, a saguaro, a
+  cactus clump, an agave, a joshua tree, and the coke lab (bricks, cut
+  bricks, stacks, boxes, a pallet, mixing tubes, test tubes, bottles,
+  tins, a scale, a mold, a press, the table, a trolley, a rack, heaps,
+  a bowl, a tray of lines) - placed where the pack's GTA V props stood
+  (`mansion_subs.json`, 842 placements with v1.7.41's stand-ins), their
+  sizes and origins from the mansion's placements (the bricks' layers,
+  the lab table's things, the shelf racks'); a prop placed more than
+  once keeps its collision in the model's space (`mapset.py`
+  `own_local`); an empty collision mesh writes no file (`props.py`).
+  `xbdinfo.py` reads a console bound dictionary back entry by entry.
 - **v1.7.41**: the **crash found** (logs 106-108) and fixed in the
   converter: a few of the export's shader samples carry their textures
   embedded in the model (a lamp's glow, a gate's reflection map, class id

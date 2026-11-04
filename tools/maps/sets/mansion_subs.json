@@ -1,31 +1,211 @@
 {
-  "_notes": "v1.7.42: the game's own props standing in for the GTA V ones the Scarface mansion pack places (vdress.py): a V name or pattern to an IV model, 'dz' lifting it where the IV origin is not at the base, 'every' keeping one placement in n (V plants in drifts). Skipped: the coke lab (no such props here), palms (none in Liberty City; the Keys' own clusters stand around), cacti, weeds and ivy, loungers, cctv, the arena walls at the gate.",
-  "prop_plant_fern_01b": {"model": "c_fern_md_ingame", "dz": 0.7, "every": 3},
-  "prop_plant_fern_01a": {"model": "c_fern_md_ingame_3", "dz": 0.2, "every": 2},
-  "prop_plant_fern_02b": {"model": "c_fern_md_ingame_2", "dz": 0.3, "every": 2},
-  "prop_plant_01b": {"model": "cj_int_plant_1", "dz": 0.4, "every": 2},
-  "prop_plant_01a": {"model": "cj_int_plant_3", "dz": 0.3},
-  "prop_plant_int_02a": {"model": "cj_int_plant_2", "dz": 0.3},
-  "prop_pot_plant_01a": {"model": "gb_plantpotext14", "dz": 0.0},
-  "prop_plant_base_03": {"model": "cj_plantpot1", "dz": 0.2},
-  "prop_plant_flower_0*": {"model": "cj_plantpot3", "dz": 0.0},
-  "prop_bush_neat_0*": {"model": "c_fern_md_ingame_3", "dz": 0.2, "every": 2},
-  "prop_bush_med_0*": {"model": "ag_bigandbushygrn", "dz": 0.5, "every": 2},
-  "prop_bush_lrg_04b": {"model": "ag_bigandbushygrn", "dz": 0.5},
-  "prop_wall_light_0*": {"model": "bm_wall_light_02", "dz": 0.0},
-  "prop_tree_birch_0*": {"model": "elm_md_ingame", "dz": 0.0},
-  "prop_tree_cedar_s_05": {"model": "elm_md_ingame", "dz": 0.0},
-  "prop_tree_eng_oak_01": {"model": "liveoak_md_ingame", "dz": 0.0},
-  "prop_tree_jacada_02": {"model": "liveoak_md_ingame", "dz": 0.0},
-  "prop_table_06_chr": {"model": "gb_cafetable1", "dz": 0.0},
-  "prop_table_02": {"model": "gb_cafetable1", "dz": 0.0},
-  "prop_parasol_05": {"model": "cj_table_parasol", "dz": 0.4},
-  "prop_pooltable_02": {"model": "ss_jampooltable", "dz": 0.0},
-  "prop_cash_pile_01": {"model": "cj_cash_pile_3", "dz": 0.0},
-  "prop_cash_crate_01": {"model": "cj_cash_pile_3", "dz": 0.0},
-  "ex_cash_pile_005": {"model": "cj_cash_pile_3", "dz": 0.0},
-  "bkr_prop_bkr_cashpile_02": {"model": "cj_cash_pile_3", "dz": 0.0},
-  "v_res_m_lamptbl": {"model": "gb_tablelamp05", "dz": 0.0},
-  "hei_prop_bank_ornatelamp": {"model": "gb_tablelamp01", "dz": 0.0},
-  "v_44_kitc_chand": {"model": "gb_ceil_light_01", "dz": -2.3}
+ "_notes": "v1.7.42: the game's own props standing in for the GTA V ones the Scarface mansion pack places (vdress.py): a V name or pattern to an IV model, 'dz' lifting it where the IV origin is not at the base, 'every' keeping one placement in n (V plants in drifts). The palms, cacti, agave, joshua tree and the coke lab are the set's own, made by vprops.py. Skipped: weeds and ivy, loungers, cctv, the arena walls at the gate.",
+ "prop_plant_fern_01b": {
+  "model": "c_fern_md_ingame",
+  "dz": 0.7,
+  "every": 3
+ },
+ "prop_plant_fern_01a": {
+  "model": "c_fern_md_ingame_3",
+  "dz": 0.2,
+  "every": 2
+ },
+ "prop_plant_fern_02b": {
+  "model": "c_fern_md_ingame_2",
+  "dz": 0.3,
+  "every": 2
+ },
+ "prop_plant_01b": {
+  "model": "cj_int_plant_1",
+  "dz": 0.4,
+  "every": 2
+ },
+ "prop_plant_01a": {
+  "model": "cj_int_plant_3",
+  "dz": 0.3
+ },
+ "prop_plant_int_02a": {
+  "model": "cj_int_plant_2",
+  "dz": 0.3
+ },
+ "prop_pot_plant_01a": {
+  "model": "gb_plantpotext14",
+  "dz": 0.0
+ },
+ "prop_plant_base_03": {
+  "model": "cj_plantpot1",
+  "dz": 0.2
+ },
+ "prop_plant_flower_0*": {
+  "model": "cj_plantpot3",
+  "dz": 0.0
+ },
+ "prop_bush_neat_0*": {
+  "model": "c_fern_md_ingame_3",
+  "dz": 0.2,
+  "every": 2
+ },
+ "prop_bush_med_0*": {
+  "model": "ag_bigandbushygrn",
+  "dz": 0.5,
+  "every": 2
+ },
+ "prop_bush_lrg_04b": {
+  "model": "ag_bigandbushygrn",
+  "dz": 0.5
+ },
+ "prop_wall_light_0*": {
+  "model": "bm_wall_light_02",
+  "dz": 0.0
+ },
+ "prop_tree_birch_0*": {
+  "model": "elm_md_ingame",
+  "dz": 0.0
+ },
+ "prop_tree_cedar_s_05": {
+  "model": "elm_md_ingame",
+  "dz": 0.0
+ },
+ "prop_tree_eng_oak_01": {
+  "model": "liveoak_md_ingame",
+  "dz": 0.0
+ },
+ "prop_tree_jacada_02": {
+  "model": "liveoak_md_ingame",
+  "dz": 0.0
+ },
+ "prop_table_06_chr": {
+  "model": "gb_cafetable1",
+  "dz": 0.0
+ },
+ "prop_table_02": {
+  "model": "gb_cafetable1",
+  "dz": 0.0
+ },
+ "prop_parasol_05": {
+  "model": "cj_table_parasol",
+  "dz": 0.4
+ },
+ "prop_pooltable_02": {
+  "model": "ss_jampooltable",
+  "dz": 0.0
+ },
+ "prop_cash_pile_01": {
+  "model": "cj_cash_pile_3",
+  "dz": 0.0
+ },
+ "prop_cash_crate_01": {
+  "model": "cj_cash_pile_3",
+  "dz": 0.0
+ },
+ "ex_cash_pile_005": {
+  "model": "cj_cash_pile_3",
+  "dz": 0.0
+ },
+ "bkr_prop_bkr_cashpile_02": {
+  "model": "cj_cash_pile_3",
+  "dz": 0.0
+ },
+ "v_res_m_lamptbl": {
+  "model": "gb_tablelamp05",
+  "dz": 0.0
+ },
+ "hei_prop_bank_ornatelamp": {
+  "model": "gb_tablelamp01",
+  "dz": 0.0
+ },
+ "v_44_kitc_chand": {
+  "model": "gb_ceil_light_01",
+  "dz": -2.3
+ },
+ "prop_palm_med_01a": "palm_tall",
+ "prop_plant_palm_01a": "palm_sm",
+ "prop_palm_sm_01e": "palm_mid",
+ "prop_palm_sm_01d": "palm_mid",
+ "prop_palm_sm_01a": "palm_mid",
+ "prop_palm_fan_02_b": "palm_fan",
+ "prop_palm_fan_04_b": "palm_fan",
+ "prop_palm_fan_0*": "palm_fansm",
+ "prop_cactus_02": "cactus_a",
+ "prop_cactus_01b": "cactus_b",
+ "prop_agave_02": "agave",
+ "prop_joshua_tree_01a": "joshua",
+ "prop_coke_block_01": {
+  "model": "coke_block",
+  "dz": -0.04
+ },
+ "bkr_prop_coke_cutblock_01": {
+  "model": "coke_cutblock",
+  "dz": -0.04
+ },
+ "h4_prop_h4_coke_stack_01a": {
+  "model": "coke_stack",
+  "dz": -0.23
+ },
+ "imp_prop_impexp_boxcoke_01": "coke_box",
+ "bkr_prop_coke_box_01a": {
+  "model": "coke_boxsm",
+  "dz": -0.12
+ },
+ "ba_prop_battle_coke_doll_bigbox": "coke_box",
+ "bkr_prop_coke_pallet_01a": "coke_pallet",
+ "bkr_prop_coke_mixtube_03": {
+  "model": "coke_tube",
+  "dz": -0.2
+ },
+ "bkr_prop_coke_mixtube_01": {
+  "model": "coke_tubesm",
+  "dz": -0.12
+ },
+ "bkr_prop_coke_testtubes": {
+  "model": "coke_tubes",
+  "dz": -0.08
+ },
+ "h4_prop_h4_coke_powderbottle_01": {
+  "model": "coke_bottle",
+  "dz": -0.1
+ },
+ "bkr_prop_meth_*": {
+  "model": "coke_chem",
+  "dz": -0.1
+ },
+ "bkr_prop_coke_powderedmilk": {
+  "model": "coke_tin",
+  "dz": -0.08
+ },
+ "bkr_prop_coke_bakingsoda_o": {
+  "model": "coke_tin",
+  "dz": -0.05
+ },
+ "bkr_prop_coke_scale_01": {
+  "model": "coke_scale",
+  "dz": -0.05
+ },
+ "bkr_prop_coke_mold_01a": {
+  "model": "coke_mold",
+  "dz": -0.05
+ },
+ "bkr_prop_coke_press_01*": "coke_press",
+ "bkr_prop_coke_table01a": "coke_table",
+ "imp_prop_impexp_coke_trolly": "coke_trolley",
+ "v_med_cor_shelfrack": "coke_rack",
+ "bkr_prop_coke_tablepowder": {
+  "model": "coke_heap",
+  "dz": -0.05
+ },
+ "bkr_prop_coke_powder_02": "coke_heap",
+ "bkr_prop_coke_plasticbowl_01": {
+  "model": "coke_bowl",
+  "dz": -0.1
+ },
+ "p_cs_coke_line_s": "coke_tray",
+ "prop_cs_coke_line": "coke_tray",
+ "tr_prop_meth_tray_01b": "coke_tray",
+ "prop_cash_trolly": {
+  "model": "coke_trolley",
+  "dz": -0.45
+ },
+ "v_corp_cashtrolley": "coke_trolley",
+ "bkr_prop_cashtrolley_01a": "coke_trolley",
+ "ch_prop_cash_low_trolly_01c": "coke_trolley"
 }

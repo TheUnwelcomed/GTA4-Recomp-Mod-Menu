@@ -86,6 +86,19 @@ MAP_FALLBACK = {
     'gta_terrain_va_3lyr.sps': 'gta_default.sps',
     'gta_terrain_va_4lyr.sps': 'gta_default.sps',
 }
+# Effects the game has not loaded (v1.7.42). The game loads its shader
+# effects from a list at boot (sub_828CD290, the presets' .sps files, each
+# naming its effect, into a table of 128); a drawable's shader names its
+# effect by hash (+0x28), looked up among the loaded ones as the drawable is
+# placed (sub_828C9C68) - one not loaded is an error the game would quit on,
+# and here a null read a moment later (the Keys, logs 108-109: a fault at
+# sub_828C9C68+0x309 placing gtrman2 or gtrpad2, the mansion's fences, drawn
+# with the export's gta_cutout_fence sample since v1.7.38; v1.7.37 stood it
+# in as gta_cutout and the Keys loaded). A sample of these is never used:
+# the preset falls back as if there were none (MAP_FALLBACK). The trainer
+# logs the effects the game has (gta4-trainer: shader effects loaded) for
+# the next one found.
+UNLOADED_EFFECTS = {'gta_cutout_fence'}
 # Effects that draw both sides of a triangle (the mods' tree and fence
 # cards are one-sided: Wake Island's 1,000-odd gta_trees geometries have no
 # back faces, its gta_cutout palms have them all) standing in as one that
@@ -405,6 +418,8 @@ class MapDrawable(batconv.Converter):
                 usage_arr, extra_arr = res.vptr(rsg + 64), res.vptr(rsg + 72)
                 for i, s in enumerate(rd['shader_group']['shaders']):
                     sps = batconv.shader_sps(res, s['off'])
+                    if batconv.shader_effect(res, s['off']) in UNLOADED_EFFECTS:
+                        continue
                     self.t_shaders.setdefault(sps, dict(res=res, off=s['off'], usage=res.u32(usage_arr + 4 * i),
                                                         extra=res.u32(extra_arr + 4 * i)))
         for preset, (base, bucket) in MAP_PRESETS.items():  # (the effect's sample in another bucket)

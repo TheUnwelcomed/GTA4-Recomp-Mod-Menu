@@ -123,6 +123,12 @@ class Mesh:
             drawable.geometry(0, shader_index[key], pos, nrm, col, [uv], np.array(p['tris']))
 
     def collision(self, path):
+        if not self.col:
+            # (nothing to collide with - a heap of powder, a tray: no file,
+            # rather than an empty mesh mapset.py would try to build a bound of)
+            if os.path.exists(path):
+                os.remove(path)
+            return 0
         t = np.array(self.col, np.float32)  # (n, 3, 3)
         v = t.reshape(-1, 3)
         tri = np.arange(len(v)).reshape(-1, 3)
