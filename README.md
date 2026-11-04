@@ -89,6 +89,23 @@ keeps going while you browse.
     jumping to the destination, the return with a triple boom, frost and
     steaming vents; plutonium or Mr. Fusion to reload; Part II flies, its
     wheels folding flat
+  - **The Batman Beyond Batmobile** (v1.7.44), the 2039 show's car built
+    from scratch (`tools/car/beyond_body.py`, `beyond_build.py`: no model
+    taken from anywhere - a dart with swept wings, a long bubble canopy, a
+    cockpit tub, twin thrusters, on the Infernus's physics with its wheels
+    hidden). It flies: the left stick drives and turns (banking), R2 climbs,
+    L2 sinks, it hovers with nothing pressed, clear of the ground; d-pad
+    right held is the boost (the thrusters flame, 95 m/s), L1 fires the
+    Batmobile's lock-on missiles from its nose, d-pad down cloaks it (the
+    car and you unseen, the police losing you). Y brings it down to its
+    hover and stops it, then the canopy rises and you are set down beside
+    it; it stays hovering where you left it until you get back in - or
+    **summon it** (the Vehicles page): it flies to you from wherever it is,
+    over whatever is in the way, and settles beside you; gone, a new one
+    comes in from the sky behind you. Its sound is synthesized
+    (`src/gta4_beyond_engine.h`): the twin turbines' whine with Doppler as
+    it comes, the hover thrum, the air rush, the boost, the canopy, the
+    cloak, a launch
   - Each car has its own engine, synthesized in the trainer (no recordings):
     the Batmobile's turbine over a V8, the F-16's jet, and for the Deimos,
     the Nexus, the Arbiter X and the Dominator 645 a physically informed
@@ -186,6 +203,25 @@ network session.
 
 ## Changes
 
+- **v1.7.44** (in progress): **the Batman Beyond Batmobile** flies (above:
+  `BeyondTick`, the flight as the Part II DeLorean's `Hover` with its own
+  state, the canopy through `Canopy` with Y held back until the car has
+  settled, the missiles through `LaunchRocket` with the launcher's point
+  and sound as parameters, the summon as an autopilot to a spot beside the
+  player; `addons/beyond`). The body (`beyond_body.py`) now sits with its
+  underside at the template's origin (the Infernus's hubs: half a metre
+  over the road on the hidden wheels), has a cockpit tub under the
+  fuselage and a well under the canopy so the pilot fits (seats at the
+  canopy's crown), and its glass rides a canopy bone the builder binds to
+  the template's interiorlight bone at the hinge (`pcwrite.Fragment` with
+  a two-bone skeleton; `interiorlight@hinge=canopy` as a pivot). **Route
+  66**: the set build cut to the village's 2.5 km disc (`keep` in the
+  set's JSON: placements, parked cars, collision cells and tiles beyond it
+  dropped, 300 m tiles and cells), carrier cells left with no triangles
+  after decimation dropped, `short_names` loops on collisions, the height
+  map for the arrival run sampled within the disc in batches (the whole
+  mod at 2 m ran out of memory), `maptex.check` names a texture over the
+  mip error before the assert (a leaf cut-out at 27; the limit 32).
 - **v1.7.43**: **the ground probe read wrong since it was first used**
   (logs 111, 114: "fell through into water", "spots I sink straight
   through"): `GET_GROUND_Z_FOR_3D_COORD` answers through its pointer and

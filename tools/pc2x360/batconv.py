@@ -1220,8 +1220,10 @@ class Converter:
         don't always (the Batmobile's add up to 0.51 in a 0.35 box), so the
         radius is read from the box, which they fit to the wheel itself."""
         bnd = res.vptr(0xEC)
-        parts, lst = res.vptr(bnd + 0x80), res.vptr(0xD4)
         out = {}
+        if bnd is None:  # (a donor made here with no physics at all: pcwrite.Fragment, v1.7.43)
+            return out
+        parts, lst = res.vptr(bnd + 0x80), res.vptr(0xD4)
         for i in range(frag['child_count']):
             c = res.vptr(lst + 4 * i)
             if c is None:

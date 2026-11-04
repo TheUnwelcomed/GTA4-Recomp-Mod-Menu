@@ -102,8 +102,11 @@ class ShaderLibrary:
         for p in paths:
             try:
                 r = rsc5.Resource.pc(p)
-                d = rsc5.read_drawable(r, 0)
+                # (a vehicle's drawable sits in its fragment, at +0xB4; v1.7.43)
+                d = rsc5.read_fragtype(r)['drawable'] if p.lower().endswith('.wft') else rsc5.read_drawable(r, 0)
             except Exception:
+                continue
+            if not d:
                 continue
             if not d['shader_group']:
                 continue
@@ -134,11 +137,13 @@ class Drawable:
         self.shaders.append((sps, dict(textures), dict(vectors or {})))
         return len(self.shaders) - 1
 
-    def geometry(self, lod, shader, pos, nrm, col, uvs, tris, tan=None):
+    def geometry(self, lod, shader, pos, nrm, col, uvs, tris, tan=None, bones=None):
         """pos (n, 3), nrm (n, 3) or None, col (n, 4) uint8 or None, uvs a
         list of (n, 2) arrays, tris (m, 3) int, tan (n, 4) or None (the
         tangent and its handedness, for normal-mapped shaders). More than
-        65535 vertices are split into several geometries."""
+        65535 vertices are split into several geometries. `bones`: a skinned
+        geometry (a vehicle's, v1.7.43): the bone table (skeleton bone
+        indexes) and every vertex bound wholly to its first entry."""
         pos = np.asarray(pos, np.float32)
         tris = np.asarray(tris, np.int64).reshape(-1, 3)
         n = len(pos)
@@ -146,7 +151,8 @@ class Drawable:
             self.lods[lod].append(dict(shader=shader, pos=pos, nrm=None if nrm is None else np.asarray(nrm, np.float32),
                                        col=None if col is None else np.asarray(col, np.uint8),
                                        uvs=[np.asarray(u, np.float32) for u in uvs], tris=tris,
-                                       tan=None if tan is None else np.asarray(tan, np.float32)))
+                                       tan=None if tan is None else np.asarray(tan, np.float32),
+                                       bones=None if bones is None else [int(b) for b in bones]))
             return 1
         # split by triangle runs, re-indexing each part's vertices
         parts = 0
@@ -165,7 +171,7 @@ class Drawable:
             remap = np.vectorize(used.get)(tris[start:end])
             self.geometry(lod, shader, pos[order], None if nrm is None else np.asarray(nrm)[order],
                           None if col is None else np.asarray(col)[order], [np.asarray(u)[order] for u in uvs], remap,
-                          None if tan is None else np.asarray(tan)[order])
+                          None if tan is None else np.asarray(tan)[order], bones)
             parts += 1
             start = end
         return parts
@@ -215,6 +221,8 @@ class Drawable:
     def _write_geometry(self, v, p, g):
         n = len(g['pos'])
         usage = 1
+        if g.get('bones') is not None:
+            usage |= (1 << 1) | (1 << 2)  # blend weights and indices
         if g['nrm'] is not None:
             usage |= 1 << 3
         if g['col'] is not None:
@@ -227,6 +235,8 @@ class Drawable:
         at = dict(elems)
         vdata = np.zeros((n, stride), np.uint8)
         vdata[:, at[0]:at[0] + 12] = g['pos'].astype('<f4').view(np.uint8)
+        if g.get('bones') is not None:  # (wholly on the table's first bone: weight 255 in the first slot)
+            vdata[:, at[1]] = 255
         if g['nrm'] is not None:
             vdata[:, at[3]:at[3] + 12] = g['nrm'].astype('<f4').view(np.uint8)
         if g['col'] is not None:
@@ -263,7 +273,13 @@ class Drawable:
         v.w32(geo + 48, len(g['tris']))
         v.w16(geo + 52, n)
         v.w16(geo + 54, 3)
-        v.w32(geo + 60, stride)
+        v.w16(geo + 60, stride)
+        if g.get('bones') is not None:  # the bone table (+56 its entries, +62 their count, after the stride's u16)
+            tbl = v.alloc(2 * len(g['bones']))
+            for i, b in enumerate(g['bones']):
+                v.w16(tbl + 2 * i, b)
+            v.w32(geo + 56, VP | tbl)
+            v.w16(geo + 62, len(g['bones']))
         return geo
 
     @staticmethod
@@ -273,8 +289,17 @@ class Drawable:
         return c, float(np.sqrt(((points - c) ** 2).sum(1)).max()), lo, hi
 
     def write(self, path):
-        assert self.lods[0], 'no geometry'
         v, p = Seg(), Seg()
+        self.emit(v, p)
+        flags = write_resource(path, TYPE_WDR, v.buf, p.buf)
+        return dict(flags=flags, vsize=len(v.buf), psize=len(p.buf), radius=self.radius, bbox=self.bbox)
+
+    def emit(self, v, p, skeleton=None):
+        """The drawable into the segments; returns its root's offset. A
+        vehicle's `skeleton` (v1.7.43): [(name, parent index, (x, y, z))],
+        parents first, each bone's position in the car - written as the PC
+        files have it (bones of 0xE0 bytes, the three matrix arrays)."""
+        assert self.lods[0], 'no geometry'
         root = v.alloc(0x90)
         blockmap = v.alloc(0x10)
         sg = v.alloc(0x40)
@@ -348,8 +373,113 @@ class Drawable:
             v.f32(root + 80 + 4 * i, 9999.0)
             v.w32(root + 96 + 4 * i, masks[i])
         v.f32(root + 112, r)
-        flags = write_resource(path, TYPE_WDR, v.buf, p.buf)
-        return dict(flags=flags, vsize=len(v.buf), psize=len(p.buf), radius=r, bbox=(lo.tolist(), hi.tolist()))
+        if skeleton:
+            v.w32(root + 12, VP | write_skeleton(v, skeleton))
+        self.radius, self.bbox = r, (lo.tolist(), hi.tolist())
+        return root
+
+
+def write_skeleton(v, bones):
+    """A PC skeleton: bones of 0xE0 bytes (name, flags, parent, local
+    translation, an identity rotation, the stored position, limits of +-pi),
+    the global, inverse global and local matrix arrays (64 bytes each,
+    identity rotations with the translation in the fourth row), the header
+    the PC files carry (gauntletc.wft checked)."""
+    n = len(bones)
+    sk = v.alloc(0x40)
+    bo = v.alloc(0xE0 * n)
+    for i, (name, parent, pos) in enumerate(bones):
+        b = bo + 0xE0 * i
+        v.w32(b, VP | v.cstr(name))
+        v.w32(b + 4, 0x0008038E)
+        v.w32(b + 0x10, (VP | (bo + 0xE0 * parent)) if parent >= 0 else 0)
+        v.buf[b + 0x18] = i & 0xFF
+        v.buf[b + 0x19] = i & 0xFF
+        ppos = bones[parent][2] if parent >= 0 else (0.0, 0.0, 0.0)
+        v.f32(b + 0x20, pos[0] - ppos[0], pos[1] - ppos[1], pos[2] - ppos[2])
+        v.w32(b + 0x2C, NAN_W)
+        v.w32(b + 0x3C, NAN_W)
+        v.f32(b + 0x40, 0.0, 0.0, 0.0, 1.0)
+        v.w32(b + 0x5C, NAN_W)
+        v.f32(b + 0x60, pos[0], pos[1], pos[2])
+        for o in (0x6C, 0x7C, 0x8C, 0x9C, 0xAC, 0xBC, 0xCC):
+            v.w32(b + o, NAN_W)
+        v.f32(b + 0xB0, -3.14159274, -3.14159274, -3.14159274)
+        v.f32(b + 0xC0, 3.14159274, 3.14159274, 3.14159274)
+    arrays = []
+    for kind in ('global', 'inverse', 'local'):
+        a = v.alloc(64 * n)
+        for i, (name, parent, pos) in enumerate(bones):
+            m = a + 64 * i
+            v.f32(m, 1.0, 0.0, 0.0, 0.0)
+            v.f32(m + 16, 0.0, 1.0, 0.0, 0.0)
+            v.f32(m + 32, 0.0, 0.0, 1.0, 0.0)
+            if kind == 'local':
+                ppos = bones[parent][2] if parent >= 0 else (0.0, 0.0, 0.0)
+                v.f32(m + 48, pos[0] - ppos[0], pos[1] - ppos[1], pos[2] - ppos[2], 1.0)
+            elif kind == 'global':
+                v.f32(m + 48, pos[0], pos[1], pos[2], 1.0)
+            else:
+                v.f32(m + 48, -pos[0], -pos[1], -pos[2], 1.0)
+        arrays.append(a)
+    parents = v.alloc(2 * n)
+    for i, (name, parent, pos) in enumerate(bones):
+        v.w16(parents + 2 * i, parent & 0xFFFF)
+    v.w32(sk, VP | bo)
+    v.w32(sk + 4, VP | parents)
+    v.w32(sk + 8, VP | arrays[0])
+    v.w32(sk + 12, VP | arrays[1])
+    v.w32(sk + 16, VP | arrays[2])
+    v.w16(sk + 20, n)
+    v.w16(sk + 22, 3)
+    v.w32(sk + 24, 0xC0)
+    v.w32(sk + 28, 0xF)
+    v.w32(sk + 32, VP | parents)
+    v.w16(sk + 36, n)
+    v.w16(sk + 38, n)
+    v.w32(sk + 40, 3)
+    return sk
+
+
+# ---------------------------------------------------------------- vehicles
+TYPE_WFT = 112
+
+
+class Fragment:
+    """A vehicle's fragment (.wft) around a Drawable (v1.7.43): the fragType
+    header as the PC files have it (the first 0x200 bytes of a PC vehicle
+    file given as the pattern, its pointers cleared), the drawable with its
+    skeleton at +0xB4, the bounding sphere at +0x10 - no physics children
+    and no bound: the console converter (batconv.Converter) takes those from
+    its stock template, and a car with no wheel meshes hides the template's.
+
+        Fragment(drawable, skeleton).write('out/car.wft', pattern='some.wft')
+    """
+    def __init__(self, drawable, skeleton):
+        self.drawable = drawable
+        self.skeleton = skeleton
+
+    def write(self, path, pattern):
+        pat = rsc5.Resource.pc(pattern)
+        head = bytearray(pat.virt[:0x200])
+        for o in range(0, 0x200, 4):  # every pointer cleared (the drawable's set below)
+            w = struct.unpack_from('<I', head, o)[0]
+            if w >> 28 in (5, 6):
+                struct.pack_into('<I', head, o, 0)
+        head[0x1F3] = 0  # no children
+        v, p = Seg(), Seg()
+        root = v.put(bytes(head))
+        assert root == 0
+        d = self.drawable.emit(v, p, self.skeleton)
+        v.w32(0xB4, VP | d)
+        blockmap = v.alloc(0x10)
+        v.w32(4, VP | blockmap)
+        lo, hi = (np.array(x, np.float32) for x in self.drawable.bbox)
+        c = (lo + hi) / 2
+        r = float(np.sqrt(((hi - c) ** 2).sum()))
+        v.f32(0x10, float(c[0]), float(c[1]), float(c[2]), r)
+        flags = write_resource(path, TYPE_WFT, v.buf, p.buf)
+        return dict(flags=flags, vsize=len(v.buf), psize=len(p.buf), radius=r)
 
 
 # ---------------------------------------------------------------- texture dictionaries

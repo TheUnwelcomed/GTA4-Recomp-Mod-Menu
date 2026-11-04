@@ -35,6 +35,7 @@
 #include "gta4_init.h"
 #include "gta4_jet_engine.h"
 #include "gta4_car_engine.h"
+#include "gta4_beyond_engine.h"
 #include "gta4_time_machine.h"
 #include "gta4_island_sound.h"
 #include <fstream>
@@ -961,6 +962,7 @@ constexpr std::array kVehicles = {
     VehicleChoice{"DeLorean Time Machine (Part II)", "DELTWO"},
     VehicleChoice{"DeLorean Time Machine (Part III)", "DELTHR"},
     VehicleChoice{"Batwing", "BATWING", 16.0f},
+    VehicleChoice{"Batman Beyond Batmobile", "BEYOND", 7.0f},
 };
 // The game's own vehicles come first in the list; the add-ons from here.
 constexpr int kFirstAddon = [] {
@@ -1050,6 +1052,7 @@ enum class Action {
   kOpenTimeMachine, kTmPreset, kTmField, kTmCircuits, kTmRefuel, kTmHover,
   kOpenSpawnStandard, kCompleteMission, kTogglePerformance, kJetRoute,
   kTmUnloadMap, kTmPieces, kJetLandMode,
+  kBeyondSummon, kBeyondCloak,
 };
 struct Item {
   std::string_view label;
@@ -1114,6 +1117,9 @@ struct State {
   std::string tm_map;  // the destination's place (a map set's name), or none: the city
   bool map_movable = false;  // a place's pieces as movable objects (v1.7.41 and before) rather than buildings (v1.7.42)
   bool tm_toggle_circuits = false, tm_refuel = false, tm_toggle_hover = false;
+  // The Beyond Batmobile's requests from the menu (v1.7.44): summoned to the
+  // player, its cloak.
+  bool beyond_summon = false, beyond_toggle_cloak = false;
   // Async vehicle spawn.
   int pending_model = -1;
   uint32_t pending_hash = 0;
@@ -1211,6 +1217,8 @@ bool g_have_batwing = false;
 bool g_have_nexus = false, g_have_arbiter = false, g_have_dominator = false;
 bool g_have_lazar = false, g_have_gauntlet = false;
 bool g_have_dmc12 = false, g_have_bttf1 = false, g_have_bttf2 = false, g_have_bttf3 = false, g_have_bttf2h = false;
+bool g_have_beyond = false;  // the Batman Beyond Batmobile (v1.7.44)
+std::atomic<bool> g_beyond_cloaked{false};  // (for the menu's line)
 bool HaveTimeMachines() { return g_have_bttf1 || g_have_bttf2 || g_have_bttf3; }
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
@@ -1233,7 +1241,7 @@ bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_batwing || g_have_deimos ||
          g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator || g_have_lazar ||
-         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || s.car_lights;
+         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || g_have_beyond || s.car_lights;
 }
 
 // The sections the menu's tab strip shows, L1/R1 going through them.
@@ -1291,6 +1299,10 @@ std::vector<Item> PageItems(const State& s) {
                 Action::kToggleGadgets},
                {s.jet ? "Jet Flight and Weapons (F-16, Batwing): ON" : "Jet Flight and Weapons (F-16, Batwing): OFF",
                 Action::kToggleJet},
+               {"Beyond Batmobile: Summon It (it flies to you)", Action::kBeyondSummon},
+               {g_beyond_cloaked.load(std::memory_order_relaxed) ? "Beyond Batmobile: Cloak ON (d-pad down in it)"
+                                                                 : "Beyond Batmobile: Cloak OFF (d-pad down in it)",
+                Action::kBeyondCloak},
                {s.jet_expert ? "Jet Controls: Expert (roll and pull, like GTA V)"
                              : "Jet Controls: Standard (bank to turn, like Ace Combat)",
                 Action::kToggleJetExpert},
@@ -1916,7 +1928,7 @@ void ReportModel(uint8_t* base, std::string_view name, uint32_t hash, const Mode
 // The Batwing's: its gear (entries 0-2, as the F-16's) and canopy (3).
 enum PoseSlot : int {
   kPoseDeimos = 0, kPoseF16 = 1, kPoseBatmobile = 2, kPoseNexus = 3, kPoseLazar = 4, kPoseDelorean = 5,
-  kPoseBatwing = 6, kPoseSlots = 7
+  kPoseBatwing = 6, kPoseBeyond = 7, kPoseSlots = 8
 };
 
 // Pop-up headlights: the Grotti Deimos's and the Dinka Nexus's. The converter
@@ -3999,7 +4011,10 @@ uint32_t FindLockTarget(PPCContext& ctx, uint8_t* base, uint32_t car) {
 // The rocket's nose (its +Y) along a direction, level (no roll).
 void PointRocket(PPCContext& ctx, uint8_t* base, const BatRocket& r) { PointObjectAlong(ctx, base, r.object, r.dir); }
 
-bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
+// (v1.7.44: the launcher's place on the car and its sound are the caller's -
+// the Beyond Batmobile fires the same missiles from its nose.)
+bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s, const float (&launcher)[3] = kBatLauncher,
+                  void (*sound)() = LaunchSound, std::string_view who = "Batmobile") {
   BatRocket* slot = nullptr;
   for (auto& r : g_gadget.rockets)
     if (!r.live) {
@@ -4016,8 +4031,8 @@ bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
     Toast(s, "Missiles loading...", 800);
     return false;
   }
-  const float ahead_local[3] = {kBatLauncher[0], kBatLauncher[1] + 100.0f, kBatLauncher[2]};
-  const auto start = CarPoint(ctx, base, car, kBatLauncher), ahead = CarPoint(ctx, base, car, ahead_local);
+  const float ahead_local[3] = {launcher[0], launcher[1] + 100.0f, launcher[2]};
+  const auto start = CarPoint(ctx, base, car, launcher), ahead = CarPoint(ctx, base, car, ahead_local);
   if (!start || !ahead)
     return false;
   BatRocket& r = *slot;
@@ -4060,14 +4075,14 @@ bool LaunchRocket(PPCContext& ctx, uint8_t* base, uint32_t car, State& s) {
                                 1, 0, "weap_rocket"))
     r.trail = trail->r0();
   // The launch flash out of the intake.
-  const float mouth[3] = {kBatLauncher[0], kBatLauncher[1] + 0.3f, kBatLauncher[2]};
+  const float mouth[3] = {launcher[0], launcher[1] + 0.3f, launcher[2]};
   CarEffect(ctx, base, car, "muz_machine", mouth, 2.5f);
-  LaunchSound();
+  sound();
   Toast(s, r.target ? "Missile locked on the car ahead." : "Missile away (nothing to lock on).", 1100);
   if (g_gadget.rocket_log < 12) {
     ++g_gadget.rocket_log;
-    REXLOG_INFO("gta4-trainer: Batmobile missile away at {:.0f} m/s (object {:08X}, trail {:08X}, target {:08X})",
-                r.speed, r.object, r.trail, r.target);
+    REXLOG_INFO("gta4-trainer: {} missile away at {:.0f} m/s (object {:08X}, trail {:08X}, target {:08X})",
+                std::string(who), r.speed, r.object, r.trail, r.target);
   }
   return true;
 }
@@ -4533,6 +4548,18 @@ void LazarRampSound(bool opening);  // (with the Lazar's turret, below)
 constexpr CanopySpec kLazarRamps{"LAZAR3", "Lazar 3", "extra_6", -40.0f, 0.8f, 0.9f, {-3.0f, 0.75f, 0.0f},
                                  kPoseLazar, 2, true, true, 1, "interiorlight", 40.0f, LazarRampSound, true};
 CanopyState g_lazar_ramps;
+// The Beyond Batmobile's canopy (v1.7.44): the bubble over its spine, bound
+// by its builder (tools/car/beyond_build.py) to the template's interiorlight
+// bone at the bubble's rear edge (0, -0.75, 0.74 in the car's space); it
+// rises 34 degrees. The car hovers, so it is never "on the ground": the
+// flight code (BeyondTick) brings it down to its hover height and to a stop
+// before Y reaches the canopy, and takes Y meanwhile. The player is set down
+// to its left, clear of the wing. Y beside it puts the player in at once.
+void BeyondCanopySound(bool opening);  // (the Beyond Batmobile's sounds, below)
+constexpr CanopySpec kBeyondCanopy{"BEYOND", "Beyond Batmobile", "interiorlight", 34.0f, 0.6f, 0.8f,
+                                   {-2.3f, 0.3f, 0.0f}, kPoseBeyond, 0, false, false, 0, {}, 0.0f, BeyondCanopySound,
+                                   true};
+CanopyState g_beyond_canopy;
 
 void CanopySound(bool opening);  // (the Batmobile's sound section, below)
 
@@ -8979,6 +9006,566 @@ uint32_t TimeMachine(PPCContext& ctx, uint8_t* base, const GameContext& game, St
   return keep;
 }
 
+// ---------------------------------------------------------------------------
+// The Batman Beyond Batmobile (v1.7.44): the show's car, built from scratch
+// (tools/car/beyond_body.py, beyond_build.py: no model taken from anywhere), a
+// flying wing with no wheels of its own (the Infernus template's, hidden,
+// hold it up when it rests). In it the trainer flies it as it flies the Part
+// II DeLorean: the left stick drives and turns (it banks into the turn), R2
+// climbs, L2 sinks, it hovers where it is with nothing pressed, kept clear of
+// the ground; up to 60 m/s, 95 with the boost (d-pad right held, the twin
+// thrusters flaming). L1 fires the Batmobile's lock-on missiles from the
+// nose. D-pad down cloaks it - the car and its pilot unseen, the police
+// losing him - and uncloaks it. Y brings it down to its hover height and to
+// a stop, then the canopy rises (kBeyondCanopy) and the player is set down
+// beside it; the car stays where it is, hovering (held in the air), until he
+// gets back in or summons it. Summoned (the Vehicles page) it flies to the
+// player from wherever it was left, climbing over what is in the way, and
+// settles into a hover beside him; gone (the game took it), a new one comes
+// in from the sky behind him. Heard all the while (gta4_beyond_engine.h: the
+// turbines' whine with Doppler from outside, the hover thrum, the air rush,
+// the boost, the canopy, the cloak, a launch). Those buttons are hidden from
+// the game in the car.
+// ---------------------------------------------------------------------------
+gta4::beyond::EngineSynth g_beyond_synth;
+#if REX_PLATFORM_PS5
+class BeyondSource final : public gta4ps5::sound::Source {
+ public:
+  size_t Read(float* lr, size_t frames) override {
+    g_beyond_synth.Render(lr, frames);
+    return frames;
+  }
+  bool Rewind() override { return true; }
+};
+gta4ps5::sound::Voice* g_beyond_voice = nullptr;
+#endif
+// Starts the car's voice (want), or stops it once quiet.
+void BeyondVoice(bool want) {
+#if REX_PLATFORM_PS5
+  if (!g_beyond_voice) {
+    if (!want)
+      return;
+    gta4ps5::sound::StartOutput();
+    g_beyond_voice = gta4ps5::sound::NewVoice();
+    g_beyond_voice->game_sound = true;
+  }
+  if (want && !g_beyond_voice->Active()) {
+    g_beyond_voice->SetVolume(1.0f);
+    g_beyond_voice->Play(std::make_unique<BeyondSource>(), true);
+  } else if (!want && g_beyond_voice->Active() && g_beyond_synth.Quiet()) {
+    g_beyond_voice->Stop();
+  }
+#else
+  (void)want;
+#endif
+}
+
+struct BeyondState {
+  uint32_t car = 0;  // the car it knows: the one flown, left hovering or summoned
+  bool in_car = false;
+  bool parked = false;     // left hovering, held in the air where the player got out
+  bool cloaked = false;
+  bool summoning = false;  // on its way to the player
+  bool settling = false;   // Y in flight: coming down to its hover height to let the player out
+  bool sounding = false;   // its voice wanted (in it; parked or flying within earshot)
+  bool y_taken = false, exit_pulse = false;  // Y kept from the canopy while settling; Y given to it once settled
+  bool spawn_pending = false;                // a summoned car waits for its model
+  uint64_t spawn_since = 0;
+  // The flight (as the time machine's Hover): speed along the nose, heading,
+  // climb rate, bank and pitch, the held height.
+  float fwd = 0.0f, heading = 0.0f, climb = 0.0f, bank = 0.0f, pitch = 0.0f, hold_z = 0.0f, altitude = 99.0f;
+  float boost = 0.0f, spool = 0.0f;
+  bool placed = false;
+  float placed_z = 0.0f, placed_vz = 0.0f;
+  float floor_z = -1e9f, floor_x = 0.0f, floor_y = 0.0f;
+  std::array<uint32_t, 2> flames{};
+  bool flaming = false;
+  uint64_t rocket_ready = 0;
+  bool rocket_reloading = false, models_requested = false;
+  uint64_t next_probe = 0, last_ms = 0, next_wanted_clear = 0, settle_since = 0, summon_since = 0;
+  uint16_t prev_buttons = 0;
+  float listen_dist = -1.0f;  // the last distance heard from outside (for the closing speed)
+  int log = 0, fly_log = 0, floor_log = 0, summon_log = 0;
+};
+BeyondState g_beyond;
+constexpr float kBeyondClear = 0.9f;                            // its origin over the ground, hovering
+constexpr float kBeyondCruise = 60.0f, kBeyondBoostSpeed = 95.0f;  // m/s
+constexpr float kBeyondClimb = 12.0f;                           // m/s on R2 / L2
+constexpr float kBeyondLauncher[3] = {0.0f, 3.0f, 0.12f};       // the nose's tip (car space)
+constexpr float kBeyondJets[2][3] = {{-0.40f, -1.85f, 0.17f}, {0.40f, -1.85f, 0.17f}};  // the thrusters' mouths
+constexpr uint64_t kBeyondReloadMs = 2500;
+
+void BeyondCanopySound(bool opening) {
+  g_beyond_synth.Canopy(opening);
+  g_beyond_synth.Beam(!opening);  // (the beam lifts him in as it shuts; drops him out as it opens)
+  BeyondVoice(true);
+  g_beyond.sounding = true;
+}
+void BeyondLaunchSound() { g_beyond_synth.Launch(); }
+
+void BeyondFlames(PPCContext& ctx, uint8_t* base, uint32_t car, bool on) {
+  auto& m = g_beyond;
+  if (!on) {
+    for (auto& f : m.flames) {
+      if (f)
+        Invoke(ctx, base, "STOP_PTFX", {f});
+      f = 0;
+    }
+    m.flaming = false;
+    return;
+  }
+  if (m.flaming)
+    return;
+  m.flaming = true;
+  for (size_t k = 0; k < 2; ++k) {
+    const auto r = Invoke(ctx, base, "START_PTFX_ON_VEH",
+                          {0, car, Bits(kBeyondJets[k][0]), Bits(kBeyondJets[k][1]), Bits(kBeyondJets[k][2]), 0, 0, 0,
+                           Bits(1.1f)},
+                          -1, 0, 1, 0, "weap_rocket");
+    m.flames[k] = r ? r->r0() : 0;
+  }
+}
+
+void BeyondHold(PPCContext& ctx, uint8_t* base, BeyondState& m, bool hold) {
+  if (!m.car)
+    return;
+  Invoke(ctx, base, "FREEZE_CAR_POSITION", {m.car, hold ? 1u : 0u});
+  m.parked = hold;
+}
+
+// The cloak: the car (and its pilot in it) unseen; the wanted level cleared
+// while it holds (the police lose him).
+void BeyondCloak(PPCContext& ctx, uint8_t* base, const GameContext& game, BeyondState& m, bool on, bool quiet = false) {
+  if (m.car)
+    Invoke(ctx, base, "SET_CAR_VISIBLE", {m.car, on ? 0u : 1u});
+  if (NativeKnown("SET_CHAR_VISIBLE"))
+    Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, on && m.in_car ? 0u : 1u});
+  if (m.cloaked != on && !quiet)
+    g_beyond_synth.Cloak(on);
+  m.cloaked = on;
+  g_beyond_cloaked.store(on, std::memory_order_relaxed);
+  if (on)
+    Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
+}
+
+// One step of flight. want_fwd: the speed asked along the nose (m/s), turn:
+// -1..1 (right positive), up: -1..1 (R2 - L2, or the autopilot's). The
+// attitude and the speed are set every frame as the DeLorean's are; the
+// height is a held target, moved by `up` and by the ground (the car kept
+// kBeyondClear over the higher of the ground under it and half a second
+// ahead, and over any floor the physics pushed it up onto).
+void BeyondFly(PPCContext& ctx, uint8_t* base, BeyondState& m, float want_fwd, float turn, float up, float dt) {
+  const auto c = CarPosition(ctx, base, m.car);
+  if (!c)
+    return;
+  const float accel_limit = want_fwd > m.fwd ? (m.boost > 0.5f ? 30.0f : 20.0f) : 26.0f;
+  const float accel = std::clamp(want_fwd - m.fwd, -accel_limit * dt, accel_limit * dt);
+  m.fwd += accel;
+  m.heading -= turn * 1.5f * dt * (0.45f + 0.55f * std::min(1.0f, std::fabs(m.fwd) / 20.0f));
+  const float want_climb = up * kBeyondClimb;
+  m.climb += std::clamp(want_climb - m.climb, -22.0f * dt, 22.0f * dt);
+  m.bank += (turn * 0.5f - m.bank) * std::min(1.0f, 4.0f * dt);
+  m.pitch += (std::clamp(-accel / std::max(dt, 1e-3f) * 0.005f + m.climb * 0.02f, -0.3f, 0.3f) - m.pitch) *
+             std::min(1.0f, 3.0f * dt);
+  if (!m.placed)
+    m.hold_z = (*c)[2];
+  if ((*c)[2] > m.hold_z + 0.6f)  // (pushed up by something it met: it stays up)
+    m.hold_z = (*c)[2];
+  m.hold_z += m.climb * dt;
+  float z = m.hold_z;
+  std::optional<float> gz = GroundZ(ctx, base, (*c)[0], (*c)[1], (*c)[2] + 6.0f);
+  {
+    const float ahead = std::clamp(m.fwd, -10.0f, 60.0f) * 0.5f;
+    const float hx = -std::sin(m.heading) * ahead, hy = std::cos(m.heading) * ahead;
+    if (const auto g2 = GroundZ(ctx, base, (*c)[0] + hx, (*c)[1] + hy, (*c)[2] + 6.0f))
+      if (!gz || *g2 > *gz)
+        gz = g2;
+  }
+  // Coming down and pushed back up by the physics: a floor the probe missed.
+  if (m.placed && m.climb < -0.5f && (*c)[2] > m.placed_z + m.placed_vz * dt + 0.04f) {
+    m.floor_z = (*c)[2] - kBeyondClear;
+    m.floor_x = (*c)[0];
+    m.floor_y = (*c)[1];
+    if (m.floor_log < 4) {
+      ++m.floor_log;
+      REXLOG_INFO("gta4-trainer: Beyond Batmobile: something solid under it at {:.1f} (the probe's ground {:.1f})",
+                  m.floor_z, gz ? *gz : -999.0f);
+    }
+  }
+  {
+    const float dx = (*c)[0] - m.floor_x, dy = (*c)[1] - m.floor_y;
+    if (m.floor_z > -1e8f && dx * dx + dy * dy < 36.0f && (!gz || m.floor_z > *gz))
+      gz = m.floor_z;
+  }
+  if (gz && z < *gz + kBeyondClear) {
+    z = *gz + kBeyondClear;
+    m.hold_z = z;
+    m.climb = std::max(m.climb, 0.0f);
+  }
+  m.altitude = gz ? z - *gz : 99.0f;
+  const Quat q = QNormalize(QMul(QMul(QAxis(0, 0, 1, m.heading), QAxis(1, 0, 0, m.pitch)), QAxis(0, 1, 0, m.bank)));
+  Invoke(ctx, base, "SET_VEHICLE_QUATERNION", {m.car, Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
+  PlaceCar(ctx, base, m.car, (*c)[0], (*c)[1], z);
+  m.placed = true;
+  m.placed_z = z;
+  {
+    const float nose[3] = {0.0f, 1.0f, 0.0f};
+    float f[3];
+    QRotate(q, nose, f);
+    m.placed_vz = m.fwd * f[2];
+  }
+  Invoke(ctx, base, "SET_CAR_FORWARD_SPEED", {m.car, Bits(m.fwd)});
+  // The turbines: idling in a hover, spooling up with speed, climb and boost.
+  const float want_spool = std::clamp(
+      gta4::beyond::EngineSynth::kIdle +
+          (1.0f - gta4::beyond::EngineSynth::kIdle) *
+              std::max({std::fabs(m.fwd) / kBeyondCruise, std::fabs(m.climb) / kBeyondClimb * 0.6f, m.boost}),
+      0.0f, 1.0f);
+  m.spool += (want_spool - m.spool) * std::min(1.0f, 3.0f * dt);
+  if (m.fly_log < 4 && dt > 0.0f) {
+    ++m.fly_log;
+    REXLOG_INFO("gta4-trainer: Beyond Batmobile flying: {:.1f} m up, {:.1f} m/s ahead, climbing {:.1f} m/s",
+                m.altitude, m.fwd, m.climb);
+  }
+}
+
+// Takes the flight state from where the car is (getting in, or summoned).
+void BeyondTakeOff(PPCContext& ctx, uint8_t* base, BeyondState& m, float climb) {
+  m.placed = false;
+  m.climb = climb;
+  m.pitch = m.bank = 0.0f;
+  m.floor_z = -1e9f;
+  float speed = 0.0f;
+  if (const auto v = Invoke(ctx, base, "GET_CAR_SPEED", {m.car, 0}, 1))
+    speed = std::fabs(v->f(0));
+  m.fwd = std::min(speed, 10.0f);
+  if (const auto h = Invoke(ctx, base, "GET_CAR_HEADING", {m.car, 0}, 1))
+    m.heading = h->f(0) * 3.14159265f / 180.0f;
+  if (const auto at = CarPosition(ctx, base, m.car)) {
+    m.floor_z = (*at)[2] - kBeyondClear;  // (where it rests: a floor)
+    m.floor_x = (*at)[0];
+    m.floor_y = (*at)[1];
+  }
+}
+
+bool BeyondCarAlive(PPCContext& ctx, uint8_t* base, BeyondState& m) {
+  if (!m.car)
+    return false;
+  const auto exists = Invoke(ctx, base, "DOES_VEHICLE_EXIST", {m.car});
+  if (!exists || !exists->r0()) {
+    m.car = 0;
+    m.parked = m.summoning = false;
+    return false;
+  }
+  const auto dead = Invoke(ctx, base, "IS_CAR_DEAD", {m.car});
+  return dead && !dead->r0();
+}
+
+// Summoned: the car flies to a spot beside the player (his right, 4 m off),
+// up to 50 m/s, climbing to 14 m over the ground on the way and coming down
+// over the last stretch; it settles there, hovering. Returns true when it
+// has arrived.
+bool BeyondAutopilot(PPCContext& ctx, uint8_t* base, const GameContext& game, BeyondState& m, float dt) {
+  const auto c = CarPosition(ctx, base, m.car);
+  if (!c)
+    return false;
+  const float rx = game.forward[1], ry = -game.forward[0];  // the player's right
+  const float tx = game.position[0] + rx * 4.0f, ty = game.position[1] + ry * 4.0f;
+  const float dx = tx - (*c)[0], dy = ty - (*c)[1];
+  const float dist = std::sqrt(dx * dx + dy * dy);
+  // The heading to face it: the nose is (-sin h, cos h).
+  float err = 0.0f;
+  if (dist > 1.0f) {
+    const float want = std::atan2(-dx, dy);
+    err = want - m.heading;
+    while (err > 3.14159265f) err -= 6.2831853f;
+    while (err < -3.14159265f) err += 6.2831853f;
+  }
+  const float turn = -std::clamp(err / 0.6f, -1.0f, 1.0f);
+  // Slow to turn on the spot when it points away; slower as it closes in.
+  float want_fwd = std::min(50.0f, dist / 2.0f);
+  if (std::fabs(err) > 1.0f)
+    want_fwd = std::min(want_fwd, 3.0f);
+  else if (std::fabs(err) > 0.4f)
+    want_fwd = std::min(want_fwd, 12.0f);
+  if (dist < 1.2f)
+    want_fwd = 0.0f;
+  // Height: cruise 14 m over the ground far off, the hover height near.
+  float up;
+  if (dist > 45.0f) {
+    const float want_z = (m.altitude < 90.0f ? (*c)[2] - m.altitude : (*c)[2]) + 14.0f;
+    up = std::clamp((want_z - (*c)[2]) / 5.0f, -1.0f, 1.0f);
+  } else {
+    const float want_z = game.position[2] - 1.0f + kBeyondClear + 0.3f;  // (the ped's origin a metre up)
+    up = std::clamp((want_z - (*c)[2]) / 4.0f, -0.6f, 0.6f);
+  }
+  BeyondFly(ctx, base, m, want_fwd, turn, up, dt);
+  if (m.summon_log < 3 && dt > 0.0f) {
+    ++m.summon_log;
+    REXLOG_INFO("gta4-trainer: Beyond Batmobile summoned: {:.0f} m off, {:.1f} m up, {:.0f} m/s", dist, m.altitude,
+                m.fwd);
+  }
+  return dist < 2.0f && std::fabs(m.fwd) < 1.5f && m.altitude < kBeyondClear + 1.2f;
+}
+
+// Every frame in the car (and while it hovers or flies nearby); a look a few
+// times a second otherwise. Returns the buttons it takes from the game.
+uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons,
+                    const DrivePad& pad) {
+  auto& m = g_beyond;
+  const uint64_t now = NowMs();
+  const float dt = m.last_ms ? std::clamp(float(now - m.last_ms) / 1000.0f, 0.0f, 0.05f) : 0.0f;
+  m.last_ms = now;
+  m.y_taken = m.exit_pulse = false;
+  const bool busy = m.in_car || m.parked || m.summoning || m.sounding || m.spawn_pending || s.beyond_summon ||
+                    s.beyond_toggle_cloak;
+  if (!busy && now < m.next_probe)
+    return 0;
+  m.next_probe = now + 300;
+  const uint16_t prev = m.prev_buttons;
+  m.prev_buttons = buttons;
+  auto pressed = [&](uint16_t b) { return (buttons & b) && !(prev & b) && !s.open; };
+  static const uint32_t kBeyond = ModelHash("BEYOND");
+  const auto& vehicle = PlayerVehicle(ctx, base, game);
+  const bool in = vehicle.car && vehicle.model == kBeyond;
+
+  // ---- summoned (the menu)
+  if (s.beyond_summon) {
+    s.beyond_summon = false;
+    if (in) {
+      Toast(s, "You're in it.", 1500);
+    } else if (BeyondCarAlive(ctx, base, m)) {
+      BeyondHold(ctx, base, m, false);
+      m.summoning = true;
+      m.summon_since = now;
+      m.summon_log = 0;
+      m.settling = false;
+      BeyondTakeOff(ctx, base, m, 4.0f);
+      if (m.cloaked)
+        BeyondCloak(ctx, base, game, m, false);
+      Toast(s, "The Batmobile is on its way.", 2500);
+    } else {
+      // Gone: a new one from the sky behind the player.
+      Invoke(ctx, base, "REQUEST_MODEL", {kBeyond});
+      m.spawn_pending = true;
+      m.spawn_since = now;
+      Toast(s, "The Batmobile is on its way.", 2500);
+    }
+  }
+  if (m.spawn_pending) {
+    const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {kBeyond});
+    if (loaded && loaded->r0()) {
+      const float back = 160.0f;
+      const float x = game.position[0] - game.forward[0] * back, y = game.position[1] - game.forward[1] * back;
+      float z = game.position[2] + 30.0f;
+      if (const auto gz = GroundZ(ctx, base, x, y, z + 50.0f))
+        z = std::max(z, *gz + 20.0f);
+      const auto made = Invoke(ctx, base, "CREATE_CAR", {kBeyond, Bits(x), Bits(y), Bits(z), 0, 1}, 4);
+      m.spawn_pending = false;
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {kBeyond});
+      if (made && made->words[0]) {
+        m.car = made->words[0];
+        m.cloaked = false;
+        m.summoning = true;
+        m.summon_since = now;
+        m.summon_log = 0;
+        m.settling = false;
+        BeyondTakeOff(ctx, base, m, 0.0f);
+        m.hold_z = z;
+        if (const auto h = Invoke(ctx, base, "GET_CAR_HEADING", {m.car, 0}, 1))
+          m.heading = h->f(0) * 3.14159265f / 180.0f;
+        Invoke(ctx, base, "MARK_CAR_AS_NO_LONGER_NEEDED", {0}, 0, m.car);
+        REXLOG_INFO("gta4-trainer: Beyond Batmobile {:08X} summoned from ({:.0f}, {:.0f}, {:.0f})", m.car, x, y, z);
+      } else {
+        Toast(s, "The Batmobile could not come.", 2000);
+      }
+    } else if (now - m.spawn_since > 15000) {
+      m.spawn_pending = false;
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {kBeyond});
+      Toast(s, "The Batmobile's model did not load.", 2500);
+    }
+  }
+
+  // ---- on foot (or in something else)
+  if (!in) {
+    if (m.in_car) {
+      // Just out of it: it stays where it is, hovering; the cloak drops with
+      // him (an unseen car is a lost one), the flames go out.
+      m.in_car = false;
+      m.settling = false;
+      BeyondFlames(ctx, base, m.car, false);
+      if (m.cloaked)
+        BeyondCloak(ctx, base, game, m, false);
+      if (BeyondCarAlive(ctx, base, m)) {
+        BeyondHold(ctx, base, m, true);
+        if (m.log < 8) {
+          ++m.log;
+          REXLOG_INFO("gta4-trainer: Beyond Batmobile left hovering {:.1f} m up (car {:08X})", m.altitude, m.car);
+        }
+      }
+      m.boost = 0.0f;
+    }
+    if (s.beyond_toggle_cloak) {
+      s.beyond_toggle_cloak = false;
+      Toast(s, "The cloak works from inside the Batmobile.", 2000);
+    }
+    const bool alive = (m.parked || m.summoning) && BeyondCarAlive(ctx, base, m);
+    if (m.summoning && alive) {
+      if (BeyondAutopilot(ctx, base, game, m, dt)) {
+        m.summoning = false;
+        BeyondHold(ctx, base, m, true);
+        Toast(s, "The Batmobile is here.", 2000);
+        REXLOG_INFO("gta4-trainer: Beyond Batmobile arrived (car {:08X})", m.car);
+      } else if (now - m.summon_since > 90000) {
+        m.summoning = false;  // (lost its way: left where it is, hovering)
+        BeyondHold(ctx, base, m, true);
+        Toast(s, "The Batmobile could not reach you; it waits where it is.", 3000);
+      }
+    } else if (m.summoning) {
+      // (the game took it on the way: a new one comes instead)
+      m.summoning = false;
+      if (!m.spawn_pending) {
+        Invoke(ctx, base, "REQUEST_MODEL", {kBeyond});
+        m.spawn_pending = true;
+        m.spawn_since = now;
+        REXLOG_INFO("gta4-trainer: the summoned Beyond Batmobile is gone; another comes");
+      }
+    }
+    // Heard from outside while it is near: the hover thrum, or the flight.
+    float dist = 1e9f;
+    if (alive) {
+      if (const auto c = CarPosition(ctx, base, m.car)) {
+        const float dx = (*c)[0] - game.position[0], dy = (*c)[1] - game.position[1], dz = (*c)[2] - game.position[2];
+        dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      }
+    }
+    if (alive && dist < 140.0f) {
+      const float closing = m.listen_dist >= 0.0f && dt > 0.0f ? (m.listen_dist - dist) / dt : 0.0f;
+      m.listen_dist = dist;
+      const float spool = m.summoning ? m.spool : gta4::beyond::EngineSynth::kIdle;
+      g_beyond_synth.SetListener(true, dist, std::clamp(closing, -120.0f, 120.0f));
+      g_beyond_synth.SetTarget(spool, m.summoning ? std::fabs(m.fwd) : 0.0f, 0.0f, 0.5f);
+      BeyondVoice(true);
+      m.sounding = true;
+    } else {
+      m.listen_dist = -1.0f;
+      if (m.sounding) {
+        g_beyond_synth.SetTarget(0.0f, 0.0f, 0.0f, 0.5f);  // winds down
+        BeyondVoice(false);
+#if REX_PLATFORM_PS5
+        m.sounding = g_beyond_voice && g_beyond_voice->Active();
+#else
+        m.sounding = false;
+#endif
+      }
+    }
+    if (m.models_requested && !m.in_car && !GadgetsBusy()) {
+      Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
+      m.models_requested = false;
+    }
+    return 0;
+  }
+
+  // ---- in the car
+  if (!m.in_car || m.car != *vehicle.car) {
+    m.car = *vehicle.car;
+    m.in_car = true;
+    m.summoning = m.settling = false;
+    m.prev_buttons = buttons;  // (no edge from a button held getting in)
+    BeyondHold(ctx, base, m, false);
+    BeyondTakeOff(ctx, base, m, 2.0f);
+    m.boost = 0.0f;
+    m.fly_log = 0;
+    if (m.cloaked)
+      BeyondCloak(ctx, base, game, m, true, true);  // (the pilot unseen with it)
+    g_beyond_synth.SetListener(false, 1.0f, 0.0f);
+    Toast(s, "Beyond Batmobile: left stick flies, R2 up, L2 down; d-pad right boost, L1 missile, d-pad down cloak, "
+             "Y out.",
+          5000);
+    if (m.log < 8) {
+      ++m.log;
+      REXLOG_INFO("gta4-trainer: in the Beyond Batmobile (car {:08X}), heading {:.0f} deg", m.car,
+                  m.heading * 180.0f / 3.14159265f);
+    }
+  }
+  BeyondVoice(true);
+  m.sounding = true;
+  if (!m.models_requested) {
+    Invoke(ctx, base, "REQUEST_MODEL", {ModelHash(kRocketModel)});
+    m.models_requested = true;
+  }
+  uint32_t keep = X_INPUT_GAMEPAD_LEFT_SHOULDER | X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_DPAD_RIGHT;
+  // D-pad down (or the menu): the cloak.
+  if (pressed(X_INPUT_GAMEPAD_DPAD_DOWN) || s.beyond_toggle_cloak) {
+    s.beyond_toggle_cloak = false;
+    BeyondCloak(ctx, base, game, m, !m.cloaked);
+    Toast(s, m.cloaked ? "Cloaked: nobody sees the Batmobile, or you." : "Cloak off.", 2000);
+  }
+  if (m.cloaked && now >= m.next_wanted_clear) {
+    m.next_wanted_clear = now + 400;
+    Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
+  }
+  // L1: a missile from the nose (the Batmobile's lock-on rockets).
+  if (pressed(X_INPUT_GAMEPAD_LEFT_SHOULDER)) {
+    if (now < m.rocket_ready) {
+      Toast(s, "Missile reloading: " + std::to_string((m.rocket_ready - now + 999) / 1000) + " s", 900);
+    } else if (LaunchRocket(ctx, base, m.car, s, kBeyondLauncher, BeyondLaunchSound, "Beyond Batmobile")) {
+      m.rocket_ready = now + kBeyondReloadMs;
+      m.rocket_reloading = true;
+    }
+  }
+  if (m.rocket_reloading && now >= m.rocket_ready) {
+    m.rocket_reloading = false;
+    Toast(s, "Missile ready.", 900);
+  }
+  // Y: down to the hover height and stopped, then the canopy (the canopy
+  // code gets Y once it is settled; a second Y meanwhile flies on).
+  const bool low_and_still = m.altitude < kBeyondClear + 0.6f && std::fabs(m.fwd) < 1.5f && std::fabs(m.climb) < 0.8f;
+  if (pressed(X_INPUT_GAMEPAD_Y)) {
+    if (m.settling) {
+      m.settling = false;
+      m.y_taken = true;
+      Toast(s, "Flying on.", 1200);
+    } else if (!low_and_still) {
+      m.settling = true;
+      m.settle_since = now;
+      m.y_taken = true;
+      Toast(s, "Coming down...", 1500);
+    }
+  } else if (m.settling) {
+    m.y_taken = true;  // (held Y never reaches the canopy while it comes down)
+  }
+  if (m.settling && (low_and_still || now - m.settle_since > 12000)) {
+    m.settling = false;
+    m.exit_pulse = true;  // the canopy's turn
+  }
+  // The boost: d-pad right held.
+  const bool boosting = (buttons & X_INPUT_GAMEPAD_DPAD_RIGHT) && !s.open && !m.settling;
+  m.boost += ((boosting ? 1.0f : 0.0f) - m.boost) * std::min(1.0f, (boosting ? 2.5f : 1.5f) * dt);
+  // The controls (none while it settles).
+  float want_fwd, turn, up;
+  if (m.settling) {
+    want_fwd = 0.0f;
+    turn = 0.0f;
+    up = m.altitude > kBeyondClear + 0.3f ? -0.5f : 0.0f;
+  } else {
+    const float lx = Axis(pad.lx), ly = Axis(pad.ly);
+    const float top = kBeyondCruise + (kBeyondBoostSpeed - kBeyondCruise) * m.boost;
+    want_fwd = ly >= 0 ? ly * top : ly * 15.0f;
+    if (boosting)
+      want_fwd = std::max(want_fwd, top * 0.6f);  // (the boost drives it on by itself)
+    turn = lx;
+    up = pad.right_trigger / 255.0f - pad.left_trigger / 255.0f;
+  }
+  BeyondFly(ctx, base, m, want_fwd, turn, up, dt);
+  BeyondFlames(ctx, base, m.car, m.boost > 0.3f || std::fabs(m.fwd) > 35.0f);
+  g_beyond_synth.SetListener(false, 1.0f, 0.0f);
+  g_beyond_synth.SetTarget(m.spool, std::fabs(m.fwd), m.boost, 0.5f);
+  if (m.y_taken)
+    keep |= X_INPUT_GAMEPAD_Y;
+  return keep;
+}
+
 // The TCD and the speedometer as the overlay shows them.
 void PublishTcd(const State& s) {
   const auto& m = g_tm;
@@ -10155,6 +10742,18 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
     case Action::kToggleWarpIn:
       s.warp_in = !s.warp_in;
       break;
+    case Action::kBeyondSummon:
+      if (g_have_beyond)
+        s.beyond_summon = true;
+      else
+        Toast(s, "The Beyond Batmobile is not installed (addons/beyond).", 2500);
+      break;
+    case Action::kBeyondCloak:
+      if (g_have_beyond)
+        s.beyond_toggle_cloak = true;
+      else
+        Toast(s, "The Beyond Batmobile is not installed (addons/beyond).", 2500);
+      break;
     case Action::kToggleGadgets:
       s.gadgets = !s.gadgets;
       Toast(s, s.gadgets ? "Batmobile gadgets armed: L1 lock-on missile; d-pad left guns ahead, down guns "
@@ -10953,6 +11552,11 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool tm_due = HaveTimeMachines() && (g_tm.in_car || g_tm.phase != 0 || g_tm.fires_out || g_tm.vents_out ||
                                              g_tm.frost_until || now >= g_tm.next_probe || g_flash_until > now ||
                                              VeilLevel(now) > 0.0f);
+  const bool beyond_due = g_have_beyond && (g_beyond.in_car || g_beyond.parked || g_beyond.summoning ||
+                                            g_beyond.sounding || g_beyond.spawn_pending || s.beyond_summon ||
+                                            s.beyond_toggle_cloak || now >= g_beyond.next_probe);
+  const bool beyond_canopy_due =
+      g_have_beyond && (CanopyBusy(g_beyond_canopy) || now >= g_beyond_canopy.next_probe);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
                                                    now >= g_bat_engine.next_probe);
   const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
@@ -10985,7 +11589,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       !jet_canopy_due && !batwing_canopy_due && !complete_due && !perf_due && !teleport_due && !any_engine_due &&
       s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
-      !tm_due && !seat_due && !map_due && !creatures_due && !guard_due && g_addons_probed)
+      !tm_due && !seat_due && !map_due && !creatures_due && !guard_due && !beyond_due && !beyond_canopy_due &&
+      g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -11040,12 +11645,13 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_bttf2 = installed("DELTWO");
     g_have_bttf3 = installed("DELTHR");
     g_have_bttf2h = installed("DELHOV");
+    g_have_beyond = installed("BEYOND");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Batwing {}, Deimos {}, Dominator 645 {}, "
                 "Nexus {}, Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}, DMC-12 {}, time machines {}/{}/{} "
-                "(v1.7.21 flying form {})",
+                "(v1.7.21 flying form {}), Beyond Batmobile {}",
                 g_have_batmobile, g_have_f16, g_have_batwing, g_have_deimos, g_have_dominator, g_have_nexus,
                 g_have_arbiter, g_have_lazar, g_have_gauntlet, g_have_dmc12, g_have_bttf1, g_have_bttf2, g_have_bttf3,
-                g_have_bttf2h);
+                g_have_bttf2h, g_have_beyond);
   }
 
   bool acted = false;
@@ -11133,6 +11739,23 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     }
     vehicle_mask |= TimeMachine(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), pad);
     PublishTcd(s);
+  }
+  if (beyond_due || beyond_canopy_due) {
+    DrivePad pad;
+    {
+      std::lock_guard lock(g_drive_mutex);
+      pad = g_drive_pad;
+    }
+    uint16_t buttons = g_gadget_buttons.load(std::memory_order_relaxed);
+    if (beyond_due)
+      vehicle_mask |= BeyondTick(ctx, base, game, s, buttons, pad);
+    // (the canopy sees Y only once the car has settled: BeyondTick keeps it
+    // while the car comes down, and gives it once, settled)
+    if (g_beyond.y_taken)
+      buttons &= uint16_t(~X_INPUT_GAMEPAD_Y);
+    if (g_beyond.exit_pulse)
+      buttons |= X_INPUT_GAMEPAD_Y;
+    vehicle_mask |= Canopy(ctx, base, game, s, buttons, kBeyondCanopy, g_beyond_canopy);
   }
   if (any_engine_due) {
     DrivePad pad;

@@ -1,95 +1,197 @@
-"""The Batman Beyond Batmobile's body, made from scratch (v1.7.43): a mesh
-lofted from cross-sections along the car - a long pointed nose, a flat wide
-body with its shoulders swept back into two fins, a bubble canopy, two jet
-thrusters at the tail, no wheels (it flies). Nothing is taken from any
-model: the shape follows the show's car as described in words and the
-user's wish. Written for the vehicle writer (pcwrite.Fragment) and, before
-that, drawn here for a look (render()).
+"""The Batman Beyond Batmobile's body, made from scratch (v1.7.43): a dart
+seen from above - a long pointed nose, the body widening on a concave curve
+into two swept wings whose trailing edge cuts forward to the tail in a V,
+a long bubble canopy over the spine (the pilot's head under its crown), a
+cockpit tub under the fuselage, two jet thrusters sunk into the tail between
+the wings, no wheels (it flies). Nothing is taken from any model: the shape
+follows the show's car as described in words and the user's wish. Written
+for the vehicle writer (pcwrite.Fragment) and, before that, drawn here for a
+look (render()).
 
-Coordinates: the game's (x right, y forward, z up); metres; the origin
-under the middle of the car at the floor's height.
+Coordinates: the game's (x right, y forward, z up); metres; the origin at
+the template car's (the Infernus's: its wheel hubs' height, 0.52 m over the
+road), the body's underside there, so resting on the template's hidden
+wheels the body floats half a metre over the road (v1.7.44; v1.7.43 put the
+floor 0.4 m higher still and the seats where no pilot fitted under the
+canopy).
 
 usage: python3 -I beyond_body.py <out.png>     a sheet of views
 """
 import math
-import os
 import sys
 
 import numpy as np
 
 # ---- dimensions (m)
-LENGTH = 5.6        # nose to tail
-HALF_WIDTH = 1.15   # the body's widest half-width (without the fins)
-FIN_SPAN = 0.65     # each fin beyond the body
-HEIGHT = 1.05       # floor to the canopy's top
-FLOOR = 0.42        # the floor over the ground (it hovers)
-NOSE_Y = LENGTH * 0.52
-TAIL_Y = -LENGTH * 0.48
+LENGTH = 5.8        # nose to the wing tips
+SPAN = 1.55         # half-span at the wing tips
+HEIGHT = 0.95       # floor to the canopy's top
+FLOOR = 0.0         # the body's underside, at the origin (the template's hubs)
+NOSE_Y = LENGTH * 0.55
+TAIL_Y = -LENGTH * 0.45          # the wing tips' y
+NOTCH_Y = TAIL_Y + 1.15          # the trailing edge's V at the centre line
+CANOPY = (0.28, 0.74)            # the canopy from .. to (fraction of the length from the nose)
+CANOPY_HEIGHT = 0.44             # the bubble's crown over the spine
+POD = (-1.4, 1.9, 0.40, 0.38)    # the cockpit tub under the fuselage: y from, to, half-width, depth
+SEATS = ((0.0, 0.35, -0.20), (0.0, -0.35, -0.22))  # the pilot's and a passenger's (car space)
+WELL_FLOOR = 0.05                # the cockpit well's floor over the body's underside
+
+
+def hinge():
+    """Where the canopy turns: the bubble's rear edge on the spine."""
+    y = NOSE_Y - (NOSE_Y - TAIL_Y) * CANOPY[1]
+    return (0.0, y, top_z(y, 0.0, well=False))
 
 
 def smooth(t):
+    t = min(1.0, max(0.0, t))
     return t * t * (3 - 2 * t)
 
 
-def width_at(y):
-    """Half-width of the body along its length (without the fins): a point
-    at the nose widening on a concave curve, the full width from a third
-    back, a little narrower at the tail."""
-    v = (NOSE_Y - y) / (NOSE_Y - TAIL_Y)  # 0 nose .. 1 tail
-    if v < 0.42:
-        return 0.03 + (HALF_WIDTH - 0.03) * math.sin(math.pi / 2 * v / 0.42) ** 1.35
-    return HALF_WIDTH * (1 - 0.08 * smooth((v - 0.42) / 0.58))
+def frac(y):
+    """0 at the nose .. 1 at the wing tips."""
+    return (NOSE_Y - y) / (NOSE_Y - TAIL_Y)
 
 
-def canopy_at(y, x):
-    """The canopy's bubble: long and narrow, from a quarter back to past
-    the middle, its crest a little behind its front."""
-    v = (NOSE_Y - y) / (NOSE_Y - TAIL_Y)
-    dy = (v - 0.46) / 0.24
-    dx = x / 0.46
-    r2 = dx * dx + dy * dy * (0.8 if dy > 0 else 1.6)
-    return 0.36 * max(0.0, 1 - r2) ** 1.25 if r2 < 1 else 0.0
+def outer_x(y):
+    """The leading edge's half-width: a needle nose opening on a concave
+    curve, then the wings sweeping out to the tips."""
+    v = frac(y)
+    if v <= 0:
+        return 0.0
+    if v < 0.6:
+        return 0.03 + 0.69 * math.sin(math.pi / 2 * v / 0.6) ** 0.9
+    # the wing: from 0.72 at 60% back out to the span at the tips, convex
+    u = (v - 0.6) / 0.4
+    return 0.72 + (SPAN - 0.72) * (1 - (1 - u) ** 1.7)
 
 
-def top_at(y, s):
-    """The top's height at a point across (s in -1..1 of the half-width):
-    a low wedge rising from the nose, the canopy over the middle, the
-    shoulders dropping to a sharp edge."""
-    v = (NOSE_Y - y) / (NOSE_Y - TAIL_Y)
-    base = FLOOR + 0.12 + 0.20 * smooth(min(1.0, v / 0.5))   # rises to the shoulders' height by the middle
-    base -= 0.04 * smooth(max(0.0, (v - 0.8) / 0.2))          # dips a little at the tail
-    w = width_at(y)
-    edge = 1 - abs(s) ** 2.5
-    return base * (0.78 + 0.22 * edge) + 0.02 + canopy_at(y, s * w)
+def inner_x(y):
+    """The trailing edge's half-width: zero up to the notch, then a V from
+    the centre line back to the tips (the bat wing's cut)."""
+    if y >= NOTCH_Y:
+        return 0.0
+    u = (NOTCH_Y - y) / (NOTCH_Y - TAIL_Y)  # 0 at the notch's point .. 1 at the tips
+    return max(0.0, SPAN * u ** 0.9 - 0.02)
 
 
-def bottom_at(y, s):
-    v = (NOSE_Y - y) / (NOSE_Y - TAIL_Y)
-    return FLOOR + 0.04 * abs(s) + 0.05 * (1 - smooth(min(1.0, v / 0.3)))  # the nose's underside lifts a little
+def canopy_z(y, x):
+    """The bubble over the spine: long and narrow, highest a third of the
+    way along it."""
+    v = frac(y)
+    a, b = CANOPY
+    if not (a <= v <= b):
+        return 0.0
+    t = (v - a) / (b - a)
+    along = math.sin(math.pi * t) ** 0.55 * (1 - 0.18 * t)
+    half = canopy_half(t)
+    s = min(1.0, abs(x) / half)
+    across = math.sqrt(max(0.0, 1 - s * s))
+    return CANOPY_HEIGHT * along * across
 
 
-def body_sections(stations=48, across=22):
-    """The body's ring of points at each station (nose to tail): the top
-    across, then the bottom back - a closed loop."""
+def canopy_half(t):
+    """The bubble's half-width along it (room for the pilot's shoulders)."""
+    return 0.27 + 0.07 * math.sin(math.pi * t)
+
+
+def in_well(y, x):
+    """Under the canopy: the cockpit well cut into the top skin (the pilot
+    sits in it; open, the canopy shows it)."""
+    v = frac(y)
+    a, b = CANOPY
+    if not (a <= v <= b):
+        return False
+    return abs(x) < canopy_half((v - a) / (b - a)) * 0.88
+
+
+def top_z(y, x, well=True):
+    """The top skin's height: a thin wedge rising from the nose to a spine
+    over the middle, the wings thinner out to a sharp edge, lifting a
+    little toward the tips; the cockpit well cut in under the canopy (the
+    glass itself is glass_z)."""
+    if well and in_well(y, x):
+        return FLOOR + WELL_FLOOR
+    v = frac(y)
+    w = outer_x(y)
+    s = min(1.0, abs(x) / w) if w > 1e-6 else 1.0
+    spine = FLOOR + 0.10 + 0.24 * smooth(v / 0.45) - 0.08 * smooth((v - 0.75) / 0.25)
+    edge = FLOOR + 0.07 + 0.06 * smooth(v / 0.45)
+    z = spine + (edge - spine) * s ** 1.6
+    tip_lift = 0.10 * smooth((v - 0.6) / 0.4) * s ** 2  # the wing tips cant up
+    return z + tip_lift
+
+
+def glass_z(y, x):
+    """The canopy's bubble over the spine."""
+    return top_z(y, x, well=False) + canopy_z(y, x)
+
+
+def bottom_z(y, x):
+    v = frac(y)
+    w = outer_x(y)
+    s = min(1.0, abs(x) / w) if w > 1e-6 else 1.0
+    belly = FLOOR + 0.02 * (1 - smooth(v / 0.3))     # the nose's underside lifts
+    edge = FLOOR + 0.05 + 0.06 * smooth(v / 0.45)
+    tip_lift = 0.10 * smooth((v - 0.6) / 0.4) * s ** 2
+    return belly + (edge - belly) * s ** 1.6 + tip_lift
+
+
+# ---- the surfaces
+def grid(fn, nu, nv):
+    """Points fn(u, v) on a grid, as triangles (two per cell), u and v in 0..1."""
+    pts = np.array([[fn(i / nu, j / nv) for j in range(nv + 1)] for i in range(nu + 1)], np.float32)
+    verts = pts.reshape(-1, 3)
+    tris = []
+    for i in range(nu):
+        for j in range(nv):
+            a = i * (nv + 1) + j
+            b = a + nv + 1
+            tris.append((a, b, b + 1))
+            tris.append((a, b + 1, a + 1))
+    return verts, np.array(tris, np.int32)
+
+
+def half(side, top, nu=60, nv=14):
+    """One side's top or bottom skin: along the length (u) from the nose to
+    the tips, across (v) from the inner edge (the spine, or the trailing
+    edge's V) to the leading edge."""
+    def fn(u, v):
+        y = NOSE_Y - (NOSE_Y - TAIL_Y) * u ** 0.85
+        x = inner_x(y) + (outer_x(y) - inner_x(y)) * v
+        z = top_z(y, x) if top else bottom_z(y, x)
+        return (side * x, y, z)
+    verts, tris = grid(fn, nu, nv)
+    if (side < 0) == top:  # keep the faces outward
+        tris = tris[:, ::-1]
+    return verts, tris
+
+
+def notch_wall(side, nu=24, nz=3):
+    """The trailing edge's face between the top and bottom skins along the
+    V (a thin vertical wall; the leading edge is sharp and needs none)."""
+    def fn(u, v):
+        y = NOTCH_Y - (NOTCH_Y - TAIL_Y) * u
+        x = inner_x(y)
+        return (side * x, y, bottom_z(y, x) + (top_z(y, x) - bottom_z(y, x)) * v)
+    verts, tris = grid(fn, nu, nz)
+    if side > 0:
+        tris = tris[:, ::-1]
+    return verts, tris
+
+
+def thruster(side):
+    """A jet sunk into the tail beside the spine: a tube, its mouth open to
+    the back, a lip."""
     rings = []
-    for i in range(stations + 1):
-        u = i / stations
-        y = NOSE_Y - (NOSE_Y - TAIL_Y) * u
-        w = width_at(y)
-        ring = []
-        for k in range(across + 1):          # the top, left to right
-            s = -1 + 2 * k / across
-            ring.append((s * w, y, top_at(y, s)))
-        for k in range(across, -1, -1):      # the bottom, right to left
-            s = -1 + 2 * k / across
-            ring.append((s * w, y, bottom_at(y, s)))
-        rings.append(ring)
-    return rings
+    cx, cz = side * 0.40, FLOOR + 0.17
+    for y, r in ((NOTCH_Y + 0.9, 0.12), (NOTCH_Y + 0.3, 0.145), (NOTCH_Y - 0.1, 0.15), (NOTCH_Y - 0.26, 0.145),
+                 (NOTCH_Y - 0.28, 0.11), (NOTCH_Y - 0.02, 0.09)):
+        rings.append([(cx + r * math.cos(t), y, cz + r * 0.85 * math.sin(t)) for t in np.linspace(0, 2 * math.pi, 21)[:-1]])
+    return loft(rings)
 
 
-def loft(rings, close_ends=True):
-    """Quads between consecutive rings (as triangle pairs); the first and
-    last rings fanned shut when asked."""
+def loft(rings):
     verts, tris = [], []
     n = len(rings[0])
     for ring in rings:
@@ -100,93 +202,63 @@ def loft(rings, close_ends=True):
             k2 = (k + 1) % n
             tris.append((a + k, b + k, b + k2))
             tris.append((a + k, b + k2, a + k2))
-    if close_ends:
-        for base in (0, (len(rings) - 1) * n):
-            c = len(verts)
-            verts.append(tuple(np.mean(rings[base // n], axis=0)))
-            for k in range(n):
-                k2 = (k + 1) % n
-                tris.append((c, base + k2, base + k) if base == 0 else (c, base + k, base + k2))
     return np.array(verts, np.float32), np.array(tris, np.int32)
 
 
-def fin(side):
-    """A fin off the rear shoulder: a flat wing swept back, its leading edge
-    leaving the body behind the canopy, the tip trailing past the tail; a
-    thin airfoil, thicker at the root."""
-    rings = []
-    root_y0, root_y1 = -0.2, TAIL_Y + 0.05   # where it leaves the body (front, back)
-    tip_y0, tip_y1 = -1.9, TAIL_Y - 0.55     # the tip's leading and trailing edge
-    for i in range(8):
-        u = i / 7
-        x = side * (width_at(-1.0) * 0.985 + FIN_SPAN * u)
-        y0 = root_y0 + (tip_y0 - root_y0) * smooth(u) ** 0.8
-        y1 = root_y1 + (tip_y1 - root_y1) * u
-        z = top_at(-1.0, 0.97) - 0.08 - 0.05 * u
-        th = 0.075 * (1 - 0.85 * u) + 0.006
-        ring = []
-        for k in range(11):   # the top surface, front to back
-            w_ = k / 10
-            y = y0 + (y1 - y0) * w_
-            ring.append((x, y, z + th * math.sin(math.pi * w_) ** 0.7))
-        for k in range(10, -1, -1):
-            w_ = k / 10
-            y = y0 + (y1 - y0) * w_
-            ring.append((x, y, z - 0.35 * th * math.sin(math.pi * w_)))
-        rings.append(ring)
-    return loft(rings, close_ends=True)
+def canopy_glass(nu=26, nv=12):
+    """The bubble's skin a hair over the body, over its footprint only."""
+    a, b = CANOPY
+
+    def fn(u, v):
+        t = a + (b - a) * u
+        y = NOSE_Y - (NOSE_Y - TAIL_Y) * t
+        half_w = canopy_half(u) * 0.98
+        x = -half_w + 2 * half_w * v
+        return (x, y, glass_z(y, x) + 0.006)
+    return grid(fn, nu, nv)
 
 
-def thruster(side):
-    """A jet at the tail: a tube sunk into the body's rear, a lip, its mouth
-    open to the back."""
-    rings = []
-    cx, cz = side * 0.5, FLOOR + 0.27
-    for y, r in ((TAIL_Y + 1.0, 0.24), (TAIL_Y + 0.35, 0.28), (TAIL_Y - 0.05, 0.3), (TAIL_Y - 0.2, 0.29),
-                 (TAIL_Y - 0.22, 0.22), (TAIL_Y + 0.05, 0.19)):
-        ring = [(cx + r * math.cos(t), y, cz + r * math.sin(t)) for t in np.linspace(0, 2 * math.pi, 21)[:-1]]
-        rings.append(ring)
-    return loft(rings, close_ends=False)
+def pod(nu=30, nv=14):
+    """The cockpit tub under the fuselage: a half-ellipse section hung from
+    the bottom skin, deepest under the seat, tapering to nothing at its
+    ends (the pilot's legs are in it, not in the air under the wing)."""
+    y0, y1, half_w, depth = POD
+
+    def fn(u, v):
+        y = y0 + (y1 - y0) * u
+        shape = math.sin(math.pi * u)
+        w = half_w * shape ** 0.25 + 1e-3
+        d = depth * shape ** 0.45
+        x = -w + 2 * w * v
+        s = min(1.0, abs(x) / w)
+        return (x, y, bottom_z(y, x) - d * math.sqrt(max(0.0, 1 - s * s)) ** 0.8)
+    verts, tris = grid(fn, nu, nv)
+    return verts, tris[:, ::-1]
 
 
-def canopy_glass():
-    """The canopy's glass: the bubble's skin a hair above the body, over its
-    footprint only (the glass shader, tinted)."""
-    rings = []
-    for i in range(17):
-        v = 0.24 + 0.44 * i / 16
-        y = NOSE_Y - (NOSE_Y - TAIL_Y) * v
-        dy = (v - 0.46) / 0.24
-        half = 0.46 * math.sqrt(max(0.0, 1 - dy * dy * (0.8 if dy > 0 else 1.6))) * 0.97
-        ring = []
-        for k in range(13):
-            x = -half + 2 * half * k / 12
-            w = width_at(y)
-            s_ = max(-1.0, min(1.0, x / w))
-            ring.append((s_ * w, y, top_at(y, s_) + 0.008))
-        rings.append(ring)
-    return loft(rings, close_ends=False)
-
-
-def accents():
-    """The red lines: a strip down the nose's spine and along each fin's
-    leading edge (an emissive shader)."""
-    rings = []
-    for i in range(14):
-        v = 0.02 + 0.2 * i / 13
-        y = NOSE_Y - (NOSE_Y - TAIL_Y) * v
-        w = width_at(y)
-        hw = min(0.035, w * 0.6)
-        rings.append([(-hw, y, top_at(y, -hw / w) + 0.006), (hw, y, top_at(y, hw / w) + 0.006)])
-    strips = [loft(rings, close_ends=False)]
-    return strips
+def accent(side, nu=40):
+    """A red line along the leading edge, just inboard of it."""
+    def fn(u, v):
+        y = NOSE_Y - (NOSE_Y - TAIL_Y) * (0.03 + 0.97 * u)
+        w = outer_x(y)
+        x = w * (0.90 + 0.06 * v)
+        return (side * x, y, top_z(y, x) + 0.004)
+    verts, tris = grid(fn, nu, 1)
+    if side < 0:
+        tris = tris[:, ::-1]
+    return verts, tris
 
 
 def parts():
-    out = {'body': loft(body_sections()), 'fin_l': fin(-1), 'fin_r': fin(1),
-           'jet_l': thruster(-1), 'jet_r': thruster(1), 'glass': canopy_glass()}
-    for k, strip in enumerate(accents()):
-        out['accent_%d' % k] = strip
+    out = {}
+    for side, name in ((1, 'r'), (-1, 'l')):
+        out['top_' + name] = half(side, True)
+        out['bottom_' + name] = half(side, False)
+        out['notch_' + name] = notch_wall(side)
+        out['jet_' + name] = thruster(side)
+        out['accent_' + name] = accent(side)
+    out['glass'] = canopy_glass()
+    out['pod'] = pod()
     return out
 
 
@@ -196,11 +268,12 @@ def render(path):
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     ps = parts()
-    colours = {'body': (0.08, 0.08, 0.1), 'fin_l': (0.1, 0.08, 0.1), 'fin_r': (0.1, 0.08, 0.1),
-               'jet_l': (0.25, 0.08, 0.06), 'jet_r': (0.25, 0.08, 0.06), 'glass': (0.45, 0.08, 0.1),
-               'accent_0': (0.9, 0.1, 0.05)}
+    body = (0.09, 0.09, 0.11)
+    colours = {k: body for k in ps}
+    colours.update({'jet_l': (0.22, 0.08, 0.06), 'jet_r': (0.22, 0.08, 0.06), 'glass': (0.42, 0.08, 0.10), 'pod': body,
+                    'accent_l': (0.9, 0.1, 0.05), 'accent_r': (0.9, 0.1, 0.05)})
     fig = plt.figure(figsize=(16, 12))
-    views = [(22, 40, '3/4 front'), (22, -140, '3/4 rear'), (90, -90, 'top'), (4, 0, 'side')]
+    views = [(24, 38, '3/4 front'), (22, -142, '3/4 rear'), (90, -90, 'top'), (3, 0, 'side')]
     light = np.array([0.4, -0.6, 0.7])
     light /= np.linalg.norm(light)
     for i, (el, az, title) in enumerate(views):
@@ -212,9 +285,8 @@ def render(path):
             shade = 0.35 + 0.65 * np.clip(nrm @ light, 0, 1)
             base = np.array(colours[name])
             fc = np.clip(base[None, :] * (0.6 + 1.6 * shade[:, None]) + 0.25 * shade[:, None] ** 8, 0, 1)
-            coll = Poly3DCollection(tri, facecolors=fc, edgecolors='none')
-            ax.add_collection3d(coll)
-        ax.set_xlim(-3, 3); ax.set_ylim(-3, 3); ax.set_zlim(-2.5, 3.5)
+            ax.add_collection3d(Poly3DCollection(tri, facecolors=fc, edgecolors='none'))
+        ax.set_xlim(-3.2, 3.2); ax.set_ylim(-3.2, 3.2); ax.set_zlim(-2.8, 3.6)
         ax.set_box_aspect((1, 1, 1))
         ax.view_init(elev=el, azim=az)
         ax.set_title(title)
