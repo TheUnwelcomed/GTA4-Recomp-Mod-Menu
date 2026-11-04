@@ -174,6 +174,16 @@ Scarface mansion: its front doors (the mod's `enterdoor` pair, outside on
 the gate's side) and the bed of `bedroomup` (the room's furniture is one
 model; the spot on the bed's open side).
 
+The scene's own props (v1.7.42, `vdress.py`): a V pack places hundreds of
+the V game's props it does not carry (the mansion's ferns, bushes, wall
+lights, patio tables, its pool table and cash). With the V props' names
+(DurtyFree's `ObjectList.ini`: an entity's archetype hash is joaat of its
+name) and a table of IV stand-ins (`sets/mansion_subs.json`, with a height
+nudge where the IV origin is not at the base and one placement in n for
+plants in drifts), each becomes a placement line of the IV model among the
+set's `extra` files (`gatorkeys_dressing.txt`). No stand-ins: palms (none in
+Liberty City), cacti, weeds, ivy, the coke lab.
+
 Textures by reference (v1.7.41): a shader cloned from a console sample names
 its textures by reference, whatever the sample did. A few of the export's
 samples embed theirs in the drawable (a lamp's glow, a gate's reflection
