@@ -2260,10 +2260,157 @@ bool ShadowHolds(const fs::path& shadow, const std::vector<uint8_t>& key,
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Snow mode (v1.7.45): GTA 4 Snow Mod v2.0 (jumbo8) on the console. The mod
+// replaces the city's textures with snow-covered ones; its global parent
+// dictionaries (the roads, pavements, highways, rooftops, the tree LOD
+// sheet, 17 the console's gtxd.img has) come converted in addons/snow/gtxd
+// (tools/snow/snowtex.py) and go into a shadow gtxd.img in place of the
+// game's; its snowfall (the rain and storm emitters, platform/data/effects)
+// and time cycle (platform/data/timecyc.dat, when its columns are the
+// console's) into a shadow xbox360.rpf; its slippery surfaces and snow
+// tracks (common/data/materials/materials.dat, effects/vehiclefx.dat) into
+// the common.rpf shadow, row by row by material name so the console's
+// material order (the collision files index it) is kept. The switch is a
+// file the trainer writes (liberty_menu_snow.txt: "on"), read at launch: the
+// game boots in the snow, or without it, and a change takes the next launch.
+// ---------------------------------------------------------------------------
+fs::path g_user_data;
+std::atomic<bool> g_snow_active{false};
+std::vector<ShadowArchive> g_mounted;  // (what InstallBundled returned, for ShadowOf)
+
+fs::path SnowSwitch(const fs::path& user_data) { return user_data / "liberty_menu_snow.txt"; }
+
+bool SnowWantedAt(const fs::path& user_data) {
+  std::vector<uint8_t> raw;
+  if (!ReadAll(SnowSwitch(user_data), raw))
+    return false;
+  const std::string text(raw.begin(), raw.end());
+  return text.find("on") == 0;
+}
+
+struct SnowFiles {
+  bool found = false;
+  fs::path dir;
+  std::vector<fs::path> xtd;                           // gtxd/<name>.xtd
+  std::vector<uint8_t> timecyc, materials, vehiclefx;  // the mod's data files (empty: none)
+  std::vector<std::pair<std::string, std::vector<uint8_t>>> effects;  // (file name, contents)
+  uint64_t fingerprint = 0;
+};
+
+SnowFiles FindSnow(const fs::path& dir) {
+  SnowFiles out;
+  std::error_code ec;
+  out.dir = dir;
+  if (!fs::exists(dir / "gtxd", ec))
+    return out;
+  for (auto it = fs::directory_iterator(dir / "gtxd", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::error_code fec;
+    if (it->is_regular_file(fec) && Lower(it->path().extension().string()) == ".xtd")
+      out.xtd.push_back(it->path());
+  }
+  std::sort(out.xtd.begin(), out.xtd.end());
+  uint64_t h = 1469598103934665603ull;
+  for (const auto& f : out.xtd) {
+    const std::string name = f.filename().string();
+    const uint64_t size = uint64_t(SizeOf(f));
+    h = Fnv1a(h, name.data(), name.size());
+    h = Fnv1a(h, &size, sizeof(size));
+  }
+  auto take = [&](const fs::path& file, std::vector<uint8_t>& into) {
+    if (ReadAll(file, into))
+      h = Fnv1a(h, into.data(), into.size());
+  };
+  take(dir / "platform" / "data" / "timecyc.dat", out.timecyc);
+  take(dir / "common" / "data" / "materials" / "materials.dat", out.materials);
+  take(dir / "common" / "data" / "effects" / "vehiclefx.dat", out.vehiclefx);
+  for (const char* name : {"gtarainemitter.xml", "gtarainrender.xml", "gtastormemitter.xml", "gtastormrender.xml"}) {
+    std::vector<uint8_t> data;
+    take(dir / "platform" / "data" / "effects" / name, data);
+    if (!data.empty())
+      out.effects.emplace_back(name, std::move(data));
+  }
+  out.fingerprint = h;
+  out.found = !out.xtd.empty() || !out.effects.empty() || !out.materials.empty();
+  return out;
+}
+
+// The console's text data file with the mod's rows in place of its own, by
+// their first token (materials.dat, vehiclefx.dat): the console's order and
+// count kept, its line endings too; comments and the rest as they are.
+std::vector<uint8_t> WithRowsFrom(const std::vector<uint8_t>& original, const std::vector<uint8_t>& mod,
+                                  int& replaced) {
+  replaced = 0;
+  std::map<std::string, std::string> rows;
+  {
+    std::string text(mod.begin(), mod.end());
+    size_t at = 0;
+    while (at < text.size()) {
+      size_t end = text.find('\n', at);
+      if (end == std::string::npos) end = text.size();
+      std::string line = text.substr(at, end - at);
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      const std::string token = FirstToken(line);
+      if (!token.empty() && token[0] != '#' && line.find_first_of(" \t") != std::string::npos)
+        rows.emplace(token, line);
+      at = end + 1;
+    }
+  }
+  std::string text(original.begin(), original.end());
+  std::string out;
+  out.reserve(text.size() + 1024);
+  size_t at = 0;
+  while (at < text.size()) {
+    size_t end = text.find('\n', at);
+    const bool last = end == std::string::npos;
+    if (last) end = text.size();
+    std::string line = text.substr(at, end - at);
+    std::string ending = last ? "" : "\n";
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+      ending = "\r\n";
+    }
+    const std::string token = FirstToken(line);
+    auto it = token.empty() || token[0] == '#' ? rows.end() : rows.find(token);
+    if (it != rows.end() && it->second != line) {
+      line = it->second;
+      ++replaced;
+    }
+    out += line + ending;
+    at = end + 1;
+  }
+  return std::vector<uint8_t>(out.begin(), out.end());
+}
+
+// The first row of numbers in a time cycle file: how many fields it has.
+int TimecycColumns(const std::vector<uint8_t>& data) {
+  const std::string text(data.begin(), data.end());
+  size_t at = 0;
+  while (at < text.size()) {
+    size_t end = text.find('\n', at);
+    if (end == std::string::npos) end = text.size();
+    std::string line = text.substr(at, end - at);
+    at = end + 1;
+    const std::string token = FirstToken(line);
+    if (token.empty() || token[0] == '/' || token[0] == '#' || !std::isdigit(static_cast<unsigned char>(token[0])))
+      continue;
+    int n = 0;
+    bool in = false;
+    for (char c : line) {
+      const bool space = c == ' ' || c == '\t' || c == '\r';
+      if (!space && !in) ++n;
+      in = !space;
+    }
+    return n;
+  }
+  return 0;
+}
+
 std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& archive,
                                            const std::vector<uint8_t>& key,
                                            const std::vector<Addon>& addons, std::vector<MapSet>& maps,
-                                           const fs::path& cache, const std::string& label) {
+                                           const fs::path& cache, const std::string& label,
+                                           const SnowFiles* snow = nullptr) {
   std::error_code ec;
   const Rpf* rpf = &archive;
   const fs::path work = cache / "work" / label;
@@ -2331,6 +2478,30 @@ std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& ar
         edited.emplace_back(inner, std::move(now));
     }
   }
+  // Snow mode: the mod's surfaces (friction, the tyres' tracks) merged into
+  // the console's rows, and its snowfall's emitters here too (a copy of them
+  // sits in common.rpf as well as the platform archive).
+  if (snow && snow->found) {
+    fingerprint = Fnv1a(fingerprint, &snow->fingerprint, sizeof(snow->fingerprint));
+    struct Merge { const char* inner; const std::vector<uint8_t>* mod; const char* what; };
+    for (const Merge m : {Merge{"/data/materials/materials.dat", &snow->materials, "materials"},
+                          Merge{"/data/effects/vehiclefx.dat", &snow->vehiclefx, "tyre effects"}}) {
+      const RpfFile* f = rpf->Find(m.inner);
+      std::vector<uint8_t> original;
+      if (m.mod->empty() || !f || !ReadRpfData(source, *f, original))
+        continue;
+      int replaced = 0;
+      std::vector<uint8_t> now = WithRowsFrom(original, *m.mod, replaced);
+      REXLOG_INFO("gta4-addons: snow: {} rows of {} taken from the Snow Mod's {}", replaced, m.inner, m.what);
+      if (replaced)
+        edited.emplace_back(m.inner, std::move(now));
+    }
+    for (const auto& [name, data] : snow->effects) {
+      const std::string inner = "/data/" + name;
+      if (rpf->Find(inner))
+        edited.emplace_back(inner, data);
+    }
+  }
   if (edited.empty()) {
     REXLOG_INFO("gta4-addons: {} needs no change", source.string());
     return std::nullopt;
@@ -2372,9 +2543,119 @@ std::optional<fs::path> BuildShadowArchive(const fs::path& source, const Rpf& ar
 // game folder (game:\common.rpf), and one in the title update's folder
 // (update:\...) should it carry its own copy. Each that holds any of the
 // data files gets a shadow.
+// The snow's platform files: the time cycle (when its columns are the
+// console's) and the snowfall's emitters into a shadow xbox360.rpf, which
+// the port's button prompts then build theirs on (rpf_button_prompts.cpp
+// takes the add-ons' shadow as its source).
+std::optional<fs::path> BuildSnowPlatformShadow(const fs::path& source, const std::vector<uint8_t>& key,
+                                                const SnowFiles& snow, const fs::path& cache) {
+  const auto rpf = ReadRpf(source, key);
+  if (!rpf) {
+    REXLOG_WARN("gta4-addons: snow: {} could not be read", source.string());
+    return std::nullopt;
+  }
+  std::vector<EditedFile> edited;
+  uint64_t fingerprint = Fnv1a(1469598103934665603ull, &snow.fingerprint, sizeof(snow.fingerprint));
+  if (const RpfFile* f = rpf->Find("/data/timecyc.dat"); f && !snow.timecyc.empty()) {
+    std::vector<uint8_t> original;
+    if (ReadRpfData(source, *f, original)) {
+      const int ours = TimecycColumns(original), theirs = TimecycColumns(snow.timecyc);
+      if (ours == theirs && ours > 0) {
+        edited.emplace_back("/data/timecyc.dat", snow.timecyc);
+        REXLOG_INFO("gta4-addons: snow: the Snow Mod's timecyc.dat ({} columns, as the console's) goes in", ours);
+      } else {
+        REXLOG_WARN("gta4-addons: snow: the Snow Mod's timecyc.dat has {} columns, the console's {}: the "
+                    "console's stays", theirs, ours);
+      }
+    }
+  }
+  for (const auto& [name, data] : snow.effects) {
+    const std::string inner = "/data/effects/" + name;
+    if (rpf->Find(inner))
+      edited.emplace_back(inner, data);
+    else
+      REXLOG_WARN("gta4-addons: snow: {} has no {}", source.string(), inner);
+  }
+  if (edited.empty())
+    return std::nullopt;
+  for (const auto& [inner, data] : edited) {
+    fingerprint = Fnv1a(fingerprint, inner.data(), inner.size());
+    fingerprint = Fnv1a(fingerprint, data.data(), data.size());
+  }
+  std::error_code ec;
+  const fs::path destination = cache / ("snow-xbox360-" + Hex64(fingerprint) + ".rpf");
+  if (fs::exists(destination, ec) && ShadowHolds(destination, key, edited)) {
+    REXLOG_INFO("gta4-addons: snow: shadow of {} up to date: {}", source.string(), destination.string());
+    return destination;
+  }
+  for (auto it = fs::directory_iterator(cache, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::error_code fec;
+    const std::string name = it->path().filename().string();
+    if (it->is_regular_file(fec) && name.rfind("snow-xbox360-", 0) == 0 && it->path() != destination)
+      fs::remove(it->path(), fec);
+  }
+  const fs::path temporary = destination.string() + ".tmp";
+  fs::remove(temporary, ec);
+  if (!WriteShadowRpf(source, *rpf, key, edited, temporary) || !ShadowHolds(temporary, key, edited)) {
+    fs::remove(temporary, ec);
+    REXLOG_WARN("gta4-addons: snow: the shadow of {} could not be built", source.string());
+    return std::nullopt;
+  }
+  fs::rename(temporary, destination, ec);
+  if (ec) {
+    REXLOG_WARN("gta4-addons: snow: {} could not be put in place: {}", destination.string(), ec.message());
+    return std::nullopt;
+  }
+  REXLOG_INFO("gta4-addons: snow: built a shadow of {} ({} file(s)): {}", source.string(), edited.size(),
+              destination.string());
+  return destination;
+}
+
+// The snow's global dictionaries into a shadow of the game's gtxd.img (a
+// copy with the same-named entries replaced).
+std::optional<fs::path> BuildSnowGtxd(const fs::path& game, const std::vector<uint8_t>& key, const SnowFiles& snow,
+                                      const fs::path& cache) {
+  std::error_code ec;
+  fs::path source;
+  for (const char* platform : {"xbox360", "pc"}) {
+    const fs::path path = game / platform / "data" / "cdimages" / "gtxd.img";
+    if (fs::exists(path, ec)) {
+      source = path;
+      break;
+    }
+  }
+  if (source.empty() || snow.xtd.empty()) {
+    REXLOG_WARN("gta4-addons: snow: no gtxd.img under {} (or no dictionaries); the game's textures stay",
+                game.string());
+    return std::nullopt;
+  }
+  const fs::path destination = cache / "snow-gtxd.img";
+  const fs::path marker = cache / "snow-gtxd.txt";
+  const std::string stamp = Hex64(snow.fingerprint) + " " + std::to_string(SizeOf(source)) + "\n";
+  std::vector<uint8_t> raw;
+  if (fs::exists(destination, ec) && ReadAll(marker, raw) && std::string(raw.begin(), raw.end()) == stamp) {
+    REXLOG_INFO("gta4-addons: snow: shadow gtxd.img up to date: {}", destination.string());
+    return destination;
+  }
+  fs::remove(marker, ec);
+  if (!CopyBytes(source, destination)) {
+    REXLOG_WARN("gta4-addons: snow: {} could not be copied to {}", source.string(), destination.string());
+    return std::nullopt;
+  }
+  if (!InjectIntoImg(destination, key, snow.xtd, false)) {
+    REXLOG_WARN("gta4-addons: snow: the dictionaries could not be put into {}", destination.string());
+    fs::remove(destination, ec);
+    return std::nullopt;
+  }
+  std::ofstream(marker, std::ios::trunc) << stamp;
+  REXLOG_INFO("gta4-addons: snow: built a shadow gtxd.img with {} of the Snow Mod's dictionaries: {}",
+              snow.xtd.size(), destination.string());
+  return destination;
+}
+
 std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<uint8_t>& key,
                                         const std::vector<Addon>& addons, std::vector<MapSet>& maps,
-                                        const fs::path& cache) {
+                                        const fs::path& cache, const SnowFiles* snow = nullptr) {
   std::vector<ShadowArchive> out;
   std::error_code ec;
   fs::create_directories(cache, ec);
@@ -2401,12 +2682,20 @@ std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<
       // (the map sets' lines only in the base game's archive, the one gta.dat's gtxd.ide is in)
       std::vector<MapSet> none;
       std::vector<MapSet>& these = place.label == "game" ? maps : none;
-      if (const auto shadow = BuildShadowArchive(source, *rpf, key, addons, these, cache, label))
+      if (const auto shadow = BuildShadowArchive(source, *rpf, key, addons, these, cache, label, snow))
         out.push_back({place.guest + name, *shadow});
     }
   }
   if (out.empty())
     REXLOG_INFO("gta4-addons: no archive with the data files to shadow; the game reads them loose");
+  if (snow && snow->found) {
+    std::error_code ec;
+    if (const fs::path platform = game / "xbox360.rpf"; fs::exists(platform, ec))
+      if (const auto shadow = BuildSnowPlatformShadow(platform, key, *snow, cache))
+        out.push_back({"game:\\xbox360.rpf", *shadow});
+    if (const auto shadow = BuildSnowGtxd(game, key, *snow, cache))
+      out.push_back({"game:\\xbox360\\data\\cdimages\\gtxd.img", *shadow});
+  }
   return out;
 }
 
@@ -2493,7 +2782,26 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
   // The data files the game actually reads: in common.rpf. (Not this launch
   // if the last two that used them never reached the city.)
   const fs::path cache = game.parent_path() / "addon_cache";
-  std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, maps, cache);
+  // Snow mode: on when the trainer's switch says so (the next launch after
+  // it is flipped).
+  g_user_data = user_data_root;
+  SnowFiles snow;
+  if (SnowWantedAt(user_data_root)) {
+    snow = FindSnow(app_addons / "snow");
+    if (snow.found)
+      REXLOG_INFO("gta4-addons: snow mode on: {} dictionaries, timecyc {}, materials {}, tyre effects {}, {} emitter files",
+                  snow.xtd.size(), snow.timecyc.empty() ? "no" : "yes", snow.materials.empty() ? "no" : "yes",
+                  snow.vehiclefx.empty() ? "no" : "yes", snow.effects.size());
+    else
+      REXLOG_WARN("gta4-addons: snow mode on, but addons/snow holds nothing usable");
+  } else {
+    REXLOG_INFO("gta4-addons: snow mode off");
+  }
+  std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, maps, cache, snow.found ? &snow : nullptr);
+  if (snow.found)
+    g_snow_active.store(std::any_of(shadows.begin(), shadows.end(), [](const ShadowArchive& s) {
+      return s.guest_path.find("gtxd.img") != std::string::npos;
+    }), std::memory_order_relaxed);
   if (!shadows.empty()) {
     // The marker counts the launches in a row that mounted the shadows and
     // never got to the city. One alone proves nothing (the game closed at
@@ -2518,6 +2826,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
       fs::remove(marker, ec);
       g_shadows_skipped = true;
       shadows.clear();
+      g_snow_active.store(false, std::memory_order_relaxed);
       REXLOG_WARN("gta4-addons: the last {} launches with the add-ons' data never reached the "
                   "city; this launch starts without it (the next one tries again)", missed);
     } else {
@@ -2553,6 +2862,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
   }
   if (images.empty()) {
     REXLOG_WARN("gta4-addons: no vehicles.img anywhere under {}", game.string());
+    g_mounted = shadows;
     return shadows;
   }
   // Reference files for the PC->360 converter (logs/export on the console):
@@ -2612,10 +2922,30 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
                 m.info.installed ? "installed" : "not installed this launch", m.info.sea_dst);
     g_maps.push_back(m.info);
   }
+  g_mounted = shadows;
   return shadows;
 }
 
 const std::vector<MapInfo>& InstalledMaps() { return g_maps; }
+
+// Snow mode's switch and state (the header).
+bool SnowActive() { return g_snow_active.load(std::memory_order_relaxed); }
+bool SnowWanted() { return !g_user_data.empty() && SnowWantedAt(g_user_data); }
+bool SetSnowWanted(bool on) {
+  if (g_user_data.empty())
+    return false;
+  std::error_code ec;
+  fs::create_directories(g_user_data, ec);
+  std::ofstream f(SnowSwitch(g_user_data), std::ios::trunc);
+  f << (on ? "on" : "off") << "\n";
+  return bool(f);
+}
+std::optional<std::filesystem::path> ShadowOf(std::string_view guest_path) {
+  for (const auto& s : g_mounted)
+    if (Lower(s.guest_path) == Lower(std::string(guest_path)))
+      return s.shadow;
+  return std::nullopt;
+}
 float SeaLevel() { return g_sea_level; }
 
 void SetShadowsActive(bool active) { g_shadows_active.store(active, std::memory_order_relaxed); }

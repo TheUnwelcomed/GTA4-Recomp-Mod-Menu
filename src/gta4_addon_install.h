@@ -16,6 +16,8 @@
 // before the game boots. Nothing returned: the game keeps its own archives.
 #pragma once
 #include <filesystem>
+#include <optional>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,16 @@ std::vector<ShadowArchive> InstallBundled(const std::filesystem::path& app_addon
 // and stops on a mismatch; the trainer skips that check while this is set.
 void SetShadowsActive(bool active);
 bool ShadowsActive();
+
+// Snow mode (v1.7.45): the Snow Mod's textures, snowfall and surfaces come
+// in through shadow archives at launch when the switch file says "on"; the
+// trainer flips the switch (the next launch takes it) and shows the state.
+bool SnowActive();             // this launch runs in the snow
+bool SnowWanted();             // the switch as it stands
+bool SetSnowWanted(bool on);   // writes the switch; false: no user data folder yet
+// A shadow archive InstallBundled returned for a guest path (game:\xbox360.rpf),
+// for the port's button prompts to build theirs on.
+std::optional<std::filesystem::path> ShadowOf(std::string_view guest_path);
 
 // Map sets (addons/maps/<name>, made by the repo's tools/maps/mapset.py):
 // places for the DeLorean's time travel. Their models, textures and

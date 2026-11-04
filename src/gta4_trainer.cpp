@@ -1053,7 +1053,7 @@ enum class Action {
   kOpenTimeMachine, kTmPreset, kTmField, kTmCircuits, kTmRefuel, kTmHover,
   kOpenSpawnStandard, kCompleteMission, kTogglePerformance, kJetRoute,
   kTmUnloadMap, kTmPieces, kJetLandMode,
-  kBeyondSummon, kBeyondCloak,
+  kBeyondSummon, kBeyondCloak, kToggleSnow,
 };
 struct Item {
   std::string_view label;
@@ -1351,7 +1351,8 @@ std::vector<Item> PageItems(const State& s) {
                {"Set Time Now", Action::kTimeApply},
                {"Weather (left/right)", Action::kWeatherApply},
                {"Force Weather Now", Action::kWeatherApply},
-               {"Release Weather", Action::kWeatherRelease}};
+               {"Release Weather", Action::kWeatherRelease},
+               {"Snow Mode", Action::kToggleSnow}};  // (label filled in by PublishDraw)
       break;
     case Page::kTimeMachine:
       items = {{"Destination", Action::kTmPreset},  // (labels filled in by PublishDraw)
@@ -10939,6 +10940,22 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       Invoke(ctx, base, "RELEASE_WEATHER", {});
       Toast(s, "Weather released.");
       break;
+    case Action::kToggleSnow: {
+      const bool on = !gta4::addons::SnowWanted();
+      if (!gta4::addons::SetSnowWanted(on)) {
+        Toast(s, "The snow switch could not be written.", 2500);
+        break;
+      }
+      const bool active = gta4::addons::SnowActive();
+      Toast(s, on ? (active ? "Snow mode stays on." : "Snow mode on: restart the game and Liberty City is under snow "
+                                                      "(the Snow Mod's roads, pavements, rooftops, snowfall and slippery "
+                                                      "surfaces).")
+                  : (active ? "Snow mode off: restart the game to clear the snow." : "Snow mode stays off."),
+            5000);
+      REXLOG_INFO("gta4-trainer: snow mode switched {} (this launch: {})", on ? "on" : "off",
+                  active ? "in the snow" : "no snow");
+      break;
+    }
     case Action::kGiveLoadout:
       for (const auto& w : kLoadout)
         Invoke(ctx, base, "GIVE_WEAPON_TO_CHAR", {game.ped, w.type, w.ammo, 0});
@@ -11072,6 +11089,13 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
           if (i == 0) text = "Hour: " + std::to_string(s.hour);
           if (i == 1) text = "Minute: " + std::to_string(s.minute);
           if (i == 3) text = "Weather: " + std::string(kWeathers[size_t(s.weather)]);
+          if (i == 6) {
+            // Snow mode (v1.7.45): the switch and this launch's state
+            const bool wanted = gta4::addons::SnowWanted(), active = gta4::addons::SnowActive();
+            text = wanted ? (active ? "Snow Mode: ON (Liberty City under snow)"
+                                    : "Snow Mode: ON (restart the game for the snow)")
+                          : (active ? "Snow Mode: OFF (restart the game to clear it)" : "Snow Mode: OFF");
+          }
         }
         if (s.page == Page::kTimeMachine) {
           const auto& d = s.tm_dest;

@@ -128,7 +128,17 @@ keeps going while you browse.
   The destination is loaded first (`LOAD_SCENE`) and you're put on its ground;
   if it isn't ready yet you wait there, held still, until it is. Driving, the
   car comes along
-- **Time & Weather** — set the clock, force or release any weather
+- **Time & Weather** — set the clock, force or release any weather; **Snow
+  Mode** (v1.7.45): GTA 4 Snow Mod v2.0 (jumbo8) on the console - the
+  city's roads, pavements, highways, rooftops and tree LODs under snow (the
+  mod's global texture dictionaries, 17, converted by `tools/snow/snowtex.py`
+  and mounted in place of the game's through a shadow `gtxd.img`), its
+  snowfall (the rain and storm emitters), its slippery surfaces and the
+  tyres' tracks in the snow (the mod's rows merged into the console's
+  `materials.dat` and `vehiclefx.dat` by material name, the console's order
+  kept) and its time cycle when its columns are the console's. The switch
+  is a file the installer reads at launch (`liberty_menu_snow.txt`), so a
+  change takes the next launch; the menu says which state this launch is in
 - **Weapons** — full loadout with ammo, or strip all weapons
 - **Chaos**: raining cars (random cars dropped around you), gravity on/off
 - **Headlights on D-pad Left** (on by default, the one option that is):
@@ -208,6 +218,18 @@ network session.
 
 ## Changes
 
+- **v1.7.45**: **Snow Mode** (above). The installer
+  (`gta4_addon_install.cpp`): `FindSnow` reads `addons/snow`; the common.rpf
+  shadow takes the mod's `materials.dat` and `vehiclefx.dat` rows
+  (`WithRowsFrom`) and its emitter files; a shadow `xbox360.rpf`
+  (`BuildSnowPlatformShadow`) takes the emitters and the time cycle
+  (`TimecycColumns` must agree); a shadow `gtxd.img` (`BuildSnowGtxd`: the
+  game's copied, the 17 dictionaries injected) stands in for
+  `game:\xbox360\data\cdimages\gtxd.img`. The port's button prompts build
+  their `xbox360.rpf` shadow on the add-ons' when there is one
+  (`rpf_button_prompts.cpp`, `ShadowOf`), so both edits hold. `rsc5.Resource.pc`
+  takes a zlib stream that ends short of its checksum (the mod's files);
+  `img3.extract`.
 - **v1.7.44**: **the Batman Beyond Batmobile** flies (above:
   `BeyondTick`, the flight as the Part II DeLorean's `Hover` with its own
   state, the canopy through `Canopy` with Y held back until the car has
@@ -852,6 +874,8 @@ one in `/data/homebrew/` — your installed game, saves and settings stay.
   (Time Travel IV 2.0a): the DeLorean DMC-12 and the time machines.
 - **johndoe968** (original model) and **Milcin** (IV port): the Imponte
   Arbiter X.
+- **jumbo8**: GTA 4 Snow Mod v2.0 (the snow mode's textures, snowfall,
+  surfaces and time cycle).
 - **Ddiaz Design**: the Dodge Challenger SRT Hellcat. This work is based on
   "2019 Dodge Challenger SRT Hellcat"
   (https://sketchfab.com/3d-models/2019-dodge-challenger-srt-hellcat-f210ad5e17e04b2389b1c3628477105c)
