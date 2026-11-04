@@ -125,6 +125,13 @@ def short_names(names, prefix, rename=None):
             full = prefix + rename.get(n, n).replace('_', '')
         if len(full) > NAME_LIMIT:
             full = full[:NAME_LIMIT - 3] + '%03x' % (batconv.joaat(n) & 0xFFF)
+        # (two cut to the same three digits - Route 66's 4,614 tiles, v1.7.43:
+        # the next three of the hash, then a count)
+        k = 0
+        while full in taken:
+            k += 1
+            h = (batconv.joaat(n) >> (12 * min(k, 2))) & 0xFFF
+            full = full[:NAME_LIMIT - 3] + ('%03x' % h if k <= 2 else '%03d' % (k % 1000))
         assert len(full) <= NAME_LIMIT and full not in taken, (n, full)
         taken.add(full)
         out[n] = full
@@ -313,10 +320,13 @@ def dictionaries(entries, prefix, name=None):
 
 
 # ------------------------------------------------------------------ arrival
-def height_map(pieces, cell=2.0):
+def height_map(pieces, cell=2.0, keep=None):
     """The highest walkable collision surface on a grid (NaN: none): every
-    upward-facing triangle sampled at least twice a cell along its edges."""
-    pts = []
+    upward-facing triangle sampled at least twice a cell along its edges.
+    `keep` (x, y, r): only within the disc (v1.7.44: Route 66's mountains
+    span kilometres; the whole mod sampled at every 2 m ran out of memory).
+    The grid is filled batch by batch, never all the samples at once."""
+    tris_all = []
     for b in pieces:
         stack = [b]
         while stack:
@@ -342,22 +352,39 @@ def height_map(pieces, cell=2.0):
             for t in tris:
                 if not len(t):
                     continue
-                a, b_, c = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
-                edge = np.maximum(np.maximum(np.linalg.norm(b_ - a, axis=1), np.linalg.norm(c - a, axis=1)),
-                                  np.linalg.norm(c - b_, axis=1))
-                steps = np.clip(np.ceil(edge / (cell / 2)), 1, 200).astype(np.int64)
-                for k in np.unique(steps):
-                    sel = steps == k
-                    g = np.array([(i / k, j / k) for i in range(k + 1) for j in range(k + 1 - i)])
-                    aa, bb, cc = a[sel], b_[sel], c[sel]
-                    p_ = aa[:, None, :] + (bb - aa)[:, None, :] * g[None, :, 0:1] + (cc - aa)[:, None, :] * g[None, :, 1:2]
-                    pts.append(p_.reshape(-1, 3))
-    p = np.concatenate(pts)
-    lo = p[:, :2].min(0)
-    ij = ((p[:, :2] - lo) / cell).astype(np.int64)
-    w, h = ij.max(0) + 1
+                corners = v[t]  # (n, 3, 3)
+                if keep is not None:
+                    cen = corners.mean(axis=1)
+                    near = np.hypot(cen[:, 0] - keep[0], cen[:, 1] - keep[1]) <= keep[2] + 60.0
+                    corners = corners[near]
+                    if not len(corners):
+                        continue
+                tris_all.append(corners)
+    if not tris_all:
+        return np.full((1, 1), np.nan), np.zeros(2), cell
+    lo = np.min([c[:, :, :2].min(axis=(0, 1)) for c in tris_all], axis=0)
+    hi = np.max([c[:, :, :2].max(axis=(0, 1)) for c in tris_all], axis=0)
+    w, h = (np.ceil((hi - lo) / cell).astype(np.int64) + 1).tolist()
     hm = np.full((h, w), -np.inf)
-    np.maximum.at(hm, (ij[:, 1], ij[:, 0]), p[:, 2])
+    for corners in tris_all:
+        a, b_, c = corners[:, 0], corners[:, 1], corners[:, 2]
+        edge = np.maximum(np.maximum(np.linalg.norm(b_ - a, axis=1), np.linalg.norm(c - a, axis=1)),
+                          np.linalg.norm(c - b_, axis=1))
+        steps = np.clip(np.ceil(edge / (cell / 2)), 1, 200).astype(np.int64)
+        for k in np.unique(steps):
+            sel = np.flatnonzero(steps == k)
+            g = np.array([(i / k, j / k) for i in range(k + 1) for j in range(k + 1 - i)])
+            # (in batches: a 200-step triangle is 20,000 samples)
+            batch = max(1, 2000000 // len(g))
+            for at in range(0, len(sel), batch):
+                part = sel[at:at + batch]
+                aa, bb, cc = a[part], b_[part], c[part]
+                p_ = (aa[:, None, :] + (bb - aa)[:, None, :] * g[None, :, 0:1] +
+                      (cc - aa)[:, None, :] * g[None, :, 1:2]).reshape(-1, 3)
+                ij = ((p_[:, :2] - lo) / cell).astype(np.int64)
+                ij[:, 0] = np.clip(ij[:, 0], 0, w - 1)
+                ij[:, 1] = np.clip(ij[:, 1], 0, h - 1)
+                np.maximum.at(hm, (ij[:, 1], ij[:, 0]), p_[:, 2])
     hm[np.isinf(hm)] = np.nan
     return hm, lo, cell
 
@@ -549,6 +576,28 @@ def main():
                 unknown[inst['hash']] += 1
                 continue
             placed.append(dict(inst, model=name, stock=name in stock))
+    # the part of the map kept (cfg['keep']: centre x, y and a radius, the
+    # mod's coordinates; v1.7.43, Route 66: the whole map is 1,500 models
+    # and 4,600 tiles, more than the game's model table has room for): a
+    # placement whose model's sphere lies wholly beyond the radius goes,
+    # and the tiles and collision cells beyond it below
+    keep = cfg.get('keep')
+    if keep:
+        kx, ky, kr = float(keep[0]), float(keep[1]), float(keep[2])
+        before = len(placed)
+
+        def inside(p, margin=50.0):
+            m = models.get(p['model'])
+            if m is not None and len(m) > 14:
+                cx, cy = float(m[11]), float(m[12])
+                margin = float(m[14])
+            else:
+                cx = cy = 0.0
+            return math.hypot(p['pos'][0] + cx - kx, p['pos'][1] + cy - ky) <= kr + margin
+
+        placed = [p for p in placed if inside(p)]
+        print('keep: %d of %d placements within %.0f m of (%.0f, %.0f) (a model\'s sphere touching the disc stays)' % (
+            len(placed), before, kr, kx, ky))
     extra_files = cfg.get('extra') or []
     if isinstance(extra_files, str):
         extra_files = [extra_files]
@@ -594,6 +643,8 @@ def main():
                 if key in seen:  # (the stream .wpl files repeat some)
                     continue
                 seen.add(key)
+                if keep and math.hypot(car['pos'][0] - float(keep[0]), car['pos'][1] - float(keep[1])) > float(keep[2]):
+                    continue
                 vehicles.append(dict(car, model=name))
         print('vehicles: %d parked (%s)%s' % (
             len(vehicles), ', '.join('%s x%d' % kv for kv in collections.Counter(v['model'] for v in vehicles).most_common(8)),
@@ -688,10 +739,14 @@ def main():
         for name, b in piece_files.items():
             v, t, m = collide.soup(b)
             cen = v[t].mean(axis=1)
-            keep = v[t][:, :, 2].max(axis=1) >= floor_z
-            ix = np.floor((cen[keep, 0] - gx0) / ccell).astype(np.int64)
-            iy = np.floor((cen[keep, 1] - gy0) / ccell).astype(np.int64)
+            above = v[t][:, :, 2].max(axis=1) >= floor_z
+            ix = np.floor((cen[above, 0] - gx0) / ccell).astype(np.int64)
+            iy = np.floor((cen[above, 1] - gy0) / ccell).astype(np.int64)
             cells |= set(zip(ix.tolist(), iy.tolist()))
+        if keep:  # (cfg['keep']: the cells wholly beyond the kept disc go)
+            cells = {(ix, iy) for ix, iy in cells
+                     if math.hypot(gx0 + (ix + 0.5) * ccell - float(keep[0]), gy0 + (iy + 0.5) * ccell - float(keep[1]))
+                     <= float(keep[2]) + ccell * 0.71}
         for k, (ix, iy) in enumerate(sorted(cells)):
             carriers.append(dict(key='c%d' % k, cell=(ix, iy), grid=(gx0, gy0, ccell),
                                  origin=(gx0 + (ix + 0.5) * ccell, gy0 + (iy + 0.5) * ccell, 0.0)))
@@ -732,6 +787,7 @@ def main():
     tcfg = cfg.get('tiles')
     tiles_of = {}
     turned_models = {}
+    tiles_dropped, tiles_gone = 0, []
     if tcfg:
         for m in used:
             if float(models[m][14]) <= tcfg['radius']:
@@ -751,6 +807,15 @@ def main():
             ts = mapdraw.plan_tiles(donor, tcfg['cell'], zmin, lifts.get(m))
             x0 = ts[0]['lo'][0] - ts[0]['cell'][0] * tcfg['cell']
             y0 = ts[0]['lo'][1] - ts[0]['cell'][1] * tcfg['cell']
+            if keep:  # (the tiles wholly beyond the kept disc go; a model with none left is dropped from the set)
+                far = [t for t in ts if math.hypot(p['pos'][0] + t['origin'][0] - float(keep[0]),
+                                                   p['pos'][1] + t['origin'][1] - float(keep[1]))
+                       > float(keep[2]) + tcfg['cell'] * 0.71]
+                tiles_dropped += len(far)
+                ts = [t for t in ts if t not in far]
+                if not ts:
+                    tiles_gone.append(m)
+                    continue
             for k, t in enumerate(ts):
                 t['key'] = '%s_%d' % (m, k)
                 t['grid'] = (x0, y0, tcfg['cell'])
@@ -759,6 +824,12 @@ def main():
             len(tiles_of), tcfg['radius'], sum(len(ts) for _, ts in tiles_of.values()), tcfg['cell'],
             ', '.join('%s %d' % (m, len(ts)) for m, (_, ts) in sorted(tiles_of.items())),
             ('; placed turned, the turn baked in: ' + ', '.join(sorted(turned_models))) if turned_models else ''))
+        if keep:
+            print('keep: %d tiles beyond the disc dropped; %d models with none left: %s' % (
+                tiles_dropped, len(tiles_gone), ', '.join(sorted(tiles_gone)) or 'none'))
+            if tiles_gone:
+                placed = [p for p in placed if p['model'] not in tiles_gone]
+                used = [m for m in used if m not in tiles_gone]
 
     # the game's names for the models (a tiled one's tiles), the carriers and the texture dictionaries
     game_names = [m for m in used if m not in tiles_of] + [t['key'] for _, ts in tiles_of.values() for t in ts] + \
@@ -823,8 +894,9 @@ def main():
         verdict, worst = maptex.check(body, flags, chosen)
         # (a level laid out wrong decodes to noise, 40 and up; a translucent
         # gradient's smallest level differs from its parent's box filter by
-        # 14 - Wake Island's transition.dds)
-        assert worst < 20.0, (txd, worst)
+        # 14 - Wake Island's transition.dds; a leaf cut-out's alpha mask by
+        # 27 - Route 66's ag_elm_leaf, its levels re-encoded as DXT)
+        assert worst < 32.0, (txd, worst)
         name = tname[txd]
         pack(xlzx, XTD_TYPE, flags, body, os.path.join(out, name + '.xtd'))
         total_tex += len(body)
@@ -897,7 +969,9 @@ def main():
             ids = ix * 100000 + iy
             for cid in np.unique(ids):
                 sel = ids == cid
-                c = by_cell[(int(ix[sel][0]), int(iy[sel][0]))]
+                c = by_cell.get((int(ix[sel][0]), int(iy[sel][0])))
+                if c is None:  # (a cell beyond the kept disc)
+                    continue
                 tv, tt, tm = collide.compact(v, t[sel], m[sel])
                 gathered.setdefault(mname[c['key']], []).append((tv - np.array(c['origin']), tt, tm))
             return
@@ -950,6 +1024,14 @@ def main():
         print('collision: %d of the set\'s own props placed more than once, their bounds in the model\'s space: %s' % (
             len(own_local), ', '.join('%s x%d' % (n, count_of[n]) for n in sorted(own_local))))
     assert not unplaced, 'collision with no placed model: %s (drop it)' % ', '.join(unplaced)
+    if carriers:
+        # (a cell named from the raw triangles can end with none: welding and
+        # decimation move the centres of its few slivers over its edge)
+        empty = [c for c in carriers if mname[c['key']] not in gathered]
+        if empty:
+            carriers = [c for c in carriers if mname[c['key']] in gathered]
+            print('collision by area: %d cells with no triangles left dropped (%s)' % (
+                len(empty), ', '.join(mname[c['key']] for c in empty)))
     entries = []
     worst = 0.0
     carrier_bounds = {}
@@ -1057,7 +1139,7 @@ def main():
             f.write('%s 0.000000 0.000000 0.000000 1.000000 %.3f %.3f %.3f 1\n' % (mname[c['key']], o[0], o[1], o[2]))
             count['carriers'] += 1
     print('pieces: %s' % ', '.join('%d %s' % (n, k) for k, n in sorted(count.items())))
-    hm, hlo, cell = heights or height_map(list(piece_files.values()))
+    hm, hlo, cell = heights or height_map(list(piece_files.values()), keep=keep)
     runs = best_runs(hm, hlo, cell, cfg['sea'])
     print('arrival runs (length m, x, y, z, heading deg):')
     for r in runs:

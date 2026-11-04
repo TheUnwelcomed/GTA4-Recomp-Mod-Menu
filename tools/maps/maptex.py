@@ -236,6 +236,8 @@ def check(body, flags, sources, log=print):
     import mipcheck
     r = rsc5.Resource(body, flags, True, 7, 'out')
     n, worst = mipcheck.check(r, log=lambda s: None)
+    if worst >= 32.0:  # (the texture it is, before the caller gives up on the dictionary)
+        mipcheck.check(r, log=lambda s: log('    ' + s) if s.split(':')[-1].strip()[:4] and float(s.split('worst level error ')[-1].split(' ')[0]) >= 32.0 else None)
     names = {}
     tl, ht, cnt = r.vptr(24), r.vptr(16), r.u16(20)
     hashes = [r.u32(ht + 4 * i) for i in range(cnt)]

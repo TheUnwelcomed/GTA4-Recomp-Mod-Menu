@@ -105,7 +105,7 @@
   "notes": "Route 66 by nine30 (GTAIV_route_66_by_nine30.zip, 2013): 29 archives (route66.img: the village - motel, diner, Bagdad Cafe, garages, wrecks, signs; route_six_*: the road 'six', the canyon, hills, mountains, rocks, vegetation, pylons, the circuit, the connections to Liberty City), 1,485 placements of its own models plus the village's 69 and a streamed 50.",
   "collision": {
     "mode": "world",
-    "cell": 150,
+    "cell": 300,
     "drop": [],
     "seabed": 3.0,
     "weld": 0.02,
@@ -113,12 +113,13 @@
       "*": 0.3
     },
     "max_polys": 6000,
-    "notes": "the mod's 99 world-space collision files (COL_*.wbn) cut into 150 m cells carried by invisible pieces, as Wake Island's"
+    "notes": "the mod's 99 world-space collision files (COL_*.wbn) cut into 300 m cells carried by invisible pieces (v1.7.43: 300 m, a quarter the carriers of 150 m ones - each carrier is a model)"
   },
   "tiles": {
     "radius": 100,
-    "cell": 150,
-    "below_sea": 3.0
+    "cell": 300,
+    "below_sea": 3.0,
+    "notes": "v1.7.43: 300 m tiles, a quarter as many as 150 m ones"
   },
   "stream": 700,
   "vehicles": "../stock_vehicles.txt",
@@ -146,5 +147,11 @@
     90.0,
     300
   ],
-  "arrive_notes": "on the road between the motel (north of it) and the diner (south), facing east along Route 66"
+  "arrive_notes": "on the road between the motel (north of it) and the diner (south), facing east along Route 66",
+  "keep": [
+    -470.0,
+    -2121.0,
+    2500.0
+  ],
+  "keep_notes": "v1.7.43: the village and 2.5 km around it - the whole map (1,486 models, 4,614 tiles of 150 m) is far more than the game's model table has room for (about 2,200 free with the other places installed)"
 }
