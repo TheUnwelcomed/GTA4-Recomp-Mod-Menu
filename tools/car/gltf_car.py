@@ -12,7 +12,7 @@ usage: python3 -I gltf_car.py <spec.json> <scene.gltf> <pattern.wft> <export_dir
                game's x y z from the glTF's: e.g. ["-x", "z", "y"]), wheels
                {wheel_lf: node name, ...}, origin {z_over_hubs}, seats {bone:
                [x, y, z]}, materials {name fragment: kind} (kinds: paint,
-               glass, generic, mesh), texture_side, radii {wheel_lf: r, ...},
+               glass, generic, mesh, lights), texture_side, radii {wheel_lf: r, ...},
                options (more run_vehicle options, "k=v,...")
   pattern.wft  a PC car mod's file: the fragment header's pattern and the
                shader samples
@@ -43,6 +43,7 @@ SHADER_OF = {  # kind -> (.sps, fallback .sps)
     'glass': ('gta_vehicle_vehglass.sps', None),
     'generic': ('gta_vehicle_generic.sps', 'gta_vehicle_mesh.sps'),
     'mesh': ('gta_vehicle_mesh.sps', 'gta_vehicle_generic.sps'),
+    'lights': ('gta_vehicle_lightsemissive.sps', 'gta_vehicle_generic.sps'),  # (the lamps: lit with the lights)
 }
 WHEEL_BONES = ('wheel_lf', 'wheel_rf', 'wheel_lr', 'wheel_rr')
 
@@ -220,6 +221,10 @@ class Builder:
             textures = {}
             if kind == 'glass':
                 textures[DIFFUSE] = 'vehicle_generic_glasswindows2'
+            elif kind == 'lights':
+                base = pbr.get('baseColorTexture')
+                textures[DIFFUSE] = self.texture(self.g.image_path(base['index']), side) if base is not None else \
+                    self.flat((200, 200, 200, 255))
             elif kind in ('generic', 'mesh'):
                 base = pbr.get('baseColorTexture')
                 if base is not None:

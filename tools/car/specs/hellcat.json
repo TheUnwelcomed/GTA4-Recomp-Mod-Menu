@@ -9,7 +9,7 @@
   "wheel_mesh": "wheel_lf",
   "origin": {"z_over_hubs": 0.15},
   "seats": {"seat_dside_f": [-0.37, 0.25, -0.12], "seat_pside_f": [0.37, 0.25, -0.12]},
-  "materials": {"Base_063": "paint", "Glass_320": "glass"},
+  "materials": {"Base_063": "paint", "Glass_320": "glass", "Lights_363": "lights"},
   "radii": {"wheel_lf": 0.38, "wheel_rf": 0.38, "wheel_lr": 0.40, "wheel_rr": 0.40},
   "texture_side": 1024,
   "colours": "74,0,0"

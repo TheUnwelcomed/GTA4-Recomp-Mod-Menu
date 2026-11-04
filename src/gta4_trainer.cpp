@@ -9076,7 +9076,7 @@ struct BeyondState {
   bool sounding = false;   // its voice wanted (in it; parked or flying within earshot)
   bool y_taken = false, exit_pulse = false;  // Y kept from the canopy while settling; Y given to it once settled
   bool spawn_pending = false;                // a summoned car waits for its model
-  uint64_t spawn_since = 0;
+  uint64_t spawn_since = 0, spawn_ready_since = 0, spawn_renew_at = 0;
   // The flight (as the time machine's Hover): speed along the nose, heading,
   // climb rate, bank and pitch, the held height.
   float fwd = 0.0f, heading = 0.0f, climb = 0.0f, bank = 0.0f, pitch = 0.0f, hold_z = 0.0f, altitude = 99.0f;
@@ -9360,8 +9360,19 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
     }
   }
   if (m.spawn_pending) {
+    // (the spawn guard's rules: loaded, its model info in place and
+    // unchanged for a moment, the request renewed meanwhile)
     const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {kBeyond});
-    if (loaded && loaded->r0()) {
+    const bool ready = loaded && loaded->r0() && CheckModel(base, kBeyond).problem.empty();
+    if (ready && !m.spawn_ready_since)
+      m.spawn_ready_since = now;
+    else if (!ready)
+      m.spawn_ready_since = 0;
+    if (!ready && now >= m.spawn_renew_at) {
+      m.spawn_renew_at = now + 4000;
+      Invoke(ctx, base, "REQUEST_MODEL", {kBeyond});
+    }
+    if (ready && now - m.spawn_ready_since >= 250) {
       const float back = 160.0f;
       const float x = game.position[0] - game.forward[0] * back, y = game.position[1] - game.forward[1] * back;
       float z = game.position[2] + 30.0f;
@@ -9378,6 +9389,7 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
         m.summon_log = 0;
         m.settling = false;
         BeyondTakeOff(ctx, base, m, 0.0f);
+        m.floor_z = -1e9f;  // (no floor in the sky it starts from)
         m.hold_z = z;
         if (const auto h = Invoke(ctx, base, "GET_CAR_HEADING", {m.car, 0}, 1))
           m.heading = h->f(0) * 3.14159265f / 180.0f;
@@ -9386,7 +9398,7 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
       } else {
         Toast(s, "The Batmobile could not come.", 2000);
       }
-    } else if (now - m.spawn_since > 15000) {
+    } else if (now - m.spawn_since > 40000) {
       m.spawn_pending = false;
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {kBeyond});
       Toast(s, "The Batmobile's model did not load.", 2500);
