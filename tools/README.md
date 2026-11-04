@@ -28,6 +28,7 @@ console exports and the mods' own files.
 | `maps/props.py` | Props made here as PC pieces for a set (Benny's double-sided sign and tiki bar: meshes, their own textures drawn with PIL, collision). |
 | `pc2x360/pcwrite.py` | Writes GTA IV PC resources from plain data: drawables (shaders cloned from PC samples of the same preset, vertices by usage bits, bounds) and texture dictionaries (DXT levels), laid out as the game's own, read back by everything here. |
 | `maps/stocknames.py` | The game's own map model names from the mapsets export's `.ide` files (`maps/stock_models.txt`): a map set names a piece of one of them by that name, with no file of its own; and its vehicle names (`maps/stock_vehicles.txt`) for the parked vehicles a mod's `.wpl` files generate. |
+| `maps/texrefcheck.py` | The texture objects a folder of console drawables' shaders point to, by class id: a reference by name (`2C926300`), a drawable's own embedded texture (`941A6300`), a fragment's reference (`E4916300`); lists the shaders whose objects are not references (v1.7.38-40 cloned embedded ones as references: the Wake Island null calls, the Keys' placement fault). |
 | `maps/boundheaders.py` | A console bound dictionary's or static bounds' headers side by side (pointers as P), and the two conventions they differ in checked: a composite's centre of gravity (the dictionaries: the volume-weighted mean of its children's; the static bounds: the plain sum) and a lone mesh's volume (the dictionaries: -FLT_MAX). |
 
 ## Game addresses the trainer relies on (360 build)

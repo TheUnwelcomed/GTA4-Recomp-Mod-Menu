@@ -7067,7 +7067,7 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
                   g.info->name, now - g.requested_at, DescribeDictionaries(base));
     g.loaded = true;
     g.loaded_at = now;
-    if (!g_tm.in_car || g_tm.phase == 0)
+    if ((!g_tm.in_car || g_tm.phase == 0) && !g.guarding)
       Toast(s, g.info->label + std::string(" is ready: 88 mph to go."), 2500);
     return;
   }
