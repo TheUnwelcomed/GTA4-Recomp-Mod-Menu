@@ -186,6 +186,30 @@ network session.
 
 ## Changes
 
+- **v1.7.41**: the **crash found** (logs 106-108) and fixed in the
+  converter: a few of the export's shader samples carry their textures
+  embedded in the model (a lamp's glow, a gate's reflection map, class id
+  `941A6300`; a fragment's references, `E4916300`), and `_clone_shader`
+  copied 32 bytes of one as a texture reference (`2C926300`), which the
+  game never places - a null call binding it (Wake Island, every frame a
+  lamp or reflective cabin was in view) or a fault placing it (the Keys'
+  first lamp, the freeze choosing the Keys). Every texture parameter is a
+  reference now (`batconv.TEXTURE_REFERENCE_ID`); both sets rebuilt.
+  **Wake Island moved 500 m east, the Keys 300 m west**: Wake's runway
+  cell (x -2860..-2675) had its collision loaded and linked yet the game
+  never collided with it, while the apron cell east of it (x -2712..)
+  did; the world seems to end near x -2700, so both sets keep clear of
+  it. `MapCheck` surveys the standing collision pieces on arrival. The
+  **safehouse** (`map.txt` `spot`/`safehouse`, `MapSpot`): the Teleport
+  page lists each place's arrival and spots (`PlaceSpots`,
+  `TeleportToPlace`); a place is stood under a held player
+  (`StandPlaceUnder`, the guard `MapGuard` - also a loaded game found on
+  a place, since a save made at the mansion's bed loads there with
+  nothing under it); the mansion's door blip (sprite 29, as `main.sco`
+  adds the game's) and its bed opening the game's save menu
+  (`SafehouseTick`); a game loaded or restarted is told from the player
+  ped's handle or a standing piece gone, and what stood is forgotten
+  without deleting (`MapForget`, `MapProbe`).
 - **v1.7.40**: the **creatures' sounds** (a shark's bite with a splash over
   it, a crocodile's splash as it slides into the water: synthesized
   one-shots in the island ambience, `gta4_island_sound.h`, panned and

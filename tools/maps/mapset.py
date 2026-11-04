@@ -1058,6 +1058,14 @@ def main():
             f.write('weather %d\n' % life['weather'])
         if life.get('ambience'):
             f.write('ambience %s\n' % life['ambience'])
+        # the spots the menu teleports to (v1.7.40: the mod's coordinates, a
+        # heading, a label), one of them perhaps the player's safehouse there
+        # (a blip at its door, a save point at its bed)
+        for sp in cfg.get('spots', []):
+            x, y, z, heading = sp['stand']
+            f.write('spot %s %.2f %.2f %.2f %.1f %s\n' % (sp['name'], x, y, z, heading, sp.get('label', sp['name'])))
+            if sp.get('door') and sp.get('bed'):
+                f.write('safehouse %s %.2f %.2f %.2f %.2f %.2f %.2f\n' % ((sp['name'],) + tuple(sp['door']) + tuple(sp['bed'])))
     if creatures:
         with open(os.path.join(out, 'creatures.txt'), 'w') as f:
             f.write('# the place\'s creatures (creature.py): kind, size, how many about; each part\'s model, pivot, axis, swing\n')

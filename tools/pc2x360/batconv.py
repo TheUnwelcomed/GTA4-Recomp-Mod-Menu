@@ -31,6 +31,11 @@ VP = 0x50000000
 PP = 0x60000000
 
 # donor shader (.sps) -> template shader (.sps) when the template lacks it
+# A 360 resource's objects carry a class id where their vtable will go (the
+# game sets the vtable as it places each one by type): a texture named by
+# reference, and a texture embedded whole in a drawable (its own dictionary).
+TEXTURE_REFERENCE_ID = 0x2C926300
+TEXTURE_EMBEDDED_ID = 0x941A6300
 SPS_FALLBACK = {
     'gta_vehicle_interior.sps': 'gta_vehicle_interior2.sps',
     'gta_default.sps': 'gta_vehicle_interior2.sps',  # needs 0059, as the donor part supplies
@@ -854,11 +859,13 @@ class Converter:
         self.t_texobj = None
         for s in d['shader_group']['shaders']:
             for p in shader_params(t, s['off']):
-                if p['type'] == 0 and p['value'] is not None:
+                if p['type'] == 0 and p['value'] is not None and \
+                        struct.unpack_from('>I', t.virt, p['value'])[0] == TEXTURE_REFERENCE_ID:
                     self.t_texobj = t.virt[p['value']:p['value'] + 32]
                     break
             if self.t_texobj:
                 break
+        assert self.t_texobj, 'the template names no texture by reference'
         # sanity: geometry, VB and IB templates look like what was mapped
         assert struct.unpack_from('>I', self.t_vb, 28)[0] == VP | (g0['vb_off'] + 0x20)
         assert struct.unpack_from('>I', self.t_ib, 12)[0] == VP | (g0['ib_off'] + 0x10)
@@ -1409,7 +1416,21 @@ class Converter:
             if not use:
                 v.w32(po + 4 * i, 0)
                 continue
+            # The object copied is a texture reference (32 bytes: its class id,
+            # +8 0x02000001, the name at +20), never one of a sample's own
+            # embedded textures: a lamp's glow or a gate's reflection map lives
+            # in its drawable as a whole grcTextureXenon (class id
+            # TEXTURE_EMBEDDED_ID, a D3D header at +24), which the game places
+            # through the drawable's texture dictionary, not the shader's
+            # parameter. v1.7.38 copied 32 bytes of those for gta_emissive and
+            # the reflect presets (the mapsets export's samples): the game
+            # left the class id unplaced, read a vtable at 0x941A6300 and
+            # called 0 drawing Wake Island (logs 106, 107), and faulted
+            # placing the Keys (log 108).
             srcobj = src.virt[p['value']:p['value'] + 32] if p['value'] is not None else self.t_texobj
+            if struct.unpack_from('>I', srcobj, 0)[0] != TEXTURE_REFERENCE_ID:
+                self.embedded_replaced = getattr(self, 'embedded_replaced', 0) + 1
+                srcobj = self.t_texobj
             obj = v.put(srcobj, 16)
             if name is not None:
                 v.w32(obj + 20, VP | v.cstr(name))

@@ -40,10 +40,8 @@
     0.0,
     0.0
   ],
-  "to": [
-    0.0,
-    0.0
-  ],
+  "to_notes": "v1.7.41: the island moved 500 m east (the mod has it in the game's far south-west corner, x -3000..-1571): its runway cell had no collision at x < about -2700 while a cell east of it had (log 107: the car in the sea at the arrival, the apron by the planters solid) - the game's world has an edge there",
+  "to": [500.0, 0.0],
   "tex": 256,
   "detail": 128,
   "stand_ins": {

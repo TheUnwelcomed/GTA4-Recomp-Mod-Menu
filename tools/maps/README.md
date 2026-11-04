@@ -165,6 +165,30 @@ which lists the part models as its own and writes `creatures.txt` with how
 many of each kind. The trainer places the body and turns the parts about
 their pivots as the creature swims or walks.
 
+Spots and a safehouse (v1.7.41, a set's `spots`): places the menu's Teleport
+page puts the player (the mod's coordinates, a heading, a label; `map.txt`
+`spot`), one of them perhaps the player's safehouse there (`door` and `bed`:
+`map.txt` `safehouse`): a house blip at its door while the set stands and
+the game's save menu when the player stands by its bed. The Keys' is the
+Scarface mansion: its front doors (the mod's `enterdoor` pair, outside on
+the gate's side) and the bed of `bedroomup` (the room's furniture is one
+model; the spot on the bed's open side).
+
+Textures by reference (v1.7.41): a shader cloned from a console sample names
+its textures by reference, whatever the sample did. A few of the export's
+samples embed theirs in the drawable (a lamp's glow, a gate's reflection
+map: class id `941A6300` where a reference has `2C926300`; a fragment's
+references `E4916300`), and v1.7.38-40 copied 32 bytes of one as the
+reference: an object the game never places, a null call binding it (Wake
+Island) or a fault placing it (the Keys' lamps, log 108).
+
+Where the game's world ends (v1.7.41): Wake Island's runway cell at
+x -2860..-2675 had its collision loaded and linked, and the game never
+collided with it, while the apron cell east of it (x -2712..) did (log 107).
+So the sets keep clear of about x -2700 (and, in case the east is the same,
++2700): Wake stands 500 m east of where the mod has it, the Keys 300 m west
+of where they stood (`to` in their settings).
+
 Names: the game registers an image's files by the first 24 characters of the
 name, the extension among them (`sub_825127C0`), so `mapset.py` keeps every
 model and texture dictionary name within 20 characters (a set can rename

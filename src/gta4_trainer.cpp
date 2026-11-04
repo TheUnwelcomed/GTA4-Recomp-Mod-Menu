@@ -246,6 +246,9 @@ std::array g_natives = {
     NativeEntry{"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS"}, NativeEntry{"TASK_WANDER_STANDARD"},
     // v1.7.39: the creatures (the sharks' bite).
     NativeEntry{"IS_CHAR_IN_WATER"}, NativeEntry{"GET_CHAR_HEALTH"},
+    // v1.7.40: the safehouse on a place (its blip, the game's save menu at its bed).
+    NativeEntry{"ADD_BLIP_FOR_CONTACT"}, NativeEntry{"CHANGE_BLIP_SPRITE"}, NativeEntry{"CHANGE_BLIP_DISPLAY"},
+    NativeEntry{"CHANGE_BLIP_PRIORITY"}, NativeEntry{"CHANGE_BLIP_NAME_FROM_ASCII"}, NativeEntry{"ACTIVATE_SAVE_MENU"},
 };
 std::mutex g_native_mutex;
 
@@ -962,6 +965,34 @@ constexpr std::array kLoadout = {
 constexpr std::array<std::string_view, 8> kWeathers = {
     "Extra sunny", "Sunny", "Sunny and windy", "Cloudy",
     "Rain",        "Drizzle", "Foggy",         "Lightning"};
+// The places' spots on the Teleport page (v1.7.40): each installed map
+// set's arrival, then its own spots (map.txt "spot"); the labels live here
+// for the menu's string views.
+struct PlaceSpot {
+  const gta4::addons::MapInfo* info = nullptr;
+  const gta4::addons::MapSpot* spot = nullptr;  // null: the arrival
+  std::string label;
+};
+const std::vector<PlaceSpot>& PlaceSpots() {
+  static std::vector<PlaceSpot> spots;
+  static std::once_flag once;
+  std::call_once(once, [] {
+    for (const auto& info : gta4::addons::InstalledMaps()) {
+      if (!info.installed)
+        continue;
+      // ("Oct 26, 1984 (Gator Keys)": the name in the brackets)
+      std::string place = info.label;
+      const size_t open = place.rfind('('), close = place.rfind(')');
+      if (open != std::string::npos && close != std::string::npos && close > open + 1)
+        place = place.substr(open + 1, close - open - 1);
+      spots.push_back({&info, nullptr, place + ": the arrival"});
+      for (const auto& sp : info.spots)
+        spots.push_back({&info, &sp, place + ": " + sp.label});
+    }
+  });
+  return spots;
+}
+
 struct TeleportChoice {
   std::string_view label;
   float x, y;
@@ -991,7 +1022,7 @@ enum class Action {
   kMoney, kHeal,
   kToggleVehicleGod, kRepair, kToggleWarpIn, kToggleGadgets, kToggleJet, kToggleJetExpert,
   kTogglePopupAuto, kToggleAnyRide, kToggleCarLights,
-  kSpawnVehicle, kTeleportWaypoint, kTeleportPreset, kSavePosition, kLoadPosition,
+  kSpawnVehicle, kTeleportWaypoint, kTeleportPreset, kTeleportPlace, kSavePosition, kLoadPosition,
   kHourUp, kHourDown, kMinuteUp, kMinuteDown, kTimeApply,
   kWeatherNext, kWeatherPrevious, kWeatherApply, kWeatherRelease,
   kGiveLoadout, kRemoveWeapons,
@@ -1270,6 +1301,11 @@ std::vector<Item> PageItems(const State& s) {
                        Action::kLoadPosition});
       for (int i = 0; i < int(kTeleports.size()); ++i)
         items.push_back({kTeleports[size_t(i)].label, Action::kTeleportPreset, i});
+      {
+        const auto& spots = PlaceSpots();
+        for (int i = 0; i < int(spots.size()); ++i)
+          items.push_back({spots[size_t(i)].label, Action::kTeleportPlace, i});
+      }
       break;
     case Page::kWorld:
       items = {{"Hour (left/right)", Action::kTimeApply},
@@ -1363,12 +1399,14 @@ const PassVehicle& PlayerVehicle(PPCContext& ctx, uint8_t* base, const GameConte
 // while its collision streams in (up to 8 seconds) and is put down once it
 // is. v1.7.10 and before guessed 60 m up when the waypoint's ground was not
 // loaded yet: the player fell from the sky, sometimes through the city.
+bool MapGuarding();  // (a place being stood under the player, v1.7.40)
 struct PendingTeleport {
   bool active = false;
   float x = 0, y = 0, from = 0;  // where, and the height the ground is looked for below
   float lowest = -1000.0f;       // ground lower than this is not loaded yet (a known height's)
   uint32_t car = 0;              // the vehicle moved along, or 0
   uint64_t until = 0;
+  std::optional<float> heading;  // faced once put down (a place's spot, v1.7.40)
 };
 PendingTeleport g_teleport;
 
@@ -1383,19 +1421,23 @@ std::optional<float> GroundBelow(PPCContext& ctx, uint8_t* base, float x, float 
 }
 
 void PlaceOnGround(PPCContext& ctx, uint8_t* base, const GameContext& game, uint32_t car, float x, float y,
-                   float gz) {
+                   float gz, std::optional<float> heading = std::nullopt) {
   if (car) {
     Invoke(ctx, base, "SET_CAR_COORDINATES", {car, Bits(x), Bits(y), Bits(gz + 1.0f)});
+    if (heading)
+      Invoke(ctx, base, "SET_CAR_HEADING", {car, Bits(*heading)});
     Invoke(ctx, base, "SET_CAR_ON_GROUND_PROPERLY", {car});
   } else {
     // (A metre over the ground, as the trainer's teleports have always put
     // the player: a short drop at most.)
     Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits(x), Bits(y), Bits(gz + 1.0f)});
+    if (heading)
+      Invoke(ctx, base, "SET_CHAR_HEADING", {game.ped, Bits(*heading)});
   }
 }
 
 void Teleport(PPCContext& ctx, uint8_t* base, const GameContext& game, float x, float y,
-              std::optional<float> z_hint, State& s) {
+              std::optional<float> z_hint, State& s, std::optional<float> heading = std::nullopt) {
   uint32_t car = 0;
   if (const auto v = CurrentVehicle(ctx, base, game))
     car = *v;
@@ -1409,8 +1451,8 @@ void Teleport(PPCContext& ctx, uint8_t* base, const GameContext& game, float x, 
   // (with a known height, ground more than 3 m under it is the sea or the
   // low-detail world: the real ground there has not loaded yet)
   const float lowest = z_hint ? *z_hint - 3.0f : -1000.0f;
-  if (const auto gz = GroundBelow(ctx, base, x, y, from); gz && *gz >= lowest) {
-    PlaceOnGround(ctx, base, game, car, x, y, *gz);
+  if (const auto gz = GroundBelow(ctx, base, x, y, from); gz && *gz >= lowest && !MapGuarding()) {
+    PlaceOnGround(ctx, base, game, car, x, y, *gz, heading);
     REXLOG_INFO("gta4-trainer: teleported to {:.1f}, {:.1f}, ground {:.1f}{}", x, y, *gz, car ? " (with the vehicle)" : "");
     Toast(s, "Teleported.");
     return;
@@ -1424,9 +1466,10 @@ void Teleport(PPCContext& ctx, uint8_t* base, const GameContext& game, float x, 
     Invoke(ctx, base, "SET_CHAR_COORDINATES", {game.ped, Bits(x), Bits(y), Bits(hold)});
     Invoke(ctx, base, "FREEZE_CHAR_POSITION", {game.ped, 1});
   }
-  g_teleport = PendingTeleport{true, x, y, from, lowest, car, NowMs() + 10000};
+  g_teleport = PendingTeleport{true, x, y, from, lowest, car, NowMs() + 10000, heading};
   REXLOG_INFO("gta4-trainer: teleport to {:.1f}, {:.1f}: waiting for the ground there to load", x, y);
-  Toast(s, "Teleporting: loading the area...", 8000);
+  if (!MapGuarding())
+    Toast(s, "Teleporting: loading the area...", 8000);
 }
 
 // Every frame while a teleport waits for its ground.
@@ -1434,6 +1477,10 @@ void TeleportTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
   auto& t = g_teleport;
   if (!t.active)
     return;
+  if (MapGuarding()) {  // (a place being stood under the spot: the ground is its, and comes with it)
+    t.until = NowMs() + 10000;
+    return;
+  }
   Invoke(ctx, base, "REQUEST_COLLISION_AT_POSN", {Bits(t.x), Bits(t.y), Bits(std::min(t.from, 60.0f))});
   auto gz = GroundBelow(ctx, base, t.x, t.y, t.from);
   if (gz && *gz < t.lowest)
@@ -1452,7 +1499,7 @@ void TeleportTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
     Invoke(ctx, base, "FREEZE_CHAR_POSITION", {game.ped, 0});
   t.active = false;
   if (gz) {
-    PlaceOnGround(ctx, base, game, t.car, t.x, t.y, *gz);
+    PlaceOnGround(ctx, base, game, t.car, t.x, t.y, *gz, t.heading);
     REXLOG_INFO("gta4-trainer: teleport landed, ground {:.1f}", *gz);
     Toast(s, "Teleported.");
   } else {
@@ -6409,6 +6456,15 @@ struct MapRun {
   float focus[3]{};
   uint64_t next_stream = 0;
   int wanted_pieces = 0, made_pieces = 0, stream_rounds = 0;
+  // The guard (v1.7.40): the place stood under a player held over it (a
+  // loaded game there, the menu's teleport to one of its spots).
+  bool guarding = false;
+  uint64_t guard_since = 0, guard_toast = 0;
+  int probe = 0, probe_misses = 0;  // standing pieces looked for in turn (a piece gone: the world rebuilt)
+  // Its safehouse (v1.7.40): the blip at its door; the bed's save point armed
+  // till stood on, armed again once left.
+  uint32_t house_blip = 0;
+  bool bed_armed = true, bed_near = false;
   // Whether any dictionary is in the store; whether every one that is has loaded.
   bool AnyDictionary() const {
     return std::any_of(dicts.begin(), dicts.end(), [](const MapDictionary& d) { return d.slot >= 0; });
@@ -6662,6 +6718,11 @@ void MapUnload(PPCContext& ctx, uint8_t* base, const char* why) {
       mdl.requested = false;
       ++let_go;
     }
+  if (g.house_blip) {
+    if (const auto e = Invoke(ctx, base, "DOES_BLIP_EXIST", {g.house_blip}); e && e->r0())
+      Invoke(ctx, base, "REMOVE_BLIP", {g.house_blip});
+    g.house_blip = 0;
+  }
   // (its collision dictionaries no longer kept: the store lets them go once
   // the pieces' references to them are gone, the models' links staying)
   const uint32_t module = BoundsModule(base);
@@ -6919,6 +6980,8 @@ bool MapRequest(PPCContext& ctx, uint8_t* base, const gta4::addons::MapInfo& inf
 // a report of what it waits for every few seconds.
 void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game);
 void MapStreamTick(PPCContext& ctx, uint8_t* base, const GameContext& game, uint64_t now);
+void MapProbe(PPCContext& ctx, uint8_t* base);
+void SafehouseTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now);
 void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
   auto& g = g_map;
   if (!g.info || now < g.next_check)
@@ -6931,7 +6994,11 @@ void MapTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
   if (g.check_at && now >= g.check_at)
     MapCheck(ctx, base, game);
   if (g.phase == 2) {
+    MapProbe(ctx, base);
+    if (!g.info)
+      return;  // (forgotten: the world was rebuilt)
     MapStreamTick(ctx, base, game, now);
+    SafehouseTick(ctx, base, game, s, now);
     return;
   }
   if (g.phase != 1 || g.loaded)
@@ -7105,6 +7172,251 @@ void MapStreamTick(PPCContext& ctx, uint8_t* base, const GameContext& game, uint
 // The place standing now, or none.
 const gta4::addons::MapInfo* MapStandingNow() { return g_map.phase == 2 ? g_map.info : nullptr; }
 
+// ---- the player on a place without it; a place's spots; its safehouse (v1.7.40) ----
+//
+// A game saved on a place (the mansion's bed) loads the player there with
+// nothing under him. The guard stands the place under a player held over
+// it: once a second, with no place requested and no trip under way, a
+// player well inside a place's area (and not flying over it) has it
+// requested and is moved to his own spot by Teleport, which holds him there
+// and waits for the ground, which comes with the place (TeleportTick waits
+// on MapGuarding). The menu's teleport to a place's spot takes the same
+// path. A loaded game is told from the player ped's handle changing, and a
+// standing piece gone, since the world is rebuilt both ways: what stood is
+// forgotten without deleting.
+bool MapGuarding() { return g_map.info && g_map.guarding && g_map.phase != 2; }
+
+void LifeForget();
+void MapForget(PPCContext& ctx, uint8_t* base, const char* why) {
+  auto& g = g_map;
+  if (g.info) {
+    // (its dictionaries no longer kept: the flag outlives the world)
+    const uint32_t module = BoundsModule(base);
+    for (const auto& d : g.dicts)
+      if (d.slot >= 0 && module < uint32_t(StreamModuleCount(base)))
+        CallGuest(ctx, base, kStreamUnkeep, uint32_t(d.slot), module);
+    REXLOG_INFO("gta4-trainer: map {} forgotten ({}): its {} pieces went with the world", g.info->name, why,
+                g.made_pieces);
+  }
+  g = MapRun{};
+  LifeForget();
+  g_teleport.active = false;
+}
+
+// One standing piece looked for each tick, in turn: one gone (and the next)
+// means the world was rebuilt under the place - a game loaded, or restarted.
+void MapProbe(PPCContext& ctx, uint8_t* base) {
+  auto& g = g_map;
+  if (g.pieces.empty())
+    return;
+  for (int tries = 0; tries < 8; ++tries) {
+    g.probe = (g.probe + 1) % int(g.pieces.size());
+    const auto& p = g.pieces[size_t(g.probe)];
+    if (!p.object)
+      continue;
+    const auto exists = Invoke(ctx, base, "DOES_OBJECT_EXIST", {p.object});
+    if (!exists)
+      return;
+    if (exists->r0()) {
+      g.probe_misses = 0;
+      return;
+    }
+    if (++g.probe_misses >= 2) {
+      MapForget(ctx, base, "a standing piece is gone, and the next: the world was rebuilt");
+      return;
+    }
+    return;
+  }
+}
+
+// A spot's point in the world (the arrival when none).
+std::array<float, 3> SpotPoint(const gta4::addons::MapInfo& info, const gta4::addons::MapSpot* spot) {
+  return spot ? MapPoint(info, spot->pos[0], spot->pos[1], spot->pos[2])
+              : MapPoint(info, info.arrive[0], info.arrive[1], info.arrive[2]);
+}
+
+// The place stood under a point and the player held there till it is: the
+// place requested (another standing let go), the time circuits' present its
+// date and the clock its hour, the player teleported to the point (held
+// still while the ground comes). Home for the time machine, when none is
+// known, is where the player was when he was in the city, or the airport.
+void StandPlaceUnder(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
+                     const gta4::addons::MapInfo& info, float x, float y, float z, std::optional<float> heading,
+                     const char* why) {
+  auto& g = g_map;
+  const std::array<float, 3> here{game.position[0], game.position[1], game.position[2]};
+  const auto* standing = MapStandingNow();
+  bool in_city = true;
+  for (const auto& m : gta4::addons::InstalledMaps())
+    if (m.installed && OnMap(m, here))
+      in_city = false;
+  if (!g_tm.have_home) {
+    if (in_city) {
+      for (int a = 0; a < 3; ++a)
+        g_tm.home[a] = here[size_t(a)];
+    } else {
+      g_tm.home[0] = 2188.4f;  // (in front of Francis International's terminal, the teleport's spot)
+      g_tm.home[1] = 638.8f;
+      g_tm.home[2] = 5.1f + kTmContact;
+    }
+    g_tm.home_q = QAxis(0, 0, 1, std::atan2(-game.forward[0], game.forward[1]));
+    g_tm.have_home = true;
+  }
+  if (standing != &info) {
+    MapRequest(ctx, base, info);  // (another place standing is let go first)
+    g.guarding = true;
+    g.guard_since = NowMs();
+    g.guard_toast = 0;
+    g_tm.present = TcdDate{info.date[0], info.date[1], info.date[2], info.date[3], info.date[4]};
+    Invoke(ctx, base, "SET_TIME_OF_DAY", {uint32_t(std::clamp(info.date[3], 0, 23)), uint32_t(std::clamp(info.date[4], 0, 59))});
+    REXLOG_INFO("gta4-trainer: {} stood under ({:.1f}, {:.1f}, {:.1f}): {}", info.name, x, y, z, why);
+    Toast(s, fmt::format("Standing {}...", info.label), 2500);
+  }
+  Teleport(ctx, base, game, x, y, z, s, heading);
+}
+
+// The menu: the player taken to a place's spot (the arrival road when none).
+void TeleportToPlace(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s,
+                     const gta4::addons::MapInfo& info, const gta4::addons::MapSpot* spot) {
+  if (!info.installed) {
+    Toast(s, "That place isn't installed in this launch.", 2500);
+    return;
+  }
+  if (g_tm.phase != 0) {
+    Toast(s, "Not in the middle of a trip.", 2000);
+    return;
+  }
+  const auto at = SpotPoint(info, spot);
+  StandPlaceUnder(ctx, base, game, s, info, at[0], at[1], at[2], spot ? spot->heading : info.arrive[3],
+                  spot ? "the menu's teleport to its spot" : "the menu's teleport to its arrival");
+}
+
+// Once a second: the guard while a place is stood (placed when loaded; a
+// word now and then; given up after the trip's limit), and a player on a
+// place with none requested (a loaded game there) given it.
+void MapGuard(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
+  auto& g = g_map;
+  if (g.info) {
+    if (!g.guarding)
+      return;
+    if (g.phase == 2) {
+      g.guarding = false;  // (it stands: the teleport puts the player down on it)
+      return;
+    }
+    if (g.loaded && MapPlace(ctx, base)) {
+      g.guarding = false;
+      REXLOG_INFO("gta4-trainer: map {} stood after {} ms (the guard)", g.info->name, now - g.guard_since);
+      return;
+    }
+    if (now - g.guard_since > kMapLoadLimitMs) {
+      REXLOG_WARN("gta4-trainer: map {} not ready after {} ms ({} of {} models); the player taken home instead",
+                  g.info->name, now - g.guard_since, g.loaded_count, g.known_count);
+      g.guarding = false;
+      g_teleport.active = false;
+      const std::string label = g.info->label;
+      MapUnload(ctx, base, "not ready in time under the player");
+      Toast(s, label + " didn't load in time: back to the city.", 3000);
+      if (g_tm.have_home)
+        Teleport(ctx, base, game, g_tm.home[0], g_tm.home[1], std::nullopt, s);
+      else
+        Teleport(ctx, base, game, 2188.4f, 638.8f, 5.1f, s);
+      return;
+    }
+    if (now >= g.guard_toast) {
+      g.guard_toast = now + 1500;
+      const bool models_in = g.known_count > 0 && g.loaded_count == g.known_count;
+      Toast(s, fmt::format("Standing {}... ({})", g.info->label,
+                           models_in && !g.DictionariesIn() ? std::string("its ground loading")
+                                                            : fmt::format("{} of {} loaded", g.loaded_count, g.known_count)),
+            1600);
+    }
+    return;
+  }
+  // nothing requested: a player on a place is given it (two looks a second apart)
+  static const gta4::addons::MapInfo* s_candidate = nullptr;
+  static int s_hits = 0;
+  if (g_tm.phase != 0 || g_teleport.active || game.position[2] > 80.0f) {
+    s_hits = 0;
+    return;
+  }
+  const std::array<float, 3> here{game.position[0], game.position[1], game.position[2]};
+  const gta4::addons::MapInfo* on = nullptr;
+  for (const auto& info : gta4::addons::InstalledMaps())
+    if (info.installed && OnMap(info, here, -50.0f))
+      on = &info;
+  if (!on) {
+    s_hits = 0;
+    return;
+  }
+  if (on != s_candidate) {
+    s_candidate = on;
+    s_hits = 0;
+  }
+  if (++s_hits < 2)
+    return;
+  s_hits = 0;
+  REXLOG_INFO("gta4-trainer: the player is on {} at ({:.1f}, {:.1f}, {:.1f}) with nothing of it standing (a loaded "
+              "game there?)",
+              on->name, here[0], here[1], here[2]);
+  StandPlaceUnder(ctx, base, game, s, *on, here[0], here[1], here[2], std::nullopt, "the player was found on it");
+}
+
+// The place's safehouse (its first spot with one): a house blip at its door
+// while the place stands (the game's own safehouses' kind: ADD_BLIP_FOR_CONTACT,
+// sprite 29, as main.sco adds them), and its bed a save point: standing by
+// it on foot opens the game's save menu, once, till the player leaves it.
+void SafehouseTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint64_t now) {
+  auto& g = g_map;
+  if (!g.info || g.phase != 2)
+    return;
+  const gta4::addons::MapSpot* house = nullptr;
+  for (const auto& sp : g.info->spots)
+    if (sp.safehouse) {
+      house = &sp;
+      break;
+    }
+  if (!house)
+    return;
+  if (!g.house_blip && NativeKnown("ADD_BLIP_FOR_CONTACT")) {
+    const auto door = MapPoint(*g.info, house->door[0], house->door[1], house->door[2]);
+    if (const auto b = Invoke(ctx, base, "ADD_BLIP_FOR_CONTACT", {Bits(door[0]), Bits(door[1]), Bits(door[2]), 0}, 3);
+        b && b->r0()) {
+      g.house_blip = b->r0();
+      Invoke(ctx, base, "CHANGE_BLIP_SPRITE", {g.house_blip, 29});
+      Invoke(ctx, base, "CHANGE_BLIP_DISPLAY", {g.house_blip, 2});
+      Invoke(ctx, base, "CHANGE_BLIP_PRIORITY", {g.house_blip, 0});
+      if (NativeKnown("CHANGE_BLIP_NAME_FROM_ASCII"))
+        Invoke(ctx, base, "CHANGE_BLIP_NAME_FROM_ASCII", {g.house_blip, 0}, -1, 0, 1, 1, house->label);
+      REXLOG_INFO("gta4-trainer: {}: the safehouse blip {:08X} at ({:.1f}, {:.1f}, {:.1f}), its bed at ({:.1f}, {:.1f}, {:.1f})",
+                  g.info->name, g.house_blip, door[0], door[1], door[2], house->bed[0] + g.info->shift[0],
+                  house->bed[1] + g.info->shift[1], house->bed[2] + MapDz(*g.info));
+    }
+  }
+  const auto bed = MapPoint(*g.info, house->bed[0], house->bed[1], house->bed[2]);
+  const float dx = game.position[0] - bed[0], dy = game.position[1] - bed[1], dz = game.position[2] - bed[2];
+  const float d = std::sqrt(dx * dx + dy * dy);
+  if (d < 6.0f && std::fabs(dz) < 3.0f) {
+    if (!g.bed_near) {
+      g.bed_near = true;
+      Toast(s, "Your bed: stand by it to save the game.", 3000);
+    }
+  } else if (d > 8.0f) {
+    g.bed_near = false;
+  }
+  if (d > 3.0f) {
+    g.bed_armed = true;
+    return;
+  }
+  if (!g.bed_armed || d > 1.4f || std::fabs(dz) > 1.6f || !NativeKnown("ACTIVATE_SAVE_MENU"))
+    return;
+  if (const auto in_car = Invoke(ctx, base, "IS_CHAR_IN_ANY_CAR", {game.ped}); in_car && in_car->r0())
+    return;
+  g.bed_armed = false;
+  REXLOG_INFO("gta4-trainer: {}: the player at the bed ({:.1f} m): the save menu", g.info->name, d);
+  Invoke(ctx, base, "ACTIVATE_SAVE_MENU", {});
+  (void)now;
+}
+
 // A look at the pieces a few seconds after an arrival (v1.7.32; v1.7.31's
 // island showed its buildings but not its terrain): how many still exist and
 // are drawn, those near the player not drawn, and the ground the game finds
@@ -7160,6 +7472,48 @@ void MapCheck(PPCContext& ctx, uint8_t* base, const GameContext& game) {
                 links.linked, links.models, links.archetypes);
   }
   REXLOG_INFO("gta4-trainer:   the game's pools: {}", DescribePools(base));
+  // Each standing piece of the place's own collision asked for ground at
+  // its origin (and, failing that, 40 m to each side), from 80 m up: which
+  // of them the game collides with (v1.7.40: Wake Island's runway cell had
+  // none under the arrival, its neighbour had, log 107).
+  {
+    int standing = 0, with_ground = 0, stock_standing = 0, stock_hit = 0;
+    std::string none, stock_none;
+    for (const auto& p : g.pieces) {
+      if (!p.collision || !p.object)
+        continue;
+      if (p.stock) {  // (the game's own prop: whatever its bound puts under a probe at its origin)
+        ++stock_standing;
+        if (GroundZ(ctx, base, p.pos[0], p.pos[1], p.pos[2] + 30.0f).has_value())
+          ++stock_hit;
+        else if (stock_none.size() < 300)
+          stock_none += fmt::format("{}{} ({:.0f}, {:.0f})", stock_none.empty() ? "" : ", ",
+                                    p.model >= 0 ? g.models[size_t(p.model)].name : std::string("?"), p.pos[0], p.pos[1]);
+        continue;
+      }
+      ++standing;
+      bool found = GroundZ(ctx, base, p.pos[0], p.pos[1], p.pos[2] + 80.0f).has_value();
+      int sides = 0;
+      if (!found) {
+        static constexpr float kSides[4][2] = {{40.0f, 0.0f}, {-40.0f, 0.0f}, {0.0f, 40.0f}, {0.0f, -40.0f}};
+        for (const auto& d : kSides)
+          sides += GroundZ(ctx, base, p.pos[0] + d[0], p.pos[1] + d[1], p.pos[2] + 80.0f).has_value();
+      }
+      if (found || sides)
+        ++with_ground;
+      else if (none.size() < 600)
+        none += fmt::format("{}{} ({:.0f}, {:.0f})", none.empty() ? "" : ", ",
+                            p.model >= 0 ? g.models[size_t(p.model)].name : std::string("?"), p.pos[0], p.pos[1]);
+    }
+    if (standing)
+      REXLOG_INFO("gta4-trainer:   the place's own collision: {} pieces standing, {} with ground under them (at the "
+                  "origin or 40 m to a side); none under: {}",
+                  standing, with_ground, none.empty() ? std::string("-") : none);
+    if (stock_standing)
+      REXLOG_INFO("gta4-trainer:   the game's own props: {} standing, {} with something under a probe at their origin; "
+                  "nothing under: {}",
+                  stock_standing, stock_hit, stock_none.empty() ? std::string("-") : stock_none);
+  }
   // The model under the arrival (one with collision) and one without, as the
   // game holds them: its model info's first 24 words and the streaming
   // entries it needs (its collision dictionary among them or not), beside a
@@ -7325,6 +7679,17 @@ void LifeAmbience(bool on) {
     g_island_synth.SetTarget(0.0f, gta4::island::Ambience::kKeys);
   }
 #endif
+}
+// The world rebuilt under the life (a game loaded): forgotten, nothing
+// deleted - its vehicles, people and creatures went with the world.
+void LifeForget() {
+  auto& L = g_life;
+  if (!L.info)
+    return;
+  REXLOG_INFO("gta4-trainer: life of {} forgotten: its {} vehicles, {} people and {} creatures went with the world",
+              L.info->name, L.made_vehicles, L.peds.size(), L.creatures.size());
+  LifeAmbience(false);
+  L = MapLife{};
 }
 // (once a pass: the voice stopped once its fade is done)
 void LifeSoundTick() {
@@ -9586,6 +9951,12 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       Teleport(ctx, base, game, t.x, t.y, t.z != 0.0f ? std::optional<float>(t.z) : std::nullopt, s);
       break;
     }
+    case Action::kTeleportPlace: {
+      const auto& spots = PlaceSpots();
+      if (item.index >= 0 && item.index < int(spots.size()))
+        TeleportToPlace(ctx, base, game, s, *spots[size_t(item.index)].info, spots[size_t(item.index)].spot);
+      break;
+    }
     case Action::kSavePosition:
       std::copy(std::begin(game.position), std::end(game.position), std::begin(s.saved));
       s.have_saved = true;
@@ -9796,6 +10167,10 @@ void ObserveNativeRegistration(PPCContext& context, uint8_t* base) {
     for (auto& entry : g_natives)
       if (entry.name == name) {
         entry.handler = context.r4.u32;  // the game's own handler
+        // (v1.7.40: the world's collision probes, to read offline - where
+        // the physics level and its extents are, for Wake Island's runway)
+        if (name == "GET_GROUND_Z_FOR_3D_COORD" || name == "REQUEST_COLLISION_AT_POSN" || name == "CREATE_OBJECT_NO_OFFSET")
+          REXLOG_INFO("gta4-trainer: native {} is the game's {:08X}", name, context.r4.u32);
         break;
       }
   }
@@ -10294,11 +10669,13 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool seat_due = (g_have_lazar || g_have_batmobile || g_have_f16 || g_have_batwing) && now >= s_next_seat_look;
   const bool map_due = g_map.info != nullptr && now >= g_map.next_check;
   const bool creatures_due = !g_life.creatures.empty();
+  static uint64_t s_next_guard = 0;
+  const bool guard_due = now >= s_next_guard;  // (v1.7.40: a place stood under the player)
   if (g_pending.empty() && !god_due && !wanted_due && !car_god_due && !gadgets_due && !canopy_due && !heat_due &&
       !jet_canopy_due && !batwing_canopy_due && !complete_due && !perf_due && !teleport_due && !any_engine_due &&
       s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
-      !tm_due && !seat_due && !map_due && !creatures_due && g_addons_probed)
+      !tm_due && !seat_due && !map_due && !creatures_due && !guard_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -10322,6 +10699,14 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   }
   ++g_pass;
   gta4::addons::MarkLaunchHealthy();
+  // The player ped is another one: the world was rebuilt (a game loaded or
+  // started over), and what stood on it went with it (v1.7.40).
+  static uint32_t s_last_ped = 0;
+  if (game.ped != s_last_ped) {
+    if (s_last_ped && (g_map.info || g_life.info))
+      MapForget(ctx, base, "the player ped changed: a game loaded or started over");
+    s_last_ped = game.ped;
+  }
   if (!g_addons_probed) {
     g_addons_probed = true;
     if (gta4::addons::ShadowsSkippedThisLaunch())
@@ -10386,6 +10771,10 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   if (map_due) {
     MapTick(ctx, base, game, s, now);
     LifeTick(ctx, base, game, s, now);
+  }
+  if (guard_due) {
+    s_next_guard = now + (g_map.guarding ? 250 : 1000);
+    MapGuard(ctx, base, game, s, now);
   }
   if (creatures_due)
     LifeCreatureFrame(ctx, base, game, now);

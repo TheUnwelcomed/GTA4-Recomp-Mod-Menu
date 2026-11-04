@@ -50,10 +50,8 @@
     -432.0,
     -1421.0
   ],
-  "to": [
-    2250.0,
-    -2300.0
-  ],
+  "to_notes": "v1.7.41: 300 m further west than before (x 1425..2654 now): Wake Island's cells beyond about x -2700 had no collision (log 107), and if the world's edge is the same on the east the mansion (x 2832..2954 before) would have had none",
+  "to": [1950.0, -2300.0],
   "tex": 256,
   "detail": 128,
   "tex_of": [
@@ -136,6 +134,12 @@
     "below_sea": 3.0,
     "notes": "v1.7.32: models over 100 m in radius (the terrain, roads, rocks, rails, lamps, small bits) cut into tiles of 150 m; their render triangles wholly over 3 m under the sea dropped (as the collision's are: the few huge deep-slope triangles went with them)"
   },
+  "spots": [
+    {"name": "mansion", "label": "Scarface mansion", "stand": [118.9, -1563.6, 14.6, 208.6],
+     "door": [120.6, -1566.7, 14.6], "bed": [165.0, -1595.6, 17.4]},
+    {"name": "bennys", "label": "Benny's", "stand": [-247.5, -1376.0, 7.5, 0.0]}
+  ],
+  "spots_notes": "v1.7.40: where the menu's Teleport page puts the player (the mod's coordinates, a heading); the mansion is the player's safehouse: a house blip at its entrance doors (enterdoor, the mod's, their outside the gate's side), a save point by the bed of the upstairs bedroom (bedroomup: the bed at (166.7, -1593.3), the spot on its open side) - stand there and the game's save menu opens",
   "stream": 1000,
   "stream_notes": "v1.7.38: with the mansion the set is 98 MiB; the pieces within 1 km of the player stand, the far keys' go while there",
   "plant": [

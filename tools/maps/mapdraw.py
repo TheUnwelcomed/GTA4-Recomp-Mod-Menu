@@ -413,11 +413,13 @@ class MapDrawable(batconv.Converter):
         self.t_texobj = None
         for s in d['shader_group']['shaders']:
             for p in batconv.shader_params(t, s['off']):
-                if p['type'] == 0 and p['value'] is not None:
+                if p['type'] == 0 and p['value'] is not None and \
+                        struct.unpack_from('>I', t.virt, p['value'])[0] == batconv.TEXTURE_REFERENCE_ID:
                     self.t_texobj = t.virt[p['value']:p['value'] + 32]
                     break
             if self.t_texobj:
                 break
+        assert self.t_texobj, 'the template names no texture by reference'
         assert struct.unpack_from('>I', self.t_vb, 28)[0] == VP | (g0['vb_off'] + 0x20)
         assert struct.unpack_from('>I', self.t_ib, 12)[0] == VP | (g0['ib_off'] + 0x10)
 
@@ -639,10 +641,12 @@ def main():
         open(os.path.join(out_dir, name + '.xdr.bin'), 'wb').write(body)
         flags_out.write('%s.xdr %d 0x%08X\n' % (name, XDR_TYPE, flags))
         fallbacks = sorted({'%s as %s' % (a, b.split(' ')[0]) for a, b in conv.shader_report if a not in conv.t_shaders})
-        print('%s: %d bytes, flags %08X, textures %d, %s%s%s' % (
+        embedded = getattr(conv, 'embedded_replaced', 0)
+        print('%s: %d bytes, flags %08X, textures %d, %s%s%s%s' % (
             name, len(body), flags, len(conv.texture_names), verdict,
             ('; shaders standing in: ' + ', '.join(fallbacks)) if fallbacks else '',
-            ('; cut out for their texture: ' + ', '.join(conv.auto_cutouts)) if conv.auto_cutouts else ''))
+            ('; cut out for their texture: ' + ', '.join(conv.auto_cutouts)) if conv.auto_cutouts else '',
+            ('; %d sample textures embedded, named by reference instead' % embedded) if embedded else ''))
 
 
 

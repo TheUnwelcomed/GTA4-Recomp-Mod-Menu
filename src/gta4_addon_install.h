@@ -73,6 +73,18 @@ struct CreatureKind {
   int count = 0;           // how many the place keeps about the player
   std::vector<CreaturePart> parts;
 };
+// A spot on a place the menu teleports to (v1.7.40, map.txt "spot": the
+// mod's coordinates, a heading in degrees, a label); one may be the player's
+// safehouse there (map.txt "safehouse": a blip at its door, a save point at
+// its bed - the Scarface mansion on the Keys).
+struct MapSpot {
+  std::string name, label;
+  float pos[3]{};
+  float heading = 0;
+  bool safehouse = false;
+  float door[3]{};
+  float bed[3]{};
+};
 struct MapInfo {
   std::string name, label;
   int date[5]{};             // year, month, day, hour, minute
@@ -98,6 +110,7 @@ struct MapInfo {
   // streaming memory (Wake Island's 1,600 pieces filled it).
   float stream = 0;
   std::vector<CreatureKind> creatures;
+  std::vector<MapSpot> spots;
   std::filesystem::path dir;  // its folder (ground.bin, the trainer's own ground grid, is read from it)
   bool installed = false;    // in vehicles.img and gtxd.ide this launch
 };

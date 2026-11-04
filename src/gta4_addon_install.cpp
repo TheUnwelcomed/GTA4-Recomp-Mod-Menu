@@ -30,6 +30,7 @@
 #include <cstring>
 #include <fstream>
 #include <ostream>
+#include <sstream>
 #include <functional>
 #include <optional>
 #include <string>
@@ -1793,6 +1794,30 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
         info.ambience = Lower(value);
       else if (key == "stream")
         std::sscanf(value.c_str(), "%f", &info.stream);
+      else if (key == "spot" || key == "safehouse") {
+        // spot <name> <x> <y> <z> <heading> <label...>
+        // safehouse <name> <door x y z> <bed x y z>  (the spot of that name's)
+        std::istringstream in(value);
+        std::string name;
+        in >> name;
+        name = Lower(name);
+        auto it = std::find_if(info.spots.begin(), info.spots.end(), [&](const MapSpot& sp) { return sp.name == name; });
+        if (it == info.spots.end()) {
+          info.spots.push_back(MapSpot{});
+          it = info.spots.end() - 1;
+          it->name = it->label = name;
+        }
+        if (key == "spot") {
+          in >> it->pos[0] >> it->pos[1] >> it->pos[2] >> it->heading;
+          std::string label;
+          std::getline(in, label);
+          if (!Trimmed(label).empty())
+            it->label = Trimmed(label);
+        } else {
+          in >> it->door[0] >> it->door[1] >> it->door[2] >> it->bed[0] >> it->bed[1] >> it->bed[2];
+          it->safehouse = bool(in);
+        }
+      }
     }
     // (the place's creatures: optional, creatures.txt)
     TextLines creatures;
@@ -1968,6 +1993,13 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
     for (const auto& k : info.creatures)
       REXLOG_INFO("gta4-addons: map set {}: creature {} ({}, {:.1f} m, {} about): {} parts", info.name, k.name, k.kind,
                   k.length, k.count, k.parts.size());
+    for (const auto& sp : info.spots)
+      REXLOG_INFO("gta4-addons: map set {}: spot {} \"{}\" at ({:.1f}, {:.1f}, {:.1f}) heading {:.0f}{}", info.name,
+                  sp.name, sp.label, sp.pos[0], sp.pos[1], sp.pos[2], sp.heading,
+                  sp.safehouse ? fmt::format(", the safehouse: its door at ({:.1f}, {:.1f}, {:.1f}), its bed at "
+                                             "({:.1f}, {:.1f}, {:.1f})",
+                                             sp.door[0], sp.door[1], sp.door[2], sp.bed[0], sp.bed[1], sp.bed[2])
+                               : std::string());
     out.push_back(std::move(m));
   }
   return out;
