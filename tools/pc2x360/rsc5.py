@@ -35,7 +35,15 @@ class Resource:
         raw = open(path, 'rb').read()
         magic, rtype, flags = struct.unpack_from('<III', raw, 0)
         assert magic == RSC_MAGIC, path
-        return cls(zlib.decompress(raw[12:]), flags, False, rtype, path)
+        try:
+            body = zlib.decompress(raw[12:])
+        except zlib.error:
+            # (a mod's file whose stream ends short of its checksum - the Snow
+            # Mod's gtxd.img entries, v1.7.45: taken as far as it goes, which
+            # must cover both segments)
+            body = zlib.decompressobj().decompress(raw[12:])
+            assert len(body) >= sum(seg_sizes(flags)), '%s: truncated' % path
+        return cls(body, flags, False, rtype, path)
 
     @classmethod
     def x360(cls, rsc_path, body_path):

@@ -57,6 +57,22 @@ def read_toc(f, key):
     return items
 
 
+def extract(path, key, out, wanted=()):
+    """Every item (or the named ones) into `out`; returns their paths."""
+    wanted = {n.lower() for n in wanted}
+    os.makedirs(out, exist_ok=True)
+    done = []
+    with open(path, 'rb') as f:
+        for it in read_toc(f, key):
+            if wanted and it['name'].lower() not in wanted:
+                continue
+            f.seek(it['offset'])
+            dst = os.path.join(out, os.path.basename(it['name']))
+            open(dst, 'wb').write(f.read(it['size']))
+            done.append(dst)
+    return done
+
+
 def main():
     path, key_path, cmd = sys.argv[1:4]
     key = open(key_path, 'rb').read()

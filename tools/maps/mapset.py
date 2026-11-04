@@ -1157,7 +1157,11 @@ def main():
         f.write('name %s\nlabel %s\ndate %s\n' % (cfg['name'], cfg['label'], ' '.join(str(v) for v in cfg['date'])))
         f.write('shift %.1f %.1f\nsea %.2f\n' % (cfg['to'][0] - cfg['from'][0], cfg['to'][1] - cfg['from'][1], cfg['sea']))
         f.write('arrive %.2f %.2f %.2f %.1f %.0f\n' % tuple(arrive))
-        f.write('area %.1f %.1f %.1f %.1f\n' % (lo[0], lo[1], hi[0], hi[1]))
+        if keep:  # (the kept disc's box, not the whole mod's)
+            f.write('area %.1f %.1f %.1f %.1f\n' % (float(keep[0]) - float(keep[2]), float(keep[1]) - float(keep[2]),
+                                                   float(keep[0]) + float(keep[2]), float(keep[1]) + float(keep[2])))
+        else:
+            f.write('area %.1f %.1f %.1f %.1f\n' % (lo[0], lo[1], hi[0], hi[1]))
         f.write('pieces %d\n' % sum(count.values()))
         f.write('prefix %s\n' % prefix)  # (the installer drops files with it this set no longer has)
         f.write('bounds %s\n' % ' '.join(dict_names))  # (the trainer asks for them with the models)

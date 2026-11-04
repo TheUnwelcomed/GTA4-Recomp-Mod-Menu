@@ -208,7 +208,7 @@ network session.
 
 ## Changes
 
-- **v1.7.44** (in progress): **the Batman Beyond Batmobile** flies (above:
+- **v1.7.44**: **the Batman Beyond Batmobile** flies (above:
   `BeyondTick`, the flight as the Part II DeLorean's `Hover` with its own
   state, the canopy through `Canopy` with Y held back until the car has
   settled, the missiles through `LaunchRocket` with the launcher's point
