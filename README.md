@@ -213,7 +213,9 @@ network session.
   state, the canopy through `Canopy` with Y held back until the car has
   settled, the missiles through `LaunchRocket` with the launcher's point
   and sound as parameters, the summon as an autopilot to a spot beside the
-  player; `addons/beyond`). **The Dodge Challenger SRT Hellcat**
+  player; `addons/beyond`; a panel on screen in it: speed, height, the
+  boost, the cloak, the missile, and INCOMING with the distance while it
+  comes). **The Dodge Challenger SRT Hellcat**
   (`addons/hellcat`): a glTF reader (`tools/car/gltf_read.py`) and a
   builder (`gltf_car.py`, `specs/hellcat.json`) that writes a Sketchfab
   model as a PC vehicle - the model's axes and scale set from its wheels'

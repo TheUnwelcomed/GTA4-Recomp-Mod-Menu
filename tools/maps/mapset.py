@@ -396,8 +396,9 @@ def best_runs(hm, lo, cell, sea, width=6.0, top=6):
     h, w = hm.shape
     found = []
     half = int(round(width / 2 / cell))
-    for sy in range(0, h, 3):
-        for sx in range(0, w, 3):
+    stride = max(3, max(h, w) // 500)  # (a big map: coarser starts)
+    for sy in range(0, h, stride):
+        for sx in range(0, w, stride):
             z0 = hm[sy, sx]
             if not np.isfinite(z0) or z0 < sea + 0.8:
                 continue
@@ -425,6 +426,8 @@ def best_runs(hm, lo, cell, sea, width=6.0, top=6):
                         break
                     prev = zc
                     length = step
+                    if length * cell > 400:  # (long enough: a runway)
+                        break
                 if length * cell >= 60:
                     found.append((length * cell, lo[0] + sx * cell, lo[1] + sy * cell, float(z0), a))
     found.sort(reverse=True)
@@ -1140,11 +1143,15 @@ def main():
             count['carriers'] += 1
     print('pieces: %s' % ', '.join('%d %s' % (n, k) for k, n in sorted(count.items())))
     hm, hlo, cell = heights or height_map(list(piece_files.values()), keep=keep)
-    runs = best_runs(hm, hlo, cell, cfg['sea'])
-    print('arrival runs (length m, x, y, z, heading deg):')
-    for r in runs:
-        print('  %.0f  %.1f %.1f %.1f  %.0f' % (r[0], r[1], r[2], r[3], math.degrees(r[4])))
-    arrive = cfg.get('arrive') or [runs[0][1], runs[0][2], runs[0][3], math.degrees(runs[0][4]), runs[0][0]]
+    print('height map: %d x %d cells of %.0f m from (%.0f, %.0f)' % (hm.shape[1], hm.shape[0], cell, hlo[0], hlo[1]))
+    if cfg.get('arrive'):
+        arrive = cfg['arrive']  # (the set's own: no search for a run - a 2.5 km disc at 2 m took hours)
+    else:
+        runs = best_runs(hm, hlo, cell, cfg['sea'])
+        print('arrival runs (length m, x, y, z, heading deg):')
+        for r in runs:
+            print('  %.0f  %.1f %.1f %.1f  %.0f' % (r[0], r[1], r[2], r[3], math.degrees(r[4])))
+        arrive = [runs[0][1], runs[0][2], runs[0][3], math.degrees(runs[0][4]), runs[0][0]]
     life = cfg.get('life', {})
     with open(os.path.join(out, 'map.txt'), 'w') as f:
         f.write('name %s\nlabel %s\ndate %s\n' % (cfg['name'], cfg['label'], ' '.join(str(v) for v in cfg['date'])))

@@ -223,7 +223,7 @@ constexpr Physical kHellcatEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0, 
                                   262.0f, 1.5f, 0.75f, 2.7f, 0.55f, -0.25f, 0.25f, -0.3f, 0.1f,
                                   700.0f, 85.0f, 0.4f, 1.3f, 0.4f, 0.04f, 0.3f, 0.2f, 160.0f,
                                   0.1f, 2000.0f, 0.3f, 0.03f, 0.0f, 0.0f, 1.45f,
-                                  0.0f, 0.0f, 0.0f, 0.0f, 1.1f, 7.08f};
+                                  0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 7.08f};
 constexpr Character kDeimos{.idle_rpm = 950.0f, .limit_rpm = 7700.0f, .pops = 8.0f, .flare = 2.0f,
                             .physical = &kDeimosEngine};
 constexpr Character kHellcat{.idle_rpm = 700.0f, .limit_rpm = 6200.0f, .pops = 7.0f, .flare = 1.8f,
@@ -860,10 +860,10 @@ class EngineSynth {
     if (p.blower > 0.0f && running_ && !cranking) {
       const float f = rpm_real / 60.0f * p.blower_per;
       blower_ph_ = Wrap(blower_ph_ + f * dt);
-      const float amp = p.blower * (0.2f + 0.8f * load) * (0.25f + 0.75f * r) * 0.01f;
+      const float amp = p.blower * (0.35f + 0.65f * load) * (0.15f + 0.85f * r) * 0.01f;
       const float ph = blower_ph_ * 6.2831853f;
-      mech += (std::sin(ph) * 0.5f + std::sin(2.0f * ph) * 0.35f + std::sin(3.0f * ph) * 0.22f +
-               std::sin(4.0f * ph) * 0.12f) * amp;
+      mech += (std::sin(ph) * 0.35f + std::sin(2.0f * ph) * 0.45f + std::sin(3.0f * ph) * 0.3f +
+               std::sin(4.0f * ph) * 0.15f) * amp;
       mech += blower_bp_.Bandpass(Noise(), 3.14159265f * std::min(2.0f * f, 6000.0f) / kRate, 0.25f) * amp * 1.5f *
               load;
     }

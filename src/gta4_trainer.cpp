@@ -9094,6 +9094,23 @@ struct BeyondState {
   int log = 0, fly_log = 0, floor_log = 0, summon_log = 0;
 };
 BeyondState g_beyond;
+// What the screen shows in it (and while it comes when summoned), for the
+// overlay: a small red-on-black panel where the DeLorean's TCD sits.
+struct BeyondHudModel {
+  bool visible = false, cloaked = false, missile_ready = true, summoning = false;
+  int kmh = 0, height = 0, dist = 0, reload_s = 0;
+  float boost = 0.0f;
+};
+std::mutex g_beyond_hud_mutex;
+BeyondHudModel g_beyond_hud;
+std::atomic<bool> g_beyond_hud_active{false};
+void PublishBeyondHud(const BeyondHudModel& b) {
+  {
+    std::lock_guard lock(g_beyond_hud_mutex);
+    g_beyond_hud = b;
+  }
+  g_beyond_hud_active.store(b.visible, std::memory_order_relaxed);
+}
 constexpr float kBeyondClear = 0.9f;                            // its origin over the ground, hovering
 constexpr float kBeyondCruise = 60.0f, kBeyondBoostSpeed = 95.0f;  // m/s
 constexpr float kBeyondClimb = 12.0f;                           // m/s on R2 / L2
@@ -9482,6 +9499,12 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
       Invoke(ctx, base, "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(kRocketModel)});
       m.models_requested = false;
     }
+    BeyondHudModel hud;
+    hud.visible = hud.summoning = m.summoning && alive;
+    hud.dist = int(dist + 0.5f);
+    hud.kmh = int(std::fabs(m.fwd) * 3.6f + 0.5f);
+    hud.height = int(std::max(m.altitude, 0.0f) + 0.5f);
+    PublishBeyondHud(hud);
     return 0;
   }
 
@@ -9580,6 +9603,17 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
   BeyondFlames(ctx, base, m.car, !m.cloaked && (m.boost > 0.3f || std::fabs(m.fwd) > 35.0f));
   g_beyond_synth.SetListener(false, 1.0f, 0.0f);
   g_beyond_synth.SetTarget(m.spool, std::fabs(m.fwd), m.boost, 0.5f);
+  {
+    BeyondHudModel hud;
+    hud.visible = true;
+    hud.cloaked = m.cloaked;
+    hud.missile_ready = now >= m.rocket_ready;
+    hud.reload_s = hud.missile_ready ? 0 : int((m.rocket_ready - now + 999) / 1000);
+    hud.kmh = int(std::fabs(m.fwd) * 3.6f + 0.5f);
+    hud.height = int(std::max(m.altitude < 90.0f ? m.altitude : 0.0f, 0.0f) + 0.5f);
+    hud.boost = m.boost;
+    PublishBeyondHud(hud);
+  }
   if (m.y_taken)
     keep |= X_INPUT_GAMEPAD_Y;
   return keep;
@@ -11982,6 +12016,79 @@ void DrawJetHud(ImGuiIO& io) {
   }
 }
 
+// The Beyond Batmobile's panel (v1.7.44): speed and height in red digits, the
+// boost's bar, the cloak's lamp, the missile's; "INCOMING" with the distance
+// while it flies to the player.
+void DrawBeyondHud(ImGuiIO& io) {
+  BeyondHudModel b;
+  {
+    std::lock_guard lock(g_beyond_hud_mutex);
+    b = g_beyond_hud;
+  }
+  if (!b.visible)
+    return;
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  ImFont* font = ImGui::GetFont();
+  const float scale = std::max(0.75f, io.DisplaySize.y / 1080.0f);
+  const float h = 24.0f * scale, small = 11.0f * scale, pad = h * 0.5f, dw = h * 0.72f;
+  const float panel_w = h * 10.0f, panel_h = h * 3.9f;
+  const ImVec2 o(io.DisplaySize.x - panel_w - 36.0f * scale, io.DisplaySize.y - panel_h - 40.0f * scale);
+  const ImU32 red = IM_COL32(255, 38, 28, 255), red_off = IM_COL32(255, 38, 28, 26), glow = IM_COL32(255, 38, 28, 55);
+  const ImU32 label = IM_COL32(170, 150, 150, 255);
+  dl->AddRectFilled(o, ImVec2(o.x + panel_w, o.y + panel_h), IM_COL32(10, 9, 11, 236), 6.0f * scale);
+  dl->AddRect(o, ImVec2(o.x + panel_w, o.y + panel_h), IM_COL32(160, 28, 24, 255), 6.0f * scale, 0, 2.0f * scale);
+  dl->AddText(font, small * 1.35f, ImVec2(o.x + pad, o.y + pad * 0.6f), red, "BEYOND");
+  if (b.summoning) {
+    const bool blink = (NowMs() / 400) % 2 == 0;
+    dl->AddText(font, small * 1.35f, ImVec2(o.x + pad + h * 3.2f, o.y + pad * 0.6f),
+                blink ? red : IM_COL32(120, 30, 26, 255), "INCOMING");
+    dl->AddText(font, small, ImVec2(o.x + pad, o.y + pad * 0.6f + small * 1.9f), label, "DISTANCE");
+    SegNumber(dl, ImVec2(o.x + pad, o.y + pad * 0.6f + small * 3.3f), h, std::clamp(b.dist, 0, 9999), 4, red, red_off,
+              glow);
+    dl->AddText(font, small * 1.2f, ImVec2(o.x + pad + 4 * dw + 6.0f * scale, o.y + pad * 0.6f + small * 3.3f + h - small * 1.3f),
+                label, "M");
+    return;
+  }
+  // the cloak's lamp, top right
+  {
+    const ImVec2 lamp(o.x + panel_w - pad - h * 2.4f, o.y + pad * 0.45f), lamp2(lamp.x + h * 2.4f, lamp.y + h * 0.8f);
+    dl->AddRectFilled(lamp, lamp2, b.cloaked ? IM_COL32(255, 30, 20, 255) : IM_COL32(60, 16, 14, 240), 3.0f * scale);
+    dl->AddText(font, small * 1.15f, ImVec2(lamp.x + h * 0.36f, lamp.y + h * 0.18f),
+                b.cloaked ? IM_COL32(255, 235, 225, 255) : IM_COL32(130, 70, 60, 255), "CLOAK");
+  }
+  // speed and height
+  const float y1 = o.y + pad * 0.6f + small * 1.9f;
+  dl->AddText(font, small, ImVec2(o.x + pad, y1), label, "SPEED");
+  SegNumber(dl, ImVec2(o.x + pad, y1 + small * 1.4f), h, std::clamp(b.kmh, 0, 999), 3, red, red_off, glow);
+  dl->AddText(font, small * 1.2f, ImVec2(o.x + pad + 3 * dw + 6.0f * scale, y1 + small * 1.4f + h - small * 1.3f), label,
+              "KM/H");
+  const float x2 = o.x + pad + h * 5.2f;
+  dl->AddText(font, small, ImVec2(x2, y1), label, "HEIGHT");
+  SegNumber(dl, ImVec2(x2, y1 + small * 1.4f), h, std::clamp(b.height, 0, 999), 3, red, red_off, glow);
+  dl->AddText(font, small * 1.2f, ImVec2(x2 + 3 * dw + 6.0f * scale, y1 + small * 1.4f + h - small * 1.3f), label, "M");
+  // the boost's bar and the missile's lamp along the bottom
+  const float y3 = y1 + small * 1.4f + h + small * 0.9f;
+  dl->AddText(font, small, ImVec2(o.x + pad, y3), label, "BOOST");
+  {
+    const ImVec2 bar(o.x + pad + h * 2.0f, y3 + small * 0.1f), bar2(bar.x + h * 3.0f, bar.y + small * 0.9f);
+    dl->AddRectFilled(bar, bar2, IM_COL32(40, 14, 12, 255), 2.0f * scale);
+    if (b.boost > 0.02f)
+      dl->AddRectFilled(bar, ImVec2(bar.x + (bar2.x - bar.x) * std::min(1.0f, b.boost), bar2.y), red, 2.0f * scale);
+  }
+  {
+    const ImVec2 lamp(x2, y3 - small * 0.1f), lamp2(lamp.x + h * 3.6f, lamp.y + small * 1.3f);
+    dl->AddRectFilled(lamp, lamp2, b.missile_ready ? IM_COL32(70, 18, 14, 240) : IM_COL32(40, 14, 12, 240),
+                      3.0f * scale);
+    char text[32];
+    if (b.missile_ready)
+      std::snprintf(text, sizeof(text), "MISSILE READY");
+    else
+      std::snprintf(text, sizeof(text), "RELOAD %d s", b.reload_s);
+    dl->AddText(font, small * 1.05f, ImVec2(lamp.x + h * 0.25f, lamp.y + small * 0.15f),
+                b.missile_ready ? IM_COL32(255, 120, 100, 255) : IM_COL32(150, 80, 70, 255), text);
+  }
+}
+
 void DrawTcd(ImGuiIO& io) {
   TcdModel t;
   {
@@ -12491,7 +12598,7 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
   // and the flash fades: drawn every frame then)
   bool WantsContinuousRepaint() const override {
     return g_tcd_active.load(std::memory_order_relaxed) || g_hud_active.load(std::memory_order_relaxed) ||
-           g_menu_visible.load(std::memory_order_relaxed);
+           g_beyond_hud_active.load(std::memory_order_relaxed) || g_menu_visible.load(std::memory_order_relaxed);
   }
   void OnDraw(ImGuiIO& io) override {
     if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f)
@@ -12500,6 +12607,8 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
       DrawJetHud(io);
     if (g_tcd_active.load(std::memory_order_relaxed))
       DrawTcd(io);
+    if (g_beyond_hud_active.load(std::memory_order_relaxed))
+      DrawBeyondHud(io);
     DrawModel model;
     {
       std::lock_guard lock(g_draw_mutex);
