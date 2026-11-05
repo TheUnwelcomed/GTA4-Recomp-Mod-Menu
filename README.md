@@ -852,7 +852,10 @@ cp /path/to/src/* glue/rexglue-sdk-main/gta4-recomp/src/
 ```
 
 Or just install the prebuilt `PPSA94004` from this repo's release over your existing
-one in `/data/homebrew/` — your installed game, saves and settings stay.
+one in `/data/homebrew/` — merge it into the existing folder (replace the files
+it carries, keep the rest): `PPSA94004/UserData/` holds your installed game,
+settings and the add-on cache, and the release does not carry it. Replacing
+the folder whole brings the app's install page back, asking for the ISO.
 
 ## Credits
 
