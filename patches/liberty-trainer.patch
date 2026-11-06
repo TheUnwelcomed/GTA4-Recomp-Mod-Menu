@@ -151,6 +151,59 @@ index a9b2c2a..4b628ee 100644
  }
  
  }  // namespace gta4ps5
+diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.cpp
+index e43fbcf..fd9cc38 100644
+--- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.cpp
++++ b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.cpp
+@@ -140,6 +140,10 @@ const char* EpisodeName(int episode) { return episode == 1 ? "The Ballad of Gay
+ State Look(const fs::path& app) {
+   State s;
+   s.installed = gta4::install::IsInstallReady(GameRoot(app), &s.reason);
++  {
++    std::error_code ec;
++    s.game_folder = fs::is_directory(GameRoot(app), ec);
++  }
+   const Sources found = Find(app);
+   s.iso = !found.disc.empty();
+   s.update = !found.update.empty();
+diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.h b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.h
+index cb12344..93a417d 100644
+--- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.h
++++ b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_install.h
+@@ -40,6 +40,8 @@ struct State {
+   bool iso = false;        // a disc image waits in install/
+   bool update = false;     // ...and a title update next to it
+   std::string reason;      // why it isn't ready (from the installer's check)
++  bool game_folder = false;  // UserData/LibertyRecomp/game is there (an install, or files copied in): the
++                             // Home page shows the reason it isn't taken
+   std::vector<FileProblem> problems;
+   bool Installed() const { return installed || iso; }
+   bool xex_ok = true;
+diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_ui.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_ui.cpp
+index f359e21..2958633 100644
+--- a/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_ui.cpp
++++ b/glue/rexglue-sdk-main/gta4-recomp/src/ps5/hub/hub_ui.cpp
+@@ -1280,9 +1280,18 @@ void Hub::DrawHome() {
+   if (!state_.installed) {
+     const float in = Smooth((time_ - 0.2f) / 0.6f);
+     const int v0 = dl_->VtxBuffer.Size;
+-    TextMid(Bold(), 40, kPageL, kRuleBottom - 104, Rgba(255, 255, 255), T("Not installed yet"));
+-    TextMid(Regular(), 30, kPageL, kRuleBottom - 58, Rgba(200, 200, 200),
++    // [liberty-trainer] A game folder that's there but not taken says why
++    // (the installer's check: default.xex and the title update's
++    // default.xexp beside it), so a copied or moved install can be put right
++    // without a log.
++    const bool why = state_.game_folder && !state_.reason.empty();
++    const float lift = why ? 46.0f : 0.0f;
++    TextMid(Bold(), 40, kPageL, kRuleBottom - 104 - lift, Rgba(255, 255, 255), T("Not installed yet"));
++    TextMid(Regular(), 30, kPageL, kRuleBottom - 58 - lift, Rgba(200, 200, 200),
+             T("Press X to set it up from your disc image and title update."));
++    if (why)
++      TextMid(Regular(), 25, kPageL, kRuleBottom - 22, Rgba(235, 190, 120),
++              std::string("UserData/LibertyRecomp/game: ") + state_.reason);
+     Fade(v0, in);
+   }
+ }
 diff --git a/glue/rexglue-sdk-main/gta4-recomp/src/rpf_button_prompts.cpp b/glue/rexglue-sdk-main/gta4-recomp/src/rpf_button_prompts.cpp
 index 377e504..3c56f98 100644
 --- a/glue/rexglue-sdk-main/gta4-recomp/src/rpf_button_prompts.cpp
