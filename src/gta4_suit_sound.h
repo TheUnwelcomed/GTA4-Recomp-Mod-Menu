@@ -59,6 +59,16 @@ class SuitSynth {
   void Land(float impact) { land_impact_.store(std::clamp(impact, 0.0f, 20.0f), std::memory_order_relaxed), lands_.fetch_add(1); }
   void Suit(bool on) { suit_on_.store(on, std::memory_order_relaxed), suits_.fetch_add(1); }
   void Warn() { warns_.fetch_add(1, std::memory_order_relaxed); }
+  // The blade (v1.7.47): the throw's whip; its whir while it flies (level
+  // 0..1, with its distance: 0 none); the smack when it lands on someone;
+  // the slap into his glove when it comes back.
+  void Throw() { throws_.fetch_add(1, std::memory_order_relaxed); }
+  void Blade(float level) { blade_.store(std::clamp(level, 0.0f, 1.0f), std::memory_order_relaxed); }
+  void Hit() { hits_.fetch_add(1, std::memory_order_relaxed); }
+  void Catch() { catches_.fetch_add(1, std::memory_order_relaxed); }
+  // The Bat-Signal (v1.7.47): the switch's clunk and the lamp's hum coming
+  // up (on), the hum falling away and the clunk (off).
+  void Signal(bool on) { signal_on_.store(on, std::memory_order_relaxed), signals_.fetch_add(1); }
   bool Quiet() const { return quiet_.load(std::memory_order_relaxed); }
 
   // Interleaved stereo, frames at kRate, overwritten.
@@ -79,6 +89,12 @@ class SuitSynth {
     if (suits_.exchange(0, std::memory_order_relaxed))
       suit_t_ = 0.0f, suit_on_now_ = suit_on_.load(std::memory_order_relaxed);
     for (uint32_t n = warns_.exchange(0, std::memory_order_relaxed); n; --n) warn_t_ = 0.0f;
+    for (uint32_t n = throws_.exchange(0, std::memory_order_relaxed); n; --n) throw_t_ = 0.0f;
+    for (uint32_t n = hits_.exchange(0, std::memory_order_relaxed); n; --n) hit_t_ = 0.0f;
+    for (uint32_t n = catches_.exchange(0, std::memory_order_relaxed); n; --n) catch_t_ = 0.0f;
+    if (signals_.exchange(0, std::memory_order_relaxed))
+      signal_t_ = 0.0f, signal_on_now_ = signal_on_.load(std::memory_order_relaxed);
+    const float blade_target = blade_.load(std::memory_order_relaxed);
 
     constexpr float dt = 1.0f / kRate;
     constexpr float kPi = 3.14159265f;
@@ -203,6 +219,58 @@ class SuitSynth {
         fx += Sin(warn_ph_) * 0.05f * on;
         warn_t_ += dt;
       }
+      // the blade's throw: a whip of air, the band sweeping down as the arm comes through
+      if (throw_t_ < 0.35f) {
+        const float k = throw_t_ / 0.35f;
+        const float fc = 3200.0f * std::pow(0.25f, k);
+        fx += throw_bp_.Bandpass(Noise(), std::tan(kPi * fc * dt), 0.6f) * 0.55f * Smooth(0.0f, 0.03f, throw_t_) *
+              (1.0f - Smooth(0.5f, 1.0f, k));
+        throw_t_ += dt;
+      }
+      // the blade's whir while it flies: the air chopped by its wings (a buzz
+      // at the spin rate, the band narrow and high), nearer louder
+      blade_now_ += (blade_target - blade_now_) * 12.0f * dt;
+      if (blade_now_ > 0.002f) {
+        blade_ph_ = Wrap(blade_ph_ + 46.0f * dt);  // (23 turns a second, two wings)
+        const float chop = 0.55f + 0.45f * Sin(blade_ph_);
+        const float whir = blade_bp_.Bandpass(Noise(), std::tan(kPi * 2600.0f * dt), 0.35f) * chop;
+        blade_tone_ = Wrap(blade_tone_ + 1380.0f * dt);
+        fx += (whir * 0.30f + Sin(blade_tone_) * 0.03f * chop) * blade_now_;
+      }
+      // the blade landing on someone: a smack
+      if (hit_t_ < 0.25f) {
+        fx += hit_bp_.Bandpass(Noise(), 0.18f, 0.5f) * std::exp(-hit_t_ * 40.0f) * 0.8f +
+              puff_lp_.Lowpass(Noise(), 0.1f, 0.7f) * std::exp(-hit_t_ * 25.0f) * 0.3f;
+        hit_t_ += dt;
+      }
+      // the catch: the slap into his glove, a click of the blade locking
+      if (catch_t_ < 0.2f) {
+        fx += catch_bp_.Bandpass(Noise(), 0.22f, 0.6f) * std::exp(-catch_t_ * 60.0f) * 0.7f;
+        if (catch_t_ > 0.06f)
+          fx += latch_bp_.Bandpass(Noise(), 0.5f, 0.4f) * std::exp(-(catch_t_ - 0.06f) * 90.0f) * 0.35f;
+        catch_t_ += dt;
+      }
+      // the Bat-Signal: on, the switch's clunk, then the lamp's hum coming
+      // up over a second and holding (a 100 Hz mains hum and its overtones,
+      // a little flicker); off, the hum falling away and the clunk
+      if (signal_t_ < 2.2f || signal_on_now_) {
+        const float t = std::min(signal_t_, 2.2f);
+        const float clunk_at = signal_on_now_ ? 0.0f : 1.2f;
+        if (t >= clunk_at && t < clunk_at + 0.3f) {
+          const float c = t - clunk_at;
+          sig_clunk_ph_ = Wrap(sig_clunk_ph_ + 90.0f * dt);
+          fx += Sin(sig_clunk_ph_) * std::exp(-c * 22.0f) * 0.45f +
+                sig_bp_.Bandpass(Noise(), 0.2f, 0.5f) * std::exp(-c * 45.0f) * 0.5f;
+        }
+        const float hum_env = signal_on_now_ ? Smooth(0.08f, 1.1f, t) : (1.0f - Smooth(0.0f, 1.1f, t));
+        sig_hum_ph_ = Wrap(sig_hum_ph_ + 100.0f * dt);
+        sig_hum_ph2_ = Wrap(sig_hum_ph2_ + 300.0f * dt);
+        const float flick = 0.9f + 0.1f * Sin(sig_hum_ph_ * 0.137f);
+        fx += (Sin(sig_hum_ph_) * 0.5f + Sin(sig_hum_ph2_) * 0.25f + sig_hp_.Bandpass(Noise(), 0.55f, 0.3f) * 0.08f) *
+              0.07f * hum_env * flick;
+        if (signal_t_ < 2.2f)
+          signal_t_ += dt;
+      }
 
       const float l = (jets_l + rl * rush_amp) * vol_ + fx;
       const float r = (jets_r + rr * rush_amp) * vol_ + fx;
@@ -212,8 +280,11 @@ class SuitSynth {
     quiet_.store(thrust_target <= 0.0f && thrust_ < 0.01f && speed_target < 0.5f && speed_ < 0.5f &&
                      reel_target <= 0.0f && wing_t_ >= 0.8f && fire_t_ >= 0.3f && line_t_ >= 2.5f && latch_t_ >= 0.4f &&
                      cloak_t_ >= 1.4f && land_t_ >= 0.6f && suit_t_ >= 1.3f && warn_t_ >= 0.5f &&
+                     throw_t_ >= 0.35f && hit_t_ >= 0.25f && catch_t_ >= 0.2f && blade_target <= 0.0f &&
+                     blade_now_ < 0.002f && signal_t_ >= 2.2f && !signal_on_now_ &&
                      wings_.load(std::memory_order_relaxed) == 0 && cloaks_.load(std::memory_order_relaxed) == 0 &&
-                     lands_.load(std::memory_order_relaxed) == 0 && suits_.load(std::memory_order_relaxed) == 0,
+                     lands_.load(std::memory_order_relaxed) == 0 && suits_.load(std::memory_order_relaxed) == 0 &&
+                     signals_.load(std::memory_order_relaxed) == 0,
                  std::memory_order_relaxed);
   }
 
@@ -249,16 +320,21 @@ class SuitSynth {
   std::atomic<float> land_impact_{0};
   std::atomic<bool> wings_open_{true}, cloak_on_{true}, suit_on_{true};
   std::atomic<uint32_t> wings_{0}, grapnel_fires_{0}, grapnel_latches_{0}, cloaks_{0}, lands_{0}, suits_{0}, warns_{0};
+  std::atomic<uint32_t> throws_{0}, hits_{0}, catches_{0}, signals_{0};
+  std::atomic<float> blade_{0};
+  std::atomic<bool> signal_on_{false};
   std::atomic<bool> quiet_{true};
   float thrust_ = 0, speed_ = 0, glide_ = 0, vol_ = 0, reel_now_ = 0;
   float pw1_ = 0, pw2_ = 0.3f, pw3_ = 0.6f, grain_ = 0, flut_ph_ = 0;
   float wing_t_ = 1e3f, wing_ph_ = 0, fire_t_ = 1e3f, line_t_ = 1e3f, line_ph_ = 0, latch_t_ = 1e3f, latch_ph_ = 0,
         latch_ph2_ = 0, reel_ph_ = 0, reel_ph2_ = 0, cloak_t_ = 1e3f, cloak_ph_ = 0, cloak_ph2_ = 0, fizz_ = 0,
         land_t_ = 1e3f, land_now_ = 0, land_ph_ = 0, suit_t_ = 1e3f, suit_ph_ = 0, warn_t_ = 1e3f, warn_ph_ = 0;
-  bool wing_opening_ = true, cloak_on_now_ = true, suit_on_now_ = true;
+  float throw_t_ = 1e3f, blade_now_ = 0, blade_ph_ = 0, blade_tone_ = 0, hit_t_ = 1e3f, catch_t_ = 1e3f,
+        signal_t_ = 1e3f, sig_clunk_ph_ = 0, sig_hum_ph_ = 0, sig_hum_ph2_ = 0;
+  bool wing_opening_ = true, cloak_on_now_ = true, suit_on_now_ = true, signal_on_now_ = false;
   uint32_t seed_ = 0x9E3779B9u;
   Svf jet_l_, jet_r_, crackle_lp_, rush_l_, rush_r_, flap_lp_, snap_hp_, pop_bp_, line_bp_, latch_bp_, reel_bp_,
-      cloak_bp_, puff_lp_, suit_lp_, suit_hiss_;
+      cloak_bp_, puff_lp_, suit_lp_, suit_hiss_, throw_bp_, blade_bp_, hit_bp_, catch_bp_, sig_bp_, sig_hp_;
 };
 
 }  // namespace gta4::suit

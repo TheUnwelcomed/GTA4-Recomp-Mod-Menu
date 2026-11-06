@@ -111,6 +111,23 @@ keeps going while you browse.
     and wheels written as a PC vehicle and converted on the FBI Buffalo's
     physics), in its IndiGo blue; its 6.2-litre supercharged Hemi
     synthesized with the blower's whine
+  - **1969 Dodge Charger R/T** and two **General Lees** (v1.7.47): the
+    user's GTA V Charger pack (OhiOcinu's 1969 Dodge Charger R/T 426 Hemi:
+    the Forza model, converted with -Logic-, GreenAid, Oh Deer, viter and
+    tk0wnZ) brought over by
+    `tools/car/v_car.py` - the V fragment's body, interior, glass, lights,
+    plate and wheels read from the `.yft` and `.ytd`, its shaders matched to
+    IV's by hash, written as a PC vehicle and converted on the Banshee's
+    physics with the police car's livery shader standing in for V's paint -
+    as a stock R/T in the pack's colours (`CHARGER69`), and as the General
+    Lee in its Georgia (`GENLEE`) and California (`GENLEECA`) liveries from
+    the user's **DukesLiveryFinal** pack (gtavjamal's roof decal), on their
+    plates. Its big-block V8 (the 426 Hemi the mod names) is synthesized
+    (`kChargerEngine`: the cross-plane firing order into two banks, the
+    long-stroke lope at idle, the carburettor's gulp under the throttle, the
+    twin pipes' resonance). The General Lees' **horn** (L3) is the user's own
+    recording (`addons/genlee/horn.wav`), played through the trainer's mixer
+    with the car's distance and Doppler, so it carries on after you jump out
   - Each car has its own engine, synthesized in the trainer (no recordings):
     the Batmobile's turbine over a V8, the F-16's jet, and for the Deimos,
     the Nexus, the Arbiter X and the Dominator 645 a physically informed
@@ -166,11 +183,22 @@ keeps going while you browse.
     where the camera looks - a roof's edge, a wall's top - and he is reeled
     there), **smoke** (a cloud; the police lose him), **cloak** (unseen, the
     wanted level cleared while it holds), **Batmobile** (the Beyond car
-    summoned), **thrusters** and **wings** as items too; batarangs and the
-    Bat-Signal come with their models in the next release
+    summoned), **thrusters** and **wings** as items too, and (v1.7.47) the
+    **blade** (a throwing blade of this project's own shape, `bk_blade`,
+    thrown where the camera looks, spinning; it turns onto the first ped near
+    its line, knocks down whoever it meets, and comes back to his hand from
+    its mark, a wall, the ground or 42 m out) and the **Bat-Signal** (the
+    user's The Batman (2022) signal prop, `thebatman2022batsignal`, converted
+    as it is by `tools/maps/vprop.py`, set down ahead of him with its beam
+    away, lit along the beam; the Batmobile comes to it; off after half a
+    minute or on the next tap). The two are a **props set**
+    (`addons/maps/beyondkit`, `tools/maps/propset.py`: a map set whose
+    `map.txt` says `props yes` - its models go into the game like a place's,
+    nothing is placed, and the menu lists it nowhere)
   - every sound synthesized (`src/gta4_suit_sound.h`): the jets, the air,
     the wings' snap, the grapnel's pop, line, latch and reel, the cloak's
-    shimmer, landings, the suit sealing round him
+    shimmer, landings, the suit sealing round him, the blade's whip, whir,
+    smack and catch, the signal's clunk and the lamp's hum
   - the overlay: a panel (energy, the gadget picked, the state, speed and
     height in the air) and the wheel while L1 is held
 - **Weapons** — full loadout with ammo, or strip all weapons
@@ -252,6 +280,21 @@ network session.
 
 ## Changes
 
+- **v1.7.47**: the **1969 Charger R/T** and the two **General Lees** with
+  their horn (above): the GTA V vehicle importer (`tools/car/v_car.py`, on
+  `v_reader.py`; `specs/charger69.json`, `genlee.json`, `genleeca.json`),
+  the horn's player in the trainer (`LoadHorn`, `HornSource`, `HornTick`:
+  the user's recording, distance and Doppler), `g_charger_engine` and
+  `kChargerEngine`. The suit's **blade** and **Bat-Signal** gadgets
+  (`SuitBladeThrow`/`SuitBladeTick`, `SuitSignalPlace`/`SuitSignalTick`)
+  on the **Beyond kit props set**: `tools/maps/vprop.py` (a V `.ydr` as a
+  PC piece, scaled), `tools/maps/blade.py` (the blade drawn here),
+  `tools/maps/propset.py` (the set's console files), and in the installer
+  the `props` flag of `map.txt` (`MapInfo::props`: taken without pieces, no
+  water under it, not a place to go). The sounds for both in
+  `gta4_suit_sound.h`. `pcwrite.emit`/`write_skeleton`/`Fragment` take door
+  limits. The release's add-ons now come in two zips (the app and the
+  Chargers), each under the upload limit.
 - **v1.7.46**: **Beyond Suit** (above): the suit, its flight, glide, strength
   and gadget wheel. The ped converter (`tools/ped/`: `pedconv.py` with its
   `PedDrawable` on the vehicle converter's bones, `pedtex.py`, `pedcheck.py`,
@@ -925,6 +968,14 @@ the folder whole brings the app's install page back, asking for the ISO.
   surfaces and time cycle).
 - The author of the **Batman Beyond (Animated)** GTA V ped mod (made for
   JulioNIB's Batman script): the Beyond suit's model and textures.
+- The author of the **The Batman (2022) Bat-Signal** GTA V prop: the
+  Bat-Signal's model and textures.
+- **OhiOcinu**'s 1969 Dodge Charger R/T 426 Hemi for GTA V: the model from
+  Forza, converted with **-Logic-**, **GreenAid**, **Oh Deer**, **viter** and
+  **tk0wnZ**. The General Lee liveries and plates are the **DukesLiveryFinal**
+  pack's (its author's own decals and plates, the roof flag modified from
+  **gtavjamal**'s decal set). The General Lee's horn is the user's own
+  recording; nothing of the pack's sound rip is used.
 - **Ddiaz Design**: the Dodge Challenger SRT Hellcat. This work is based on
   "2019 Dodge Challenger SRT Hellcat"
   (https://sketchfab.com/3d-models/2019-dodge-challenger-srt-hellcat-f210ad5e17e04b2389b1c3628477105c)

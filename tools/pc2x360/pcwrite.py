@@ -304,7 +304,7 @@ class Drawable:
         flags = write_resource(path, TYPE_WDR, v.buf, p.buf)
         return dict(flags=flags, vsize=len(v.buf), psize=len(p.buf), radius=self.radius, bbox=self.bbox)
 
-    def emit(self, v, p, skeleton=None, shader_group=None):
+    def emit(self, v, p, skeleton=None, shader_group=None, limits=None):
         """The drawable into the segments; returns its root's offset. A
         vehicle's `skeleton` (v1.7.43): [(name, parent index, (x, y, z))],
         parents first, each bone's position in the car - written as the PC
@@ -392,18 +392,21 @@ class Drawable:
             v.w32(root + 96 + 4 * i, masks[i])
         v.f32(root + 112, r)
         if skeleton:
-            v.w32(root + 12, VP | write_skeleton(v, skeleton))
+            v.w32(root + 12, VP | write_skeleton(v, skeleton, limits))
         self.radius, self.bbox = r, (lo.tolist(), hi.tolist())
         return root
 
 
-def write_skeleton(v, bones):
+def write_skeleton(v, bones, limits=None):
     """A PC skeleton: bones of 0xE0 bytes (name, flags, parent, local
     translation, an identity rotation, the stored position, limits of +-pi),
     the global, inverse global and local matrix arrays (64 bytes each,
     identity rotations with the translation in the fourth row), the header
-    the PC files carry (gauntletc.wft checked)."""
+    the PC files carry (gauntletc.wft checked). `limits` (v1.7.47): {bone
+    name: ((min x, y, z), (max x, y, z))} in radians for the bones that are
+    joints (a door: the converter swings the stock door the donor's way)."""
     n = len(bones)
+    limits = limits or {}
     sk = v.alloc(0x40)
     bo = v.alloc(0xE0 * n)
     for i, (name, parent, pos) in enumerate(bones):
@@ -422,8 +425,9 @@ def write_skeleton(v, bones):
         v.f32(b + 0x60, pos[0], pos[1], pos[2])
         for o in (0x6C, 0x7C, 0x8C, 0x9C, 0xAC, 0xBC, 0xCC):
             v.w32(b + o, NAN_W)
-        v.f32(b + 0xB0, -3.14159274, -3.14159274, -3.14159274)
-        v.f32(b + 0xC0, 3.14159274, 3.14159274, 3.14159274)
+        lo, hi = limits.get(name, ((-3.14159274, -3.14159274, -3.14159274), (3.14159274, 3.14159274, 3.14159274)))
+        v.f32(b + 0xB0, *lo)
+        v.f32(b + 0xC0, *hi)
     arrays = []
     for kind in ('global', 'inverse', 'local'):
         a = v.alloc(64 * n)
@@ -478,11 +482,12 @@ class Fragment:
 
         Fragment(drawable, skeleton).write('out/car.wft', pattern='some.wft')
     """
-    def __init__(self, drawable, skeleton, wheel=None, wheel_bone=None):
+    def __init__(self, drawable, skeleton, wheel=None, wheel_bone=None, limits=None):
         self.drawable = drawable
         self.skeleton = skeleton
         self.wheel = wheel
         self.wheel_bone = wheel_bone
+        self.limits = limits
 
     def write(self, path, pattern):
         pat = rsc5.Resource.pc(pattern)
@@ -495,7 +500,7 @@ class Fragment:
         v, p = Seg(), Seg()
         root = v.put(bytes(head))
         assert root == 0
-        d = self.drawable.emit(v, p, self.skeleton)
+        d = self.drawable.emit(v, p, self.skeleton, limits=self.limits)
         v.w32(0xB4, VP | d)
         blockmap = v.alloc(0x10)
         v.w32(4, VP | blockmap)

@@ -1003,6 +1003,9 @@ constexpr std::array kVehicles = {
     VehicleChoice{"Batwing", "BATWING", 16.0f},
     VehicleChoice{"Batman Beyond Batmobile", "BEYOND", 7.0f},
     VehicleChoice{"Dodge Challenger SRT Hellcat", "HELLCAT"},
+    VehicleChoice{"1969 Dodge Charger R/T", "CHARGER69"},
+    VehicleChoice{"General Lee (Georgia)", "GENLEE"},
+    VehicleChoice{"General Lee (California)", "GENLEECA"},
 };
 // The game's own vehicles come first in the list; the add-ons from here.
 constexpr int kFirstAddon = [] {
@@ -1041,7 +1044,7 @@ const std::vector<PlaceSpot>& PlaceSpots() {
   static std::once_flag once;
   std::call_once(once, [] {
     for (const auto& info : gta4::addons::InstalledMaps()) {
-      if (!info.installed)
+      if (!info.installed || info.props)  // (a props set is nowhere to go)
         continue;
       // ("Oct 26, 1984 (Gator Keys)": the name in the brackets)
       std::string place = info.label;
@@ -1264,6 +1267,7 @@ bool g_have_dmc12 = false, g_have_bttf1 = false, g_have_bttf2 = false, g_have_bt
 bool g_have_beyond = false;  // the Batman Beyond Batmobile (v1.7.44)
 bool g_have_hellcat = false;  // the Challenger SRT Hellcat (v1.7.44)
 bool g_have_suit = false;     // the Beyond suit's components in playerped (v1.7.46)
+bool g_have_charger = false;  // the '69 Charger and the General Lees (v1.7.47)
 std::atomic<bool> g_beyond_cloaked{false};  // (for the menu's line)
 std::atomic<bool> g_suit_worn{false};        // the Beyond suit on the player (v1.7.46, for the menu's line)
 std::atomic<int> g_suit_gadget{0};           // the gadget the wheel has picked (for the menu's line)
@@ -1290,7 +1294,7 @@ bool WantsWork(const State& s) {
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_batwing || g_have_deimos ||
          g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator || g_have_lazar ||
          g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || g_have_beyond || g_have_hellcat || g_have_suit ||
-         s.suit_toggle || s.car_lights;
+         g_have_charger || s.suit_toggle || s.car_lights;
 }
 
 // The sections the menu's tab strip shows, L1/R1 going through them.
@@ -5151,6 +5155,7 @@ struct CarEngineState {
   float volume;                   // its level in the mix
   bool air_brakes = false;        // a truck's: their hiss at a stop
   std::string_view model2 = {};   // a second model it also is (Part II's DeLorean in hover form)
+  std::string_view model3 = {};   // (and a third: the Chargers, v1.7.47)
   bool in_car = false, running = false;  // running: the voice plays (winding down too)
   bool rolling = false;
   int gear = 0;
@@ -5175,6 +5180,11 @@ CarEngineState g_dominator_engine{&g_dominator_synth, "Dominator 645", "DOM645T"
 CarEngineState g_lazar_engine{&g_lazar_synth, "Lazar 3", "LAZAR3", {5.5f, 10.0f, 15.0f, 21.0f, 28.0f}, 0.42f, true};
 CarEngineState g_gauntlet_engine{&g_gauntlet_synth, "Gauntlet Classic", "GAUNTLETC",
                                  {13.0f, 23.0f, 34.0f, 46.0f, 61.0f}, 0.38f};
+// The '69 Charger R/T and the two General Lees share the 440 (v1.7.47): a
+// four-speed, about 180 km/h flat out.
+gta4::car::EngineSynth g_charger_synth{gta4::car::kCharger};
+CarEngineState g_charger_engine{&g_charger_synth, "Charger", "CHARGER69", {12.0f, 22.0f, 35.0f, 50.0f, 50.0f},
+                                0.38f, false, "GENLEE", "GENLEECA"};
 // The Hellcat: 707 hp through an eight-speed, here five, geared long.
 CarEngineState g_hellcat_engine{&g_hellcat_synth, "Hellcat", "HELLCAT", {16.0f, 27.0f, 39.0f, 52.0f, 68.0f}, 0.40f};
 // The DMC-12's five-speed: about 110 mph flat out (88 needs fourth).
@@ -9804,6 +9814,27 @@ struct SuitState {
   // the smoke
   uint64_t smoke_until = 0;
   std::array<uint32_t, 3> smoke{};
+  // the Beyond kit's props (v1.7.47: the blade and the Bat-Signal, a props
+  // set's models): -1 not looked for yet, 0 not installed, 1 in the image;
+  // asked for while the suit is on
+  int kit = -1;
+  bool kit_asked = false;
+  // the blade: thrown along the aim, homing on the first ped near its line,
+  // spun as it flies, back to his hand after
+  struct Blade {
+    bool live = false, returning = false;
+    uint32_t object = 0, target = 0;
+    float pos[3]{}, dir[3]{};
+    float speed = 0.0f, spin = 0.0f, travelled = 0.0f;
+    uint64_t thrown = 0;
+    int frames = 0, struck = 0;
+    uint32_t last_struck = 0;
+  } blade;
+  // the Bat-Signal: the lamp set down ahead, its beam away from him
+  uint32_t signal_object = 0;
+  uint64_t signal_lit = 0;       // when (0: none up)
+  float signal_pos[3]{}, signal_fwd[2]{};
+  bool signal_called = false;    // the Batmobile sent for
   // punches
   uint64_t next_punch_look = 0;
   int health_keep = 0;        // his health before a fall
@@ -10125,6 +10156,317 @@ void SuitSmoke(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitStat
   SuitLog(m, fmt::format("smoke: {} cloud(s) placed", placed));
 }
 
+// ---- the Beyond kit (v1.7.47): the blade and the Bat-Signal, the props set's models
+constexpr const char* kBladeModel = "bk_blade";
+constexpr const char* kSignalModel = "bk_batsignal";
+constexpr float kBladeSpeed = 34.0f, kBladeRange = 42.0f;  // m/s out; how far before it turns back
+constexpr float kBladeSpin = 23.0f;                        // turns a second
+constexpr uint64_t kSignalHoldMs = 30000;                  // the lamp stays this long
+
+// Whether the kit is installed (looked up once), its models asked for or let
+// go with the suit.
+int SuitKit(PPCContext& ctx, uint8_t* base, SuitState& m, bool want) {
+  if (m.kit < 0) {
+    const auto in = Invoke(ctx, base, "IS_MODEL_IN_CDIMAGE", {ModelHash(kBladeModel)});
+    m.kit = in && in->r0() ? 1 : 0;
+    SuitLog(m, m.kit ? "the Beyond kit's props are in the image" : "the Beyond kit's props are not installed");
+  }
+  if (m.kit == 1 && want != m.kit_asked) {
+    m.kit_asked = want;
+    for (const char* name : {kBladeModel, kSignalModel})
+      Invoke(ctx, base, want ? "REQUEST_MODEL" : "MARK_MODEL_AS_NO_LONGER_NEEDED", {ModelHash(name)});
+  }
+  return m.kit;
+}
+
+void SuitBladeEnd(PPCContext& ctx, uint8_t* base, SuitState& m, const char* why) {
+  if (m.blade.live)
+    SuitLog(m, fmt::format("blade: {} after {:.0f} m ({} struck)", why, m.blade.travelled, m.blade.struck));
+  DeleteObject(ctx, base, m.blade.object);
+  m.blade = {};
+  g_suit_synth.Blade(0.0f);
+}
+
+// The blade turned about its own axis as it flies, flat along its line,
+// banked a little.
+void SuitBladePose(PPCContext& ctx, uint8_t* base, const SuitState::Blade& b) {
+  const float heading = std::atan2(-b.dir[0], b.dir[1]), pitch = std::asin(std::clamp(b.dir[2], -1.0f, 1.0f));
+  const Quat q = QNormalize(QMul(QMul(QMul(QAxis(0, 0, 1, heading), QAxis(1, 0, 0, pitch)), QAxis(0, 1, 0, 0.3f)),
+                                 QAxis(0, 0, 1, b.spin)));
+  Invoke(ctx, base, "SET_OBJECT_QUATERNION", {b.object, Bits(q.x), Bits(q.y), Bits(q.z), Bits(q.w)});
+}
+
+// Thrown where the camera looks, from his right hand; the first ped near its
+// line (within 4.5 m of it, out to 31 m) is its mark.
+bool SuitBladeThrow(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, State& s, uint64_t now) {
+  if (m.blade.live) {
+    Toast(s, "The blade is out.", 900);
+    return false;
+  }
+  if (SuitKit(ctx, base, m, true) != 1) {
+    Toast(s, "The Beyond kit is not installed (addons/maps/beyondkit is missing from the app folder).", 3500);
+    return false;
+  }
+  const uint32_t hash = ModelHash(kBladeModel);
+  const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+  if (!loaded || !loaded->r0()) {
+    Invoke(ctx, base, "REQUEST_MODEL", {hash});
+    Toast(s, "The blade is loading...", 800);
+    return false;
+  }
+  const auto at = PedPosition(ctx, base, game.ped);
+  if (!at)
+    return false;
+  const CameraFrame cam = SuitCamera(ctx, base, at->data());
+  if (!cam.ok)
+    return false;
+  const float pitch = std::clamp(cam.pitch, -60.0f, 60.0f) * 3.14159265f / 180.0f;
+  auto& b = m.blade;
+  b = {};
+  b.dir[0] = cam.fwd[0] * std::cos(pitch), b.dir[1] = cam.fwd[1] * std::cos(pitch), b.dir[2] = std::sin(pitch);
+  b.pos[0] = (*at)[0] + cam.right[0] * 0.35f + b.dir[0] * 0.5f;
+  b.pos[1] = (*at)[1] + cam.right[1] * 0.35f + b.dir[1] * 0.5f;
+  b.pos[2] = (*at)[2] + 0.45f + b.dir[2] * 0.5f;
+  // the mark: probed along the line
+  for (const float d : {5.0f, 10.0f, 16.0f, 23.0f, 31.0f}) {
+    const float p[3] = {b.pos[0] + b.dir[0] * d, b.pos[1] + b.dir[1] * d, b.pos[2] + b.dir[2] * d};
+    const auto near = Invoke(ctx, base, "GET_CLOSEST_CHAR", {Bits(p[0]), Bits(p[1]), Bits(p[2]), Bits(4.5f), 1, 1, 0}, 6,
+                             0, 1, -1, {}, 1);
+    if (near && near->words[0] && near->words[1] && near->words[1] != game.ped) {
+      const auto dead = Invoke(ctx, base, "IS_CHAR_DEAD", {near->words[1]});
+      if (dead && dead->r0())
+        continue;
+      b.target = near->words[1];
+      break;
+    }
+  }
+  const auto obj = Invoke(ctx, base, "CREATE_OBJECT", {hash, Bits(b.pos[0]), Bits(b.pos[1]), Bits(b.pos[2]), 0, 1}, 4);
+  if (!obj || !obj->words[0]) {
+    SuitLog(m, "blade: the object could not be made");
+    return false;
+  }
+  b.object = obj->words[0];
+  b.live = true;
+  b.thrown = now;
+  b.speed = kBladeSpeed;
+  // flown by hand: no physics, nothing it bumps
+  Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {b.object, 1});
+  Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {b.object, 1});
+  Invoke(ctx, base, "SET_OBJECT_COLLISION", {b.object, 0});
+  Invoke(ctx, base, "SET_OBJECT_COORDINATES", {b.object, Bits(b.pos[0]), Bits(b.pos[1]), Bits(b.pos[2])});
+  SuitBladePose(ctx, base, b);
+  g_suit_synth.Throw();
+  g_suit_synth.Blade(1.0f);
+  SuitVoice(true);
+  m.energy = std::max(0.0f, m.energy - 3.0f);
+  SuitLog(m, fmt::format("blade thrown{}", b.target ? " at a mark" : ""));
+  return true;
+}
+
+// Every frame while the blade flies: out along its line, turning onto its
+// mark (5 rad/s), knocking down whoever it meets; back to his hand from the
+// mark, a wall, the ground or the end of its range; caught close to him.
+void SuitBladeTick(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m,
+                   const std::array<float, 3>& at, float dt, uint64_t now) {
+  auto& b = m.blade;
+  if (!b.live)
+    return;
+  ++b.frames;
+  const float age = float(now - b.thrown) / 1000.0f;
+  // where it turns: the mark's chest going out, his hand coming back
+  std::optional<std::array<float, 3>> aim;
+  float turn_rate = 5.0f;
+  if (b.returning) {
+    aim = at;
+    (*aim)[2] += 0.45f;
+    turn_rate = 7.0f;
+    b.speed = std::min(b.speed + 20.0f * dt, kBladeSpeed * 0.9f);
+  } else if (b.target && b.frames > 2) {
+    const auto dead = Invoke(ctx, base, "IS_CHAR_DEAD", {b.target});
+    aim = (dead && dead->r0()) ? std::nullopt : PedPosition(ctx, base, b.target);
+    if (aim)
+      (*aim)[2] += 0.3f;
+    else
+      b.target = 0;
+  }
+  if (aim) {
+    float want[3], len = 0.0f;
+    for (int a = 0; a < 3; ++a) {
+      want[a] = (*aim)[a] - b.pos[a];
+      len += want[a] * want[a];
+    }
+    len = std::sqrt(len);
+    if (len > 0.3f) {
+      float dot = 0.0f;
+      for (int a = 0; a < 3; ++a) {
+        want[a] /= len;
+        dot += want[a] * b.dir[a];
+      }
+      const float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
+      const float step = std::min(1.0f, turn_rate * dt / std::max(angle, 1e-4f));
+      float n = 0.0f;
+      for (int a = 0; a < 3; ++a) {
+        b.dir[a] += (want[a] - b.dir[a]) * step;
+        n += b.dir[a] * b.dir[a];
+      }
+      n = std::sqrt(n);
+      if (n > 1e-4f)
+        for (auto& c : b.dir)
+          c /= n;
+    }
+  }
+  for (int a = 0; a < 3; ++a)
+    b.pos[a] += b.dir[a] * b.speed * dt;
+  b.travelled += b.speed * dt;
+  b.spin = b.spin + 6.28318531f * kBladeSpin * dt;
+  if (b.spin > 6.28318531f)
+    b.spin -= 6.28318531f;
+  Invoke(ctx, base, "SET_OBJECT_COORDINATES", {b.object, Bits(b.pos[0]), Bits(b.pos[1]), Bits(b.pos[2])});
+  SuitBladePose(ctx, base, b);
+  // whoever it meets (a look every third frame, a metre about it) is knocked down
+  if ((b.frames % 3) == 0 && age > 0.08f) {
+    const auto near = Invoke(ctx, base, "GET_CLOSEST_CHAR",
+                             {Bits(b.pos[0]), Bits(b.pos[1]), Bits(b.pos[2]), Bits(1.1f), 1, 1, 0}, 6, 0, 1, -1, {}, 1);
+    if (near && near->words[0] && near->words[1] && near->words[1] != game.ped && near->words[1] != b.last_struck) {
+      const uint32_t other = near->words[1];
+      b.last_struck = other;
+      ++b.struck;
+      Invoke(ctx, base, "SWITCH_PED_TO_RAGDOLL", {other, 1500, 3000, 0, 1, 1, 0});
+      Invoke(ctx, base, "SET_CHAR_VELOCITY", {other, Bits(b.dir[0] * 6.0f), Bits(b.dir[1] * 6.0f), Bits(3.0f)});
+      AddHeat(0.1f);
+      g_suit_synth.Hit();
+      if (!b.returning && other == b.target) {
+        b.returning = true;
+        b.target = 0;
+        b.speed = kBladeSpeed * 0.6f;
+      }
+    }
+  }
+  const float dx = b.pos[0] - at[0], dy = b.pos[1] - at[1], dz = b.pos[2] - at[2] - 0.45f;
+  const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+  g_suit_synth.Blade(1.0f / (1.0f + dist / 7.0f));
+  if (b.returning) {
+    if (dist < 1.4f || age > 6.0f) {
+      g_suit_synth.Catch();
+      SuitBladeEnd(ctx, base, m, dist < 1.4f ? "caught" : "lost");
+    }
+    return;
+  }
+  // a wall (something stands over this spot, higher than the blade), the
+  // ground, or the end of its range: it comes back
+  const char* back = nullptr;
+  if (b.travelled > kBladeRange || age > 1.8f)
+    back = "the end of its range";
+  else if ((b.frames % 2) == 0) {
+    const auto top = GroundZ(ctx, base, b.pos[0], b.pos[1], 900.0f);
+    const auto below = GroundZ(ctx, base, b.pos[0], b.pos[1], b.pos[2] + 0.3f);
+    if (top && *top > b.pos[2] + 0.3f && b.travelled > 2.0f)
+      back = "a wall";
+    else if (below && *below > b.pos[2] - 0.2f)
+      back = "the ground";
+  }
+  if (back) {
+    SuitLog(m, fmt::format("blade: turned back by {} at {:.0f} m", back, b.travelled));
+    b.returning = true;
+    b.target = 0;
+    b.speed = kBladeSpeed * 0.6f;
+    if (back != std::string_view("the end of its range"))
+      g_suit_synth.Hit();
+  }
+}
+
+void SuitSignalEnd(PPCContext& ctx, uint8_t* base, SuitState& m, const char* why) {
+  if (m.signal_lit)
+    SuitLog(m, fmt::format("Bat-Signal: {}", why));
+  DeleteObject(ctx, base, m.signal_object);
+  if (m.signal_lit)
+    g_suit_synth.Signal(false);
+  m.signal_lit = 0;
+  m.signal_called = false;
+}
+
+// The Bat-Signal set down three metres ahead of him, on the ground, its beam
+// away from him; the Batmobile comes to it.
+bool SuitSignalPlace(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, State& s, uint64_t now) {
+  if (m.signal_lit) {
+    SuitSignalEnd(ctx, base, m, "switched off");
+    Toast(s, "Bat-Signal off.", 1200);
+    return true;
+  }
+  if (SuitKit(ctx, base, m, true) != 1) {
+    Toast(s, "The Beyond kit is not installed (addons/maps/beyondkit is missing from the app folder).", 3500);
+    return false;
+  }
+  const uint32_t hash = ModelHash(kSignalModel);
+  const auto loaded = Invoke(ctx, base, "HAS_MODEL_LOADED", {hash});
+  if (!loaded || !loaded->r0()) {
+    Invoke(ctx, base, "REQUEST_MODEL", {hash});
+    Toast(s, "The Bat-Signal is loading...", 800);
+    return false;
+  }
+  const auto at = PedPosition(ctx, base, game.ped);
+  if (!at)
+    return false;
+  const CameraFrame cam = SuitCamera(ctx, base, at->data());
+  if (!cam.ok)
+    return false;
+  float p[3] = {(*at)[0] + cam.fwd[0] * 3.0f, (*at)[1] + cam.fwd[1] * 3.0f, (*at)[2] - 1.0f};
+  if (const auto gz = GroundZ(ctx, base, p[0], p[1], (*at)[2] + 2.0f))
+    p[2] = *gz;
+  const bool exact = NativeKnown("CREATE_OBJECT_NO_OFFSET");
+  const auto obj = Invoke(ctx, base, exact ? "CREATE_OBJECT_NO_OFFSET" : "CREATE_OBJECT",
+                          {hash, Bits(p[0]), Bits(p[1]), Bits(p[2]), 0, 1}, 4);
+  if (!obj || !obj->words[0]) {
+    SuitLog(m, "Bat-Signal: the object could not be made");
+    return false;
+  }
+  m.signal_object = obj->words[0];
+  // (the model's beam runs along its -y: its +y towards him puts the beam away)
+  const float back[3] = {-cam.fwd[0], -cam.fwd[1], 0.0f};
+  PointObjectAlong(ctx, base, m.signal_object, back);
+  if (!exact)
+    Invoke(ctx, base, "SET_OBJECT_COORDINATES", {m.signal_object, Bits(p[0]), Bits(p[1]), Bits(p[2])});
+  Invoke(ctx, base, "FREEZE_OBJECT_POSITION", {m.signal_object, 1});
+  Invoke(ctx, base, "SET_OBJECT_INVINCIBLE", {m.signal_object, 1});
+  std::copy(p, p + 3, m.signal_pos);
+  m.signal_fwd[0] = cam.fwd[0], m.signal_fwd[1] = cam.fwd[1];
+  m.signal_lit = now;
+  m.signal_called = false;
+  g_suit_synth.Signal(true);
+  SuitVoice(true);
+  Toast(s, g_have_beyond ? "Bat-Signal lit. The Batmobile is coming." : "Bat-Signal lit.", 2500);
+  SuitLog(m, fmt::format("Bat-Signal lit at ({:.1f} {:.1f} {:.1f})", p[0], p[1], p[2]));
+  return true;
+}
+
+// Every frame while the signal is up: the beam's light on what it falls on
+// (the lamp, then three points up the beam), the Batmobile sent for once the
+// lamp is warm; out by itself after half a minute.
+void SuitSignalTick(PPCContext& ctx, uint8_t* base, SuitState& m, State& s, uint64_t now) {
+  if (!m.signal_lit)
+    return;
+  if (now - m.signal_lit > kSignalHoldMs) {
+    SuitSignalEnd(ctx, base, m, "out (its half minute)");
+    return;
+  }
+  const float warm = std::clamp(float(now - m.signal_lit) / 1100.0f, 0.0f, 1.0f);
+  const float flick = 0.92f + 0.08f * std::sin(float(now % 1000) * 0.0377f);
+  const float* p = m.signal_pos;
+  Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
+         {Bits(p[0]), Bits(p[1]), Bits(p[2] + 1.2f), 255, 244, 205, Bits(7.0f * warm), Bits(10.0f * warm * flick)});
+  // (the beam: along -y of the model, which faces away from him, rising about 20 degrees)
+  for (const float d : {8.0f, 16.0f, 24.0f}) {
+    const float q[3] = {p[0] + m.signal_fwd[0] * d, p[1] + m.signal_fwd[1] * d, p[2] + 0.8f + d * 0.36f};
+    Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
+           {Bits(q[0]), Bits(q[1]), Bits(q[2]), 255, 240, 190, Bits(9.0f * warm), Bits(6.0f * warm * flick)});
+  }
+  if (!m.signal_called && warm >= 1.0f) {
+    m.signal_called = true;
+    if (g_have_beyond)
+      s.beyond_summon = true;
+  }
+}
+
 // Every pass while the suit is worn (and a look a few times a second to
 // put it back when the game changes his clothes). Returns the buttons the
 // suit took.
@@ -10144,10 +10486,14 @@ uint32_t SuitTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
       Toast(s, "The Beyond suit is not installed (addons/beyondsuit is missing from the app folder).", 4000);
     } else {
       m.worn = !m.worn;
-      if (m.worn)
+      if (m.worn) {
         m.wings = kWingsFolded;
-      else
+      } else {
         SuitStopFlight(ctx, base, game, m, "the suit comes off");
+        SuitBladeEnd(ctx, base, m, "the suit comes off");
+        SuitSignalEnd(ctx, base, m, "the suit comes off");
+      }
+      SuitKit(ctx, base, m, m.worn);
       SuitDress(ctx, base, game, m, m.worn);
       SuitWeapons(ctx, base, game, m, m.worn);
       SuitCloak(ctx, base, game, m, false);
@@ -10188,9 +10534,12 @@ uint32_t SuitTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
   }
   const auto in_car = CurrentVehicle(ctx, base, game);
   const auto at = PedPosition(ctx, base, game.ped);
+  SuitSignalTick(ctx, base, m, s, now);  // (the lamp shines on whether he drives off or not)
   if (in_car || !at) {
     if (m.flying || m.gliding)
       SuitStopFlight(ctx, base, game, m, "in a vehicle");
+    if (m.blade.live)
+      SuitBladeEnd(ctx, base, m, "in a vehicle");
     m.energy = std::min(kSuitEnergyMax, m.energy + 10.0f * dt);
     SuitHudModel hud;
     hud.visible = !in_car;
@@ -10280,13 +10629,16 @@ uint32_t SuitTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
         }
         break;
       case Gadget::kBatarang:
+        SuitBladeThrow(ctx, base, game, m, s, now);
+        break;
       case Gadget::kSignal:
-        Toast(s, "Coming in the next release.", 1500);
+        SuitSignalPlace(ctx, base, game, m, s, now);
         break;
       default:
         break;
     }
   }
+  SuitBladeTick(ctx, base, game, m, *at, dt, now);
 
   // ---- flight: a double tap of jump lifts off; circle cuts the jets; triangle the wings
   if (pressed & X_INPUT_GAMEPAD_X) {
@@ -10566,6 +10918,171 @@ uint32_t SuitTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State
   return keep;
 }
 
+// ---------------------------------------------------------------------------
+// The General Lee's horn (v1.7.47): the user's own recording (addons/genlee/
+// horn.wav, 16-bit PCM, mixed to mono and levelled), played on L3 in either
+// General Lee through the trainer's mixer, so it carries on after he jumps
+// out, with the distance and the Doppler of the car he left.
+// ---------------------------------------------------------------------------
+struct HornSample {
+  std::vector<float> mono;
+  uint32_t rate = 44100;
+  bool loaded = false, tried = false;
+};
+HornSample g_horn;
+std::atomic<float> g_horn_gain{1.0f}, g_horn_pitch{1.0f};
+
+bool LoadHorn(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    return false;
+  std::vector<uint8_t> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (raw.size() < 44 || std::memcmp(raw.data(), "RIFF", 4) != 0 || std::memcmp(raw.data() + 8, "WAVE", 4) != 0)
+    return false;
+  auto le32 = [&](size_t o) { return uint32_t(raw[o]) | uint32_t(raw[o + 1]) << 8 | uint32_t(raw[o + 2]) << 16 | uint32_t(raw[o + 3]) << 24; };
+  auto le16 = [&](size_t o) { return uint16_t(raw[o]) | uint16_t(raw[o + 1]) << 8; };
+  size_t o = 12;
+  uint16_t channels = 0, bits = 0;
+  uint32_t rate = 0;
+  const uint8_t* data = nullptr;
+  size_t data_size = 0;
+  while (o + 8 <= raw.size()) {
+    const uint32_t size = le32(o + 4);
+    if (std::memcmp(raw.data() + o, "fmt ", 4) == 0 && size >= 16) {
+      channels = le16(o + 10);
+      rate = le32(o + 12);
+      bits = le16(o + 22);
+    } else if (std::memcmp(raw.data() + o, "data", 4) == 0) {
+      data = raw.data() + o + 8;
+      data_size = std::min<size_t>(size, raw.size() - (o + 8));
+    }
+    o += 8 + size + (size & 1);
+  }
+  if (!data || !channels || bits != 16 || !rate)
+    return false;
+  const size_t frames = data_size / (2 * channels);
+  g_horn.mono.resize(frames);
+  float peak = 1e-6f;
+  for (size_t i = 0; i < frames; ++i) {
+    float sum = 0.0f;
+    for (uint16_t c = 0; c < channels; ++c)
+      sum += float(int16_t(le16((i * channels + c) * 2 + (data - raw.data())))) / 32768.0f;
+    g_horn.mono[i] = sum / float(channels);
+    peak = std::max(peak, std::fabs(g_horn.mono[i]));
+  }
+  const float gain = 0.9f / peak;
+  for (float& v : g_horn.mono)
+    v *= gain;
+  g_horn.rate = rate;
+  g_horn.loaded = true;
+  REXLOG_INFO("gta4-trainer: General Lee horn loaded: {} ({} frames, {} Hz, {} channel(s), levelled x{:.2f})",
+              path.string(), frames, rate, channels, gain);
+  return true;
+}
+
+#if REX_PLATFORM_PS5
+class HornSource final : public gta4ps5::sound::Source {
+ public:
+  size_t Read(float* lr, size_t frames) override {
+    const float gain = g_horn_gain.load(std::memory_order_relaxed);
+    const float step = g_horn_pitch.load(std::memory_order_relaxed) * float(g_horn.rate) / float(gta4ps5::sound::kRate);
+    size_t n = 0;
+    for (; n < frames; ++n) {
+      const size_t i = size_t(pos_);
+      if (i + 1 >= g_horn.mono.size())
+        break;
+      const float f = float(pos_ - double(i));
+      const float v = (g_horn.mono[i] * (1.0f - f) + g_horn.mono[i + 1] * f) * gain;
+      lr[2 * n] = v;
+      lr[2 * n + 1] = v;
+      pos_ += step;
+    }
+    for (size_t k = n; k < frames; ++k)
+      lr[2 * k] = lr[2 * k + 1] = 0.0f;
+    return n;
+  }
+  bool Rewind() override {
+    pos_ = 0.0;
+    return true;
+  }
+
+ private:
+  double pos_ = 0.0;
+};
+gta4ps5::sound::Voice* g_horn_voice = nullptr;
+#endif
+struct HornState {
+  bool playing = false;
+  uint32_t car = 0;
+  uint64_t started = 0;
+  float last_dist = -1.0f;
+  uint64_t last_ms = 0;
+};
+HornState g_horn_state;
+
+void HornPlay(uint32_t car) {
+  if (!g_horn.tried) {
+    g_horn.tried = true;
+    const auto dir = gta4::addons::AddonsDir();
+    if (dir.empty() || !LoadHorn(dir / "genlee" / "horn.wav"))
+      REXLOG_WARN("gta4-trainer: General Lee horn: addons/genlee/horn.wav not loaded");
+  }
+  if (!g_horn.loaded)
+    return;
+#if REX_PLATFORM_PS5
+  if (!g_horn_voice) {
+    gta4ps5::sound::StartOutput();
+    g_horn_voice = gta4ps5::sound::NewVoice();
+    g_horn_voice->game_sound = true;
+  }
+  if (g_horn_voice->Active())
+    g_horn_voice->Stop();
+  g_horn_gain.store(1.0f, std::memory_order_relaxed);
+  g_horn_pitch.store(1.0f, std::memory_order_relaxed);
+  g_horn_voice->SetVolume(0.8f);
+  g_horn_voice->Play(std::make_unique<HornSource>(), false);
+#endif
+  g_horn_state.playing = true;
+  g_horn_state.car = car;
+  g_horn_state.started = NowMs();
+  g_horn_state.last_dist = -1.0f;
+}
+
+// Each pass while it sounds: the listener outside the car hears it by
+// distance and Doppler (the player at the wheel hears it as it is).
+void HornTick(PPCContext& ctx, uint8_t* base, const GameContext& game) {
+  auto& h = g_horn_state;
+  if (!h.playing)
+    return;
+  const uint64_t now = NowMs();
+  const float seconds = g_horn.loaded ? float(g_horn.mono.size()) / float(g_horn.rate) : 0.0f;
+  if (now > h.started + uint64_t(seconds * 1000.0f) + 500) {
+    h.playing = false;
+    return;
+  }
+  const auto in_car = CurrentVehicle(ctx, base, game);
+  if (in_car && *in_car == h.car) {
+    g_horn_gain.store(1.0f, std::memory_order_relaxed);
+    g_horn_pitch.store(1.0f, std::memory_order_relaxed);
+    h.last_dist = -1.0f;
+    return;
+  }
+  const auto at = CarPosition(ctx, base, h.car);
+  if (!at)
+    return;
+  float d2 = 0.0f;
+  for (int a = 0; a < 3; ++a)
+    d2 += ((*at)[a] - game.position[a]) * ((*at)[a] - game.position[a]);
+  const float dist = std::max(std::sqrt(d2), 1.0f);
+  float closing = 0.0f;
+  if (h.last_dist >= 0.0f && now > h.last_ms)
+    closing = (h.last_dist - dist) / (float(now - h.last_ms) / 1000.0f);
+  h.last_dist = dist;
+  h.last_ms = now;
+  g_horn_gain.store(std::min(1.0f, 6.0f / dist), std::memory_order_relaxed);
+  g_horn_pitch.store(343.0f / (343.0f - std::clamp(closing, -100.0f, 100.0f)), std::memory_order_relaxed);
+}
+
 // The TCD and the speedometer as the overlay shows them.
 void PublishTcd(const State& s) {
   const auto& m = g_tm;
@@ -10597,10 +11114,12 @@ void CarEngine(PPCContext& ctx, uint8_t* base, const GameContext& game, const Dr
   if (!e.in_car && !e.running && now < e.next_probe)
     return;
   e.next_probe = now + 300;
-  const uint32_t model = ModelHash(e.model), model2 = e.model2.empty() ? 0u : ModelHash(e.model2);
+  const uint32_t model = ModelHash(e.model), model2 = e.model2.empty() ? 0u : ModelHash(e.model2),
+                 model3 = e.model3.empty() ? 0u : ModelHash(e.model3);
   const auto& vehicle = PlayerVehicle(ctx, base, game);
   auto& synth = *e.synth;
-  if (!vehicle.car || (vehicle.model != model && (!model2 || vehicle.model != model2))) {
+  if (!vehicle.car || (vehicle.model != model && (!model2 || vehicle.model != model2) &&
+                       (!model3 || vehicle.model != model3))) {
     if (e.in_car)
       synth.SetTarget(0.0f, 0.0f, 0.0f, e.volume);  // switched off: it winds down
     e.in_car = false;
@@ -12610,13 +13129,15 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
   const bool lazar_engine_due = engine_due(g_have_lazar, g_lazar_engine);
   const bool gauntlet_engine_due = engine_due(g_have_gauntlet, g_gauntlet_engine);
   const bool hellcat_engine_due = engine_due(g_have_hellcat, g_hellcat_engine);
+  const bool charger_engine_due = engine_due(g_have_charger, g_charger_engine) || g_horn_state.playing;
   const bool dmc_engine_due = engine_due(g_have_dmc12, g_dmc_engine);
   const bool bttf1_engine_due = engine_due(g_have_bttf1, g_bttf1_engine);
   const bool bttf2_engine_due = engine_due(g_have_bttf2, g_bttf2_engine);
   const bool bttf3_engine_due = engine_due(g_have_bttf3, g_bttf3_engine);
   const bool any_engine_due = bat_engine_due || deimos_engine_due || nexus_engine_due || arbiter_engine_due ||
                               dominator_engine_due || lazar_engine_due || gauntlet_engine_due || dmc_engine_due ||
-                              bttf1_engine_due || bttf2_engine_due || bttf3_engine_due || hellcat_engine_due;
+                              bttf1_engine_due || bttf2_engine_due || bttf3_engine_due || hellcat_engine_due ||
+                              charger_engine_due;
   const bool rain_due = s.raining && now >= g_next_rain;
   const bool teleport_due = g_teleport.active;
   const bool heat_due = g_heat_pending > 0.0f;
@@ -12689,12 +13210,13 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_beyond = installed("BEYOND");
     g_have_hellcat = installed("HELLCAT");
     g_have_suit = gta4::addons::SuitInstalled() > 0;
+    g_have_charger = installed("CHARGER69") || installed("GENLEE") || installed("GENLEECA");
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Batwing {}, Deimos {}, Dominator 645 {}, "
                 "Nexus {}, Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}, DMC-12 {}, time machines {}/{}/{} "
-                "(v1.7.21 flying form {}), Beyond Batmobile {}, Hellcat {}, Beyond suit {} ({} files)",
+                "(v1.7.21 flying form {}), Beyond Batmobile {}, Hellcat {}, Beyond suit {} ({} files), Chargers {}",
                 g_have_batmobile, g_have_f16, g_have_batwing, g_have_deimos, g_have_dominator, g_have_nexus,
                 g_have_arbiter, g_have_lazar, g_have_gauntlet, g_have_dmc12, g_have_bttf1, g_have_bttf2, g_have_bttf3,
-                g_have_bttf2h, g_have_beyond, g_have_hellcat, g_have_suit, gta4::addons::SuitInstalled());
+                g_have_bttf2h, g_have_beyond, g_have_hellcat, g_have_suit, gta4::addons::SuitInstalled(), g_have_charger);
   }
 
   bool acted = false;
@@ -12830,6 +13352,23 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       CarEngine(ctx, base, game, pad, g_gauntlet_engine, 0.0f);
     if (hellcat_engine_due)
       CarEngine(ctx, base, game, pad, g_hellcat_engine, 0.0f);
+    if (charger_engine_due) {
+      CarEngine(ctx, base, game, pad, g_charger_engine, 0.0f);
+      // the General Lee's horn on L3 (the game's own horn kept from it)
+      if (g_charger_engine.in_car) {
+        const auto& v = PlayerVehicle(ctx, base, game);
+        if (v.car && (v.model == ModelHash("GENLEE") || v.model == ModelHash("GENLEECA"))) {
+          vehicle_mask |= X_INPUT_GAMEPAD_LEFT_THUMB;
+          const uint16_t buttons = g_gadget_buttons.load(std::memory_order_relaxed);
+          const uint16_t previous = g_gadget_previous.load(std::memory_order_relaxed);
+          if ((buttons & X_INPUT_GAMEPAD_LEFT_THUMB) && !(previous & X_INPUT_GAMEPAD_LEFT_THUMB) &&
+              !(buttons & X_INPUT_GAMEPAD_RIGHT_THUMB))
+            HornPlay(*v.car);
+        }
+      }
+    }
+    if (g_horn_state.playing)
+      HornTick(ctx, base, game);
     if (dmc_engine_due)
       CarEngine(ctx, base, game, pad, g_dmc_engine, 0.0f);
     if (bttf1_engine_due)

@@ -125,12 +125,19 @@ struct MapInfo {
   std::vector<MapSpot> spots;
   std::filesystem::path dir;  // its folder (ground.bin, the trainer's own ground grid, is read from it)
   bool installed = false;    // in vehicles.img and gtxd.ide this launch
+  // A props set (v1.7.47, map.txt "props yes"): its models go in like a
+  // place's, but nothing is placed and the menu lists it nowhere - they are
+  // the trainer's own objects (the Beyond suit's blade and Bat-Signal).
+  bool props = false;
 };
 // The map sets this launch installed (filled by InstallBundled).
 const std::vector<MapInfo>& InstalledMaps();
 // The Beyond suit (v1.7.46): how many of its component files are where the
 // game reads the player's clothes this launch (0: no suit).
 int SuitInstalled();
+// The app's addons folder (for the trainer's own files in it: the General
+// Lee's horn, v1.7.47).
+std::filesystem::path AddonsDir();
 // The level most of the stock sea is at (water.dat), or 0 when not read.
 float SeaLevel();
 

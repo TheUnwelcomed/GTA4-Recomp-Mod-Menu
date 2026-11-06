@@ -224,6 +224,20 @@ constexpr Physical kHellcatEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0, 
                                   700.0f, 85.0f, 0.4f, 1.3f, 0.4f, 0.04f, 0.3f, 0.2f, 160.0f,
                                   0.1f, 2000.0f, 0.3f, 0.03f, 0.0f, 0.0f, 1.45f,
                                   0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 7.08f};
+// The 1969 Dodge Charger R/T (and the General Lee built on it): the 440
+// Magnum, Chrysler's 7.2-litre RB big block, the same firing order and
+// uneven banks as the 440 Six Pack above, a single Carter four-barrel (its
+// secondaries' roar when floored, less of it than three carburettors), a
+// long high-lift cam (the lumpy idle at 750, more lope than the Challenger's),
+// cast-iron manifolds into the long true duals of a longer car (the pipes
+// run the Charger's whole length) with big low mufflers, mechanical lifters
+// ticking; redline 5,500. (v1.7.47)
+constexpr Physical kChargerEngine{8, {0, 90, 180, 270, 360, 450, 540, 630}, {0, 1, 1, 0, 1, 0, 0, 1},
+                                  270.0f, 1.7f, 0.8f, 3.1f, 0.55f, -0.25f, 0.25f, -0.3f, 0.08f,
+                                  600.0f, 76.0f, 0.38f, 1.25f, 0.4f, 0.07f, 0.78f, 0.32f, 115.0f,
+                                  0.08f, 1500.0f, 0.55f, 0.045f, 0.0f, 0.0f, 1.42f};
+constexpr Character kCharger{.idle_rpm = 750.0f, .limit_rpm = 5500.0f, .pops = 6.0f, .flare = 1.9f,
+                             .physical = &kChargerEngine};
 constexpr Character kDeimos{.idle_rpm = 950.0f, .limit_rpm = 7700.0f, .pops = 8.0f, .flare = 2.0f,
                             .physical = &kDeimosEngine};
 constexpr Character kHellcat{.idle_rpm = 700.0f, .limit_rpm = 6200.0f, .pops = 7.0f, .flare = 1.8f,

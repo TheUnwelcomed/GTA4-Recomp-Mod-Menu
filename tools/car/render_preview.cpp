@@ -41,6 +41,7 @@ constexpr Car kCars[] = {
     {"lazar3", &gta4::car::kLazar, false, Extras::kArmour},
     {"delorean", &gta4::car::kDelorean, false, Extras::kGullwings},
     {"hellcat", &gta4::car::kHellcat, false, Extras::kDoors},
+    {"charger", &gta4::car::kCharger, false, Extras::kDoors},
 };
 }  // namespace
 

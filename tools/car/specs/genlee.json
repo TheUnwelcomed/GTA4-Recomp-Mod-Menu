@@ -1,0 +1,28 @@
+{
+  "name": "genlee",
+  "label": "General Lee (1969 Charger, Georgia)",
+  "credit": "The 1969 Dodge Charger Pack (OhiOcinu et al.) with the General Lee livery pack (DukesLiveryFinal: the GA and CA decal sheets and plates by its author; the roof flag decal repurposed from gtavjamal's set) and the horn the user made",
+  "template": "banshee",
+  "sources": "police",
+  "lod": 0,
+  "texture_side": 512,
+  "livery_side": 2048,
+  "livery": {
+    "charger69_sign_1": "genlee_ga.png"
+  },
+  "plate": "plate_ga.png",
+  "seats": {
+    "seat_dside_f": [
+      -0.39,
+      0.05,
+      -0.12
+    ],
+    "seat_pside_f": [
+      0.39,
+      0.05,
+      -0.12
+    ]
+  },
+  "colours": "132,0,0",
+  "options": "tex=2048"
+}

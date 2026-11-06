@@ -1,0 +1,21 @@
+{
+  "name": "charger69",
+  "label": "1969 Dodge Charger R/T",
+  "credit": "1969 Dodge Charger Pack: model from Forza Horizon 4, extracted by -Logic-, converted to V by OhiOcinu, add-on, handling and underbody by GreenAid, dirt map by Oh Deer, underbody by viter, tunings by tk0wnZ",
+  "template": "banshee",
+  "lod": 0,
+  "texture_side": 512,
+  "seats": {
+    "seat_dside_f": [
+      -0.39,
+      0.05,
+      -0.12
+    ],
+    "seat_pside_f": [
+      0.39,
+      0.05,
+      -0.12
+    ]
+  },
+  "colours": "6,0,0"
+}

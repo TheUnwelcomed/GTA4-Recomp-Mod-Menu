@@ -1774,6 +1774,8 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
         std::sscanf(value.c_str(), "%f %f %f %f", &info.area[0], &info.area[1], &info.area[2], &info.area[3]);
       else if (key == "prefix" && value.size() >= 3 && value.back() == '_')
         m.prefix = Lower(value);
+      else if (key == "props")
+        info.props = Lower(value) == "yes" || value == "1";
       else if (key == "bounds" || key == "peds") {  // (names: several collision dictionaries; the ped models)
         std::string word;
         auto& into = key == "bounds" ? info.bounds : info.peds;
@@ -1979,10 +1981,13 @@ std::vector<MapSet> FindMaps(const fs::path& maps_dir) {
       REXLOG_INFO("gta4-addons: map set {}: {} file(s) in its folder no model line names (an earlier release's); "
                   "left out",
                   dir.filename().string(), unnamed);
-    if (info.name.empty() || info.pieces.empty() || m.files.empty() || m.objs.empty()) {
+    if (info.name.empty() || (info.pieces.empty() && !info.props) || m.files.empty() || m.objs.empty()) {
       REXLOG_WARN("gta4-addons: map set {} has no name, pieces, models or files; left out", dir.string());
       continue;
     }
+    if (info.props)
+      REXLOG_INFO("gta4-addons: map set {} is a props set: its {} models go in, nothing is placed", info.name,
+                  m.objs.size());
     REXLOG_INFO("gta4-addons: map set {} (\"{}\"): {} pieces ({} of the game's own models), {} models, {} files, "
                 "{} collision dictionar{}, {}; its life: {} vehicles, {} ped models ({} about), weather {}, ambience {}",
                 info.name, info.label, info.pieces.size(), stock_pieces, m.objs.size(), m.files.size(),
@@ -2076,6 +2081,8 @@ std::vector<uint8_t> WithMapWater(const std::vector<uint8_t>& original, std::vec
   }
   for (auto& m : maps) {
     MapInfo& info = m.info;
+    if (info.props)  // (a props set is nowhere: no water under it)
+      continue;
     // (the check over the place itself; new water a good way past it)
     constexpr float kMargin = 250.0f, kCheck = 30.0f;
     const float x0 = info.area[0] + info.shift[0] - kMargin, y0 = info.area[1] + info.shift[1] - kMargin;
@@ -2278,6 +2285,7 @@ bool ShadowHolds(const fs::path& shadow, const std::vector<uint8_t>& key,
 fs::path g_user_data;
 std::atomic<bool> g_snow_active{false};
 std::vector<ShadowArchive> g_mounted;  // (what InstallBundled returned, for ShadowOf)
+fs::path g_app_addons;                 // (the app's addons folder, for AddonsDir)
 
 fs::path SnowSwitch(const fs::path& user_data) { return user_data / "liberty_menu_snow.txt"; }
 
@@ -3002,6 +3010,7 @@ std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<
 std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
                                           const fs::path& user_data_root) {
   std::error_code ec;
+  g_app_addons = app_addons;
   if (!fs::exists(app_addons, ec)) return {};  // nothing bundled
   const std::vector<Addon> addons = FindAddons(app_addons);
   if (addons.empty()) return {};
@@ -3232,6 +3241,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
 
 const std::vector<MapInfo>& InstalledMaps() { return g_maps; }
 int SuitInstalled() { return g_suit_installed; }
+std::filesystem::path AddonsDir() { return g_app_addons; }
 
 // Snow mode's switch and state (the header).
 bool SnowActive() { return g_snow_active.load(std::memory_order_relaxed); }
