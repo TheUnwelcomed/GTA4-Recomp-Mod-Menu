@@ -128,6 +128,9 @@ struct MapInfo {
 };
 // The map sets this launch installed (filled by InstallBundled).
 const std::vector<MapInfo>& InstalledMaps();
+// The Beyond suit (v1.7.46): how many of its component files are where the
+// game reads the player's clothes this launch (0: no suit).
+int SuitInstalled();
 // The level most of the stock sea is at (water.dat), or 0 when not read.
 float SeaLevel();
 

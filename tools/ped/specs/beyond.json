@@ -1,0 +1,91 @@
+{
+  "_": "The Batman Beyond (Animated) V ped mod as the player's Beyond suit: the body on uppr 17, the glide wings on sus2 2 (open), 3 (half open) and 4 (folded away: a placeholder), placeholders on every slot the suit covers.",
+  "ydd": "mod/BatmanBeyond(Animated).ydd",
+  "yft": "mod/BatmanBeyond(Animated).yft",
+  "template": "iv/src/feet_000_u.xdr",
+  "template_body": "iv/feet_000_u.xdr.bin",
+  "shader_sources": [
+    "iv/src/uppr_000_u.xdr"
+  ],
+  "xtd_template": "iv/src/uppr_diff_000_a_uni.xtd",
+  "pc_samples": [
+    "samples/bennys.wdr",
+    "samples/boatconsol_det.wdr"
+  ],
+  "textures": "build/suit.wtd",
+  "textures_of": {
+    "diffuse": "suit_d",
+    "normal": "suit_n",
+    "spec": "suit_s"
+  },
+  "placeholder_texture": "ph_d",
+  "xlzx": "../conv/xlzx",
+  "components": [
+    {
+      "slot": "uppr",
+      "index": 17,
+      "hash": 2540683012,
+      "side": 1024
+    },
+    {
+      "slot": "sus2",
+      "index": 2,
+      "hash": 2618426638,
+      "side": 512,
+      "embed_side": 512
+    },
+    {
+      "slot": "sus2",
+      "index": 3,
+      "hash": 2618426638,
+      "side": 512,
+      "scale_x": 0.45,
+      "scale_about": "Char_Spine3",
+      "embed_side": 512
+    },
+    {
+      "slot": "sus2",
+      "index": 4,
+      "kind": "placeholder"
+    },
+    {
+      "slot": "head",
+      "index": 1,
+      "kind": "placeholder",
+      "suffix": "r",
+      "race": "whi"
+    },
+    {
+      "slot": "hand",
+      "index": 2,
+      "kind": "placeholder",
+      "suffix": "r",
+      "race": "whi"
+    },
+    {
+      "slot": "lowr",
+      "index": 8,
+      "kind": "placeholder"
+    },
+    {
+      "slot": "feet",
+      "index": 7,
+      "kind": "placeholder"
+    },
+    {
+      "slot": "hair",
+      "index": 3,
+      "kind": "placeholder"
+    },
+    {
+      "slot": "teef",
+      "index": 1,
+      "kind": "placeholder"
+    },
+    {
+      "slot": "suse",
+      "index": 4,
+      "kind": "placeholder"
+    }
+  ]
+}

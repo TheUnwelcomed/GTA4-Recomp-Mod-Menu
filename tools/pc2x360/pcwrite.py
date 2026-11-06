@@ -137,22 +137,28 @@ class Drawable:
         self.shaders.append((sps, dict(textures), dict(vectors or {})))
         return len(self.shaders) - 1
 
-    def geometry(self, lod, shader, pos, nrm, col, uvs, tris, tan=None, bones=None):
+    def geometry(self, lod, shader, pos, nrm, col, uvs, tris, tan=None, bones=None, skin=None):
         """pos (n, 3), nrm (n, 3) or None, col (n, 4) uint8 or None, uvs a
         list of (n, 2) arrays, tris (m, 3) int, tan (n, 4) or None (the
         tangent and its handedness, for normal-mapped shaders). More than
         65535 vertices are split into several geometries. `bones`: a skinned
         geometry (a vehicle's, v1.7.43): the bone table (skeleton bone
-        indexes) and every vertex bound wholly to its first entry."""
+        indexes) and every vertex bound wholly to its first entry - or, with
+        `skin` = (weights (n, 4) uint8 summing to 255, indices (n, 4) uint8
+        into the table), each vertex to up to four of its entries (a ped's
+        clothes: ped/pedconv.py, v1.7.46)."""
         pos = np.asarray(pos, np.float32)
         tris = np.asarray(tris, np.int64).reshape(-1, 3)
         n = len(pos)
+        if skin is not None:
+            skin = (np.asarray(skin[0], np.uint8).reshape(n, 4), np.asarray(skin[1], np.uint8).reshape(n, 4))
+            assert bones is not None and int(skin[1].max()) < len(bones), 'skin indices past the bone table'
         if n <= MAX_VERTICES:
             self.lods[lod].append(dict(shader=shader, pos=pos, nrm=None if nrm is None else np.asarray(nrm, np.float32),
                                        col=None if col is None else np.asarray(col, np.uint8),
                                        uvs=[np.asarray(u, np.float32) for u in uvs], tris=tris,
                                        tan=None if tan is None else np.asarray(tan, np.float32),
-                                       bones=None if bones is None else [int(b) for b in bones]))
+                                       bones=None if bones is None else [int(b) for b in bones], skin=skin))
             return 1
         # split by triangle runs, re-indexing each part's vertices
         parts = 0
@@ -171,7 +177,8 @@ class Drawable:
             remap = np.vectorize(used.get)(tris[start:end])
             self.geometry(lod, shader, pos[order], None if nrm is None else np.asarray(nrm)[order],
                           None if col is None else np.asarray(col)[order], [np.asarray(u)[order] for u in uvs], remap,
-                          None if tan is None else np.asarray(tan)[order], bones)
+                          None if tan is None else np.asarray(tan)[order], bones,
+                          None if skin is None else (skin[0][order], skin[1][order]))
             parts += 1
             start = end
         return parts
@@ -235,7 +242,10 @@ class Drawable:
         at = dict(elems)
         vdata = np.zeros((n, stride), np.uint8)
         vdata[:, at[0]:at[0] + 12] = g['pos'].astype('<f4').view(np.uint8)
-        if g.get('bones') is not None:  # (wholly on the table's first bone: weight 255 in the first slot)
+        if g.get('skin') is not None:  # (up to four influences: weights and table slots by byte position)
+            vdata[:, at[1]:at[1] + 4] = g['skin'][0]
+            vdata[:, at[2]:at[2] + 4] = g['skin'][1]
+        elif g.get('bones') is not None:  # (wholly on the table's first bone: weight 255 in the first slot)
             vdata[:, at[1]] = 255
         if g['nrm'] is not None:
             vdata[:, at[3]:at[3] + 12] = g['nrm'].astype('<f4').view(np.uint8)

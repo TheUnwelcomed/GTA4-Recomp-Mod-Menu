@@ -36,6 +36,7 @@
 #include "gta4_jet_engine.h"
 #include "gta4_car_engine.h"
 #include "gta4_beyond_engine.h"
+#include "gta4_suit_sound.h"
 #include "gta4_time_machine.h"
 #include "gta4_island_sound.h"
 #include <fstream>
@@ -57,6 +58,7 @@ namespace gta4::trainer {
 using rex::input::X_INPUT_STATE;
 using rex::input::X_INPUT_GAMEPAD_A;
 using rex::input::X_INPUT_GAMEPAD_B;
+using rex::input::X_INPUT_GAMEPAD_X;
 using rex::input::X_INPUT_GAMEPAD_BACK;
 using rex::input::X_INPUT_GAMEPAD_DPAD_DOWN;
 using rex::input::X_INPUT_GAMEPAD_DPAD_LEFT;
@@ -269,6 +271,20 @@ std::array g_natives = {
     // v1.7.39: the creatures (the sharks' bite).
     NativeEntry{"IS_CHAR_IN_WATER"}, NativeEntry{"GET_CHAR_HEALTH"},
     // v1.7.40: the safehouse on a place (its blip, the game's save menu at its bed).
+    // The Beyond suit (v1.7.46): the player's clothes (the suit's components
+    // in playerped), his flight (velocity, the pose), the glide, his punches.
+    NativeEntry{"SET_CHAR_COMPONENT_VARIATION"}, NativeEntry{"GET_CHAR_DRAWABLE_VARIATION"},
+    NativeEntry{"GET_CHAR_TEXTURE_VARIATION"}, NativeEntry{"GET_NUMBER_OF_CHAR_DRAWABLE_VARIATIONS"},
+    NativeEntry{"SET_CHAR_DEFAULT_COMPONENT_VARIATION"},
+    NativeEntry{"SET_CHAR_VELOCITY"}, NativeEntry{"GET_CHAR_VELOCITY"}, NativeEntry{"GET_CHAR_HEADING"},
+    NativeEntry{"IS_CHAR_IN_AIR"}, NativeEntry{"IS_CHAR_ON_FOOT"}, NativeEntry{"GET_CHAR_SPEED"},
+    NativeEntry{"SWITCH_PED_TO_RAGDOLL"}, NativeEntry{"SWITCH_PED_TO_ANIMATED"}, NativeEntry{"IS_PED_RAGDOLL"},
+    NativeEntry{"REQUEST_ANIMS"}, NativeEntry{"HAVE_ANIMS_LOADED"}, NativeEntry{"TASK_PLAY_ANIM_WITH_FLAGS"},
+    NativeEntry{"IS_CHAR_PLAYING_ANIM"}, NativeEntry{"START_PTFX_ON_PED"},
+    NativeEntry{"HAS_CHAR_BEEN_DAMAGED_BY_CHAR"}, NativeEntry{"CLEAR_CHAR_LAST_DAMAGE_ENTITY"},
+    NativeEntry{"SET_CHAR_MOVE_ANIM_SPEED_MULTIPLIER"}, NativeEntry{"SET_CHAR_COORDINATES_NO_OFFSET"},
+    NativeEntry{"GET_PED_BONE_POSITION"}, NativeEntry{"IS_CHAR_STOPPED"}, NativeEntry{"SET_CHAR_GRAVITY"},
+    NativeEntry{"GET_CHAR_WEAPON_IN_SLOT"}, NativeEntry{"SET_CURRENT_CHAR_WEAPON"},
     NativeEntry{"ADD_BLIP_FOR_CONTACT"}, NativeEntry{"CHANGE_BLIP_SPRITE"}, NativeEntry{"CHANGE_BLIP_DISPLAY"},
     NativeEntry{"CHANGE_BLIP_PRIORITY"}, NativeEntry{"CHANGE_BLIP_NAME_FROM_ASCII"}, NativeEntry{"ACTIVATE_SAVE_MENU"},
 };
@@ -354,6 +370,17 @@ constexpr HandleUse kHandleUses[] = {
     {"TASK_STAND_STILL", -1, 0}, {"DOES_CHAR_EXIST", -1, 0}, {"GET_CHAR_COORDINATES", -1, 0},
     {"DOES_VEHICLE_EXIST", 0}, {"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS", -1, 0}, {"TASK_WANDER_STANDARD", -1, 0},
     {"IS_CHAR_IN_WATER", -1, 0}, {"GET_CHAR_HEALTH", -1, 0},
+    // The Beyond suit (v1.7.46): the player's clothes, his flight, his punches.
+    {"SET_CHAR_COMPONENT_VARIATION", -1, 0}, {"GET_CHAR_DRAWABLE_VARIATION", -1, 0},
+    {"GET_CHAR_TEXTURE_VARIATION", -1, 0}, {"GET_NUMBER_OF_CHAR_DRAWABLE_VARIATIONS", -1, 0},
+    {"SET_CHAR_VELOCITY", -1, 0}, {"GET_CHAR_VELOCITY", -1, 0}, {"GET_CHAR_HEADING", -1, 0},
+    {"IS_CHAR_IN_AIR", -1, 0}, {"IS_CHAR_ON_FOOT", -1, 0}, {"GET_CHAR_SPEED", -1, 0},
+    {"SWITCH_PED_TO_RAGDOLL", -1, 0}, {"SWITCH_PED_TO_ANIMATED", -1, 0}, {"TASK_PLAY_ANIM_WITH_FLAGS", -1, 0},
+    {"IS_CHAR_PLAYING_ANIM", -1, 0}, {"START_PTFX_ON_PED", -1, 1}, {"HAS_CHAR_BEEN_DAMAGED_BY_CHAR", -1, 0},
+    {"CLEAR_CHAR_LAST_DAMAGE_ENTITY", -1, 0}, {"SET_CHAR_MOVE_ANIM_SPEED_MULTIPLIER", -1, 0},
+    {"IS_PED_RAGDOLL", -1, 0}, {"SET_CHAR_COORDINATES_NO_OFFSET", -1, 0}, {"GET_PED_BONE_POSITION", -1, 0},
+    {"IS_CHAR_STOPPED", -1, 0}, {"SET_CHAR_GRAVITY", -1, 0}, {"SET_CHAR_DEFAULT_COMPONENT_VARIATION", -1, 0},
+    {"GET_CHAR_WEAPON_IN_SLOT", -1, 0}, {"SET_CURRENT_CHAR_WEAPON", -1, 0},
 };
 
 // Whether the call must not go ahead: a handle in it the game no longer has.
@@ -393,7 +420,10 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
                                    std::initializer_list<uint32_t> values = {},
                                    int output_argument = -1, uint32_t result_seed = 0,
                                    int output_count = 1, int text_argument = -1,
-                                   std::string_view text = {}, int output_word = 0) {
+                                   std::string_view text = {}, int output_word = 0,
+                                   int text2_argument = -1, std::string_view text2 = {}) {
+  // (text2: a second string argument - an animation and its dictionary, v1.7.46 -
+  // in the scratch text area's upper half; each then at most 0x7F bytes)
   if (StaleHandleCall(base, name, values, result_seed)) {
     // A vehicle or ped that is gone is dead as far as anyone asking goes.
     if (name == "IS_CAR_DEAD" || name == "IS_CHAR_DEAD" || name == "IS_CHAR_INJURED") {
@@ -407,7 +437,8 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
   auto* runtime = rex::Runtime::instance();
   auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
   auto* function = dispatcher && address ? dispatcher->GetFunction(address) : nullptr;
-  if (!function || values.size() > 12 || text.size() > 0xEF || parent.r1.u32 < 0x200)
+  if (!function || values.size() > 12 || text.size() > 0xEF || parent.r1.u32 < 0x200 ||
+      (text2_argument >= 0 && (text.size() > 0x7F || text2.size() > 0x7F)))
     return std::nullopt;
   const uint32_t frame = (parent.r1.u32 - 0x200u) & ~15u;
   if (!Span(base, frame, 0x200, true))
@@ -419,6 +450,12 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
     auto* to = rex::memory::GuestPtr(base, text_at);
     std::memcpy(to, text.data(), text.size());
     to[text.size()] = 0;
+  }
+  const uint32_t text2_at = text_at + 0x80;
+  if (text2_argument >= 0) {
+    auto* to = rex::memory::GuestPtr(base, text2_at);
+    std::memcpy(to, text2.data(), text2.size());
+    to[text2.size()] = 0;
   }
   Write(base, frame, parent.r1.u32);
   Write(base, context, result);
@@ -438,7 +475,9 @@ std::optional<InvokeResult> Invoke(PPCContext& parent, uint8_t* base, std::strin
     const int k = int(i) - output_argument;
     const bool out = output_argument >= 0 && k >= 0 && k < std::min(output_count, 4 - output_word);
     Write(base, arguments + uint32_t(i) * 4,
-          int(i) == text_argument ? text_at : (out ? result + uint32_t(k + output_word) * 4 : value));
+          int(i) == text_argument ? text_at
+          : int(i) == text2_argument ? text2_at
+                                     : (out ? result + uint32_t(k + output_word) * 4 : value));
     ++i;
   }
   PPCContext call = parent;
@@ -1054,6 +1093,7 @@ enum class Action {
   kOpenSpawnStandard, kCompleteMission, kTogglePerformance, kJetRoute,
   kTmUnloadMap, kTmPieces, kJetLandMode,
   kBeyondSummon, kBeyondCloak, kToggleSnow,
+  kToggleSuit, kSuitGadget,
 };
 struct Item {
   std::string_view label;
@@ -1121,6 +1161,8 @@ struct State {
   // The Beyond Batmobile's requests from the menu (v1.7.44): summoned to the
   // player, its cloak.
   bool beyond_summon = false, beyond_toggle_cloak = false;
+  // The Beyond suit (v1.7.46): the menu's request to put it on or take it off.
+  bool suit_toggle = false;
   // Async vehicle spawn.
   int pending_model = -1;
   uint32_t pending_hash = 0;
@@ -1180,6 +1222,7 @@ struct DrivePad {
   uint16_t buttons = 0;
   uint8_t left_trigger = 0, right_trigger = 0;
   int16_t lx = 0, ly = 0;
+  int16_t rx = 0, ry = 0;  // (the right stick: the suit's gadget wheel, v1.7.46)
 };
 std::mutex g_drive_mutex;
 DrivePad g_drive_pad, g_drive_previous;
@@ -1220,7 +1263,10 @@ bool g_have_lazar = false, g_have_gauntlet = false;
 bool g_have_dmc12 = false, g_have_bttf1 = false, g_have_bttf2 = false, g_have_bttf3 = false, g_have_bttf2h = false;
 bool g_have_beyond = false;  // the Batman Beyond Batmobile (v1.7.44)
 bool g_have_hellcat = false;  // the Challenger SRT Hellcat (v1.7.44)
+bool g_have_suit = false;     // the Beyond suit's components in playerped (v1.7.46)
 std::atomic<bool> g_beyond_cloaked{false};  // (for the menu's line)
+std::atomic<bool> g_suit_worn{false};        // the Beyond suit on the player (v1.7.46, for the menu's line)
+std::atomic<int> g_suit_gadget{0};           // the gadget the wheel has picked (for the menu's line)
 bool HaveTimeMachines() { return g_have_bttf1 || g_have_bttf2 || g_have_bttf3; }
 // Pad adjustment for the XAM path: low 16 bits masked from the game, high
 // 16 bits pressed into it (the replayed tap).
@@ -1243,7 +1289,8 @@ bool WantsWork(const State& s) {
   return s.open || !g_pending.empty() || s.god || s.never_wanted || s.vehicle_god || s.gadgets ||
          s.raining || s.pending_model >= 0 || !g_addons_probed || g_have_f16 || g_have_batwing || g_have_deimos ||
          g_have_batmobile || g_have_nexus || g_have_arbiter || g_have_dominator || g_have_lazar ||
-         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || g_have_beyond || g_have_hellcat || s.car_lights;
+         g_have_gauntlet || g_have_dmc12 || HaveTimeMachines() || g_have_beyond || g_have_hellcat || g_have_suit ||
+         s.suit_toggle || s.car_lights;
 }
 
 // The sections the menu's tab strip shows, L1/R1 going through them.
@@ -1288,7 +1335,11 @@ std::vector<Item> PageItems(const State& s) {
                 Action::kToggleNeverWanted},
                {"Wanted Level (left/right, A to set)", Action::kWantedApply},
                {"Give $100,000", Action::kMoney},
-               {"Heal and Armor", Action::kHeal}};
+               {"Heal and Armor", Action::kHeal},
+               {g_suit_worn.load(std::memory_order_relaxed) ? "Beyond Suit: ON (double-tap jump to fly, hold L1: gadgets)"
+                                                            : "Beyond Suit: OFF",
+                Action::kToggleSuit},
+               {"Suit Gadget (left/right)", Action::kSuitGadget}};  // (label filled in by PublishDraw)
       break;
     case Page::kVehicle:
       items = {{s.vehicle_god ? "Vehicle God Mode: ON" : "Vehicle God Mode: OFF",
@@ -9620,6 +9671,901 @@ uint32_t BeyondTick(PPCContext& ctx, uint8_t* base, const GameContext& game, Sta
   return keep;
 }
 
+// ---------------------------------------------------------------------------
+// The Beyond suit (v1.7.46): the player dressed in the user's Batman Beyond
+// mod (converted to the console's player components by tools/ped/pedconv.py
+// and put in playerped by the installer), with the suit's powers built here:
+//  - the suit: every clothing slot the suit covers switched to its
+//    components (the body on uppr 17, the wings on sus2, placeholders on
+//    head, hands, feet, legs, hair, teeth, suspenders) and back to what Niko
+//    wore; put back whenever the game changes his clothes (a wardrobe, a
+//    cutscene, a reload);
+//  - flight on the boot thrusters: a double tap of the jump button lifts
+//    off; the left stick moves him as the camera looks, R2 climbs, L2
+//    descends, square (held) boosts, circle cuts the jets (he falls, or
+//    lands when near the ground); the ped's velocity set every frame, a
+//    mid-air pose held, the thrusters' flames at his boots; the jets drain
+//    the suit's energy, which comes back on the ground;
+//  - the glide: triangle in the air opens the wings (a half-open frame on
+//    the way) and he glides, the air carrying him forward, the stick
+//    steering, sinking slowly; triangle again folds them. The wings unfold
+//    by themselves when he falls far with no jets;
+//  - the strength: his punches throw the man he hits (ragdoll, launched);
+//    he jumps higher; a fall from any height costs nothing (his health put
+//    back as he lands);
+//  - the gadget wheel: hold L1 and pick with the right stick, let go to
+//    choose; a tap of L1 uses it. Grapnel (a line to where the camera looks:
+//    he is reeled up and across), smoke (a cloud about him; the police lose
+//    him in it), cloak (unseen, the wanted level cleared while it holds),
+//    the Batmobile called (the Beyond car flies to him), the thrusters and
+//    the wings as items too. The batarangs and the Bat-Signal come with
+//    their models in the next release;
+//  - every sound synthesized (gta4_suit_sound.h): the jets, the air, the
+//    wings, the grapnel, the cloak, the landings, the suit sealing.
+// The overlay draws the wheel while it is held and a small panel (ENERGY,
+// the gadget, the wings, the jets) while the suit is worn.
+// ---------------------------------------------------------------------------
+gta4::suit::SuitSynth g_suit_synth;
+#if REX_PLATFORM_PS5
+class SuitSource final : public gta4ps5::sound::Source {
+ public:
+  size_t Read(float* lr, size_t frames) override {
+    g_suit_synth.Render(lr, frames);
+    return frames;
+  }
+  bool Rewind() override { return true; }
+};
+gta4ps5::sound::Voice* g_suit_voice = nullptr;
+#endif
+void SuitVoice(bool want) {
+#if REX_PLATFORM_PS5
+  if (!g_suit_voice) {
+    if (!want)
+      return;
+    gta4ps5::sound::StartOutput();
+    g_suit_voice = gta4ps5::sound::NewVoice();
+    g_suit_voice->game_sound = true;
+  }
+  if (want && !g_suit_voice->Active()) {
+    g_suit_voice->SetVolume(1.0f);
+    g_suit_voice->Play(std::make_unique<SuitSource>(), true);
+  } else if (!want && g_suit_voice->Active() && g_suit_synth.Quiet()) {
+    g_suit_voice->Stop();
+  }
+#else
+  (void)want;
+#endif
+}
+
+// The player's clothing slots as the game numbers them (head, upper, lower,
+// suspenders, hands, feet, jacket, hair, suspenders 2, teeth) and the
+// suit's component on each (-1: left as it is). The wings are sus2: 2 open,
+// 3 half open, 4 folded away (a placeholder).
+constexpr int kSuitSlots = 10;
+constexpr int kSlotSus2 = 8;
+constexpr int kSuitComponent[kSuitSlots] = {1, 17, 8, 4, 2, 7, -1, 3, 4, 1};
+constexpr int kWingsOpen = 2, kWingsHalf = 3, kWingsFolded = 4;
+// The stock counts of drawables per slot (Niko's: head 1, uppr 17, lowr 8,
+// suse 4, hand 2, feet 7, jacket 0, hair 3, sus2 2, teef 1), to check the
+// slot numbering against what the game reports with the suit in.
+constexpr int kStockDrawables[kSuitSlots] = {1, 17, 8, 4, 2, 7, 0, 3, 2, 1};
+constexpr int kSuitAdds[kSuitSlots] = {1, 1, 1, 1, 1, 1, 0, 1, 3, 1};
+
+enum class Gadget { kGrapnel = 0, kSmoke, kCloak, kBatmobile, kThrusters, kWings, kBatarang, kSignal, kCount };
+constexpr const char* kGadgetNames[] = {"GRAPNEL", "SMOKE", "CLOAK", "BATMOBILE", "THRUSTERS", "WINGS", "BATARANG",
+                                        "BAT-SIGNAL"};
+constexpr float kSuitCruise = 26.0f, kSuitBoost = 52.0f;   // m/s on the jets
+constexpr float kSuitClimb = 11.0f;                        // m/s on R2 / L2
+constexpr float kGlideSpeed = 24.0f, kGlideSink = 3.2f;    // the wings: forward, and down
+constexpr float kSuitEnergyMax = 100.0f;
+
+struct SuitState {
+  bool worn = false;          // the suit on him
+  bool checked = false;       // the slot numbering checked against the game's counts
+  int stock[kSuitSlots]{};    // what he wore (drawables) when the suit went on
+  int stock_tex[kSuitSlots]{};
+  // his weapons, kept while the suit is on (the suit fights with its
+  // gadgets and its fists: no guns, and the weapon switch is the gadgets'):
+  // the weapon in each of the game's slots and its ammo
+  std::array<std::pair<uint32_t, uint32_t>, 13> weapons{};
+  bool weapons_kept = false;
+  bool flying = false;        // on the jets
+  bool lifted = false;        // the lift-off's nudge given
+  bool gliding = false;       // the wings out
+  bool boosting = false;
+  bool cloaked = false;
+  int wings = kWingsFolded;   // the sus2 component shown now
+  uint64_t wings_half_until = 0;  // the half-open frame on the way out or in
+  bool wings_opening = false;
+  float energy = kSuitEnergyMax;
+  float vel[3]{};             // the velocity flown
+  float heading = 0.0f;
+  float fall_from = 0.0f;     // the height a fall started at (the landing's thud)
+  float last_vz = 0.0f;
+  bool was_in_air = false;
+  uint64_t x_tap_at = 0;      // the jump button's last tap (a double tap lifts off)
+  uint64_t jets_until = 0;    // the jets' flames expire and are relit
+  std::array<uint32_t, 2> flames{};
+  bool flaming = false;
+  bool pose_set = false;
+  uint64_t pose_at = 0;
+  bool anims_asked = false, anims_ready = false;
+  // the wheel
+  bool wheel_open = false;
+  uint64_t l1_down_at = 0;
+  int picked = int(Gadget::kGrapnel);
+  int hover = -1;             // the slot the stick points at
+  // the grapnel
+  bool grapnel_live = false;
+  float anchor[3]{};
+  uint64_t grapnel_since = 0;
+  // the cloak
+  uint64_t next_wanted_clear = 0, cloak_until = 0;
+  // the smoke
+  uint64_t smoke_until = 0;
+  std::array<uint32_t, 3> smoke{};
+  // punches
+  uint64_t next_punch_look = 0;
+  int health_keep = 0;        // his health before a fall
+  uint64_t last_ms = 0, next_probe = 0, next_dress_check = 0;
+  uint16_t prev_buttons = 0;
+  int log = 0;
+};
+SuitState g_suit;
+struct SuitHudModel {
+  bool visible = false, wheel = false, flying = false, gliding = false, cloaked = false;
+  float energy = 1.0f;
+  int picked = 0, hover = -1, kmh = 0, height = 0;
+};
+std::mutex g_suit_hud_mutex;
+SuitHudModel g_suit_hud;
+std::atomic<bool> g_suit_hud_active{false};
+void PublishSuitHud(const SuitHudModel& m) {
+  {
+    std::lock_guard lock(g_suit_hud_mutex);
+    g_suit_hud = m;
+  }
+  g_suit_hud_active.store(m.visible, std::memory_order_relaxed);
+}
+
+std::optional<std::array<float, 3>> PedPosition(PPCContext& ctx, uint8_t* base, uint32_t ped) {
+  const auto c = Invoke(ctx, base, "GET_CHAR_COORDINATES", {ped, 0, 0, 0}, 1, 0, 3);
+  if (!c || !std::isfinite(c->f(0)) || !std::isfinite(c->f(2)))
+    return std::nullopt;
+  return std::array<float, 3>{c->f(0), c->f(1), c->f(2)};
+}
+
+// The camera's level forward and right (unit, in the world), from where it
+// stands relative to the player (the chase camera looks at him), and its
+// pitch in degrees.
+struct CameraFrame {
+  float fwd[2]{0.0f, 1.0f}, right[2]{1.0f, 0.0f};
+  float pitch = 0.0f;
+  bool ok = false;
+};
+CameraFrame SuitCamera(PPCContext& ctx, uint8_t* base, const float at[3]) {
+  CameraFrame f;
+  const auto cam = Invoke(ctx, base, "GET_GAME_CAM", {0}, 0);
+  if (!cam || !cam->words[0])
+    return f;
+  const auto pos = Invoke(ctx, base, "GET_CAM_POS", {cam->words[0], 0, 0, 0}, 1, 0, 3);
+  const auto rot = Invoke(ctx, base, "GET_CAM_ROT", {cam->words[0], 0, 0, 0}, 1, 0, 3);
+  if (!pos || !std::isfinite(pos->f(0)) || !std::isfinite(pos->f(1)))
+    return f;
+  const float dx = at[0] - pos->f(0), dy = at[1] - pos->f(1);
+  const float len = std::sqrt(dx * dx + dy * dy);
+  if (len < 0.3f)
+    return f;
+  f.fwd[0] = dx / len, f.fwd[1] = dy / len;
+  f.right[0] = f.fwd[1], f.right[1] = -f.fwd[0];
+  if (rot && std::isfinite(rot->f(0)))
+    f.pitch = std::clamp(rot->f(0), -89.0f, 89.0f);
+  f.ok = true;
+  return f;
+}
+
+void SuitDress(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, bool on) {
+  if (on) {
+    for (int slot = 0; slot < kSuitSlots; ++slot) {
+      const auto d = Invoke(ctx, base, "GET_CHAR_DRAWABLE_VARIATION", {game.ped, uint32_t(slot)});
+      const auto t = Invoke(ctx, base, "GET_CHAR_TEXTURE_VARIATION", {game.ped, uint32_t(slot)});
+      m.stock[slot] = d ? int(d->r0()) : 0;
+      m.stock_tex[slot] = t ? int(t->r0()) : 0;
+    }
+    if (!m.checked) {
+      m.checked = true;
+      std::string counts;
+      int off = 0;
+      for (int slot = 0; slot < kSuitSlots; ++slot) {
+        const auto n = Invoke(ctx, base, "GET_NUMBER_OF_CHAR_DRAWABLE_VARIATIONS", {game.ped, uint32_t(slot)});
+        const int have = n ? int(n->r0()) : -1;
+        counts += fmt::format("{}{}:{}", slot ? " " : "", slot, have);
+        if (have >= 0 && have != kStockDrawables[slot] + kSuitAdds[slot])
+          ++off;
+      }
+      REXLOG_INFO("gta4-trainer: suit: the player's drawables per slot: {} ({})", counts,
+                  off ? fmt::format("{} slot(s) not as expected with the suit in", off) : "as expected: the suit is in");
+    }
+    for (int slot = 0; slot < kSuitSlots; ++slot) {
+      if (kSuitComponent[slot] < 0)
+        continue;
+      const int drawable = slot == kSlotSus2 ? m.wings : kSuitComponent[slot];
+      Invoke(ctx, base, "SET_CHAR_COMPONENT_VARIATION", {game.ped, uint32_t(slot), uint32_t(drawable), 0});
+    }
+  } else {
+    for (int slot = 0; slot < kSuitSlots; ++slot) {
+      if (kSuitComponent[slot] < 0)
+        continue;
+      Invoke(ctx, base, "SET_CHAR_COMPONENT_VARIATION",
+             {game.ped, uint32_t(slot), uint32_t(m.stock[slot]), uint32_t(m.stock_tex[slot])});
+    }
+  }
+}
+
+// The suit fights with its gadgets and its fists: his guns are kept aside
+// while it is on (each slot's weapon and ammo), and handed back with it off.
+void SuitWeapons(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, bool take) {
+  if (take) {
+    int kept = 0;
+    for (uint32_t slot = 0; slot < m.weapons.size(); ++slot) {
+      // (the weapon's type and its ammo through two pointers)
+      const auto w = Invoke(ctx, base, "GET_CHAR_WEAPON_IN_SLOT", {game.ped, slot, 0, 0, 0}, 2, 0, 3);
+      m.weapons[slot] = {0, 0};
+      if (w && w->words[0] && w->words[0] < 60) {
+        m.weapons[slot] = {w->words[0], w->words[1]};
+        ++kept;
+      }
+    }
+    m.weapons_kept = true;
+    Invoke(ctx, base, "REMOVE_ALL_CHAR_WEAPONS", {game.ped});
+    REXLOG_INFO("gta4-trainer: suit: {} weapon(s) kept aside", kept);
+  } else if (m.weapons_kept) {
+    m.weapons_kept = false;
+    int given = 0;
+    for (const auto& [type, ammo] : m.weapons)
+      if (type) {
+        Invoke(ctx, base, "GIVE_WEAPON_TO_CHAR", {game.ped, type, std::max(ammo, 1u), 0});
+        ++given;
+      }
+    REXLOG_INFO("gta4-trainer: suit: {} weapon(s) given back", given);
+  }
+}
+
+void SuitWings(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, int which) {
+  if (m.wings == which)
+    return;
+  m.wings = which;
+  Invoke(ctx, base, "SET_CHAR_COMPONENT_VARIATION", {game.ped, uint32_t(kSlotSus2), uint32_t(which), 0});
+}
+
+void SuitFlames(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, bool on) {
+  if (!on) {
+    for (auto& f : m.flames) {
+      if (f)
+        Invoke(ctx, base, "STOP_PTFX", {f});
+      f = 0;
+    }
+    m.flaming = false;
+    return;
+  }
+  if (m.flaming)
+    return;
+  m.flaming = true;
+  // the boots: a little behind and below the ped's origin (its pelvis),
+  // the flame turned to point down (the effect streams along -y; a quarter
+  // turn about x sends that down)
+  for (size_t k = 0; k < 2; ++k) {
+    const float x = k ? 0.14f : -0.14f;
+    const auto r = Invoke(ctx, base, "START_PTFX_ON_PED",
+                          {0, game.ped, Bits(x), Bits(-0.08f), Bits(-0.92f), Bits(90.0f), 0, 0, Bits(0.55f)}, -1, 0, 1,
+                          0, "weap_rocket");
+    m.flames[k] = r ? r->r0() : 0;
+  }
+  if (m.log < 20) {
+    ++m.log;
+    REXLOG_INFO("gta4-trainer: suit: thruster flames {:08X} {:08X}", m.flames[0], m.flames[1]);
+  }
+}
+
+// The mid-air pose, held while he flies or glides: the game's own in-air
+// jump frame, looped.
+void SuitPose(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, bool want, uint64_t now) {
+  if (!want) {
+    if (m.pose_set) {
+      Invoke(ctx, base, "CLEAR_CHAR_TASKS", {game.ped});
+      m.pose_set = false;
+    }
+    return;
+  }
+  if (!m.anims_asked) {
+    m.anims_asked = true;
+    Invoke(ctx, base, "REQUEST_ANIMS", {0}, -1, 0, 1, 0, "jump_std");
+  }
+  if (!m.anims_ready) {
+    const auto ok = Invoke(ctx, base, "HAVE_ANIMS_LOADED", {0}, -1, 0, 1, 0, "jump_std");
+    if (!ok || !ok->r0())
+      return;
+    m.anims_ready = true;
+  }
+  if (m.pose_set && now < m.pose_at + 400)
+    return;
+  // (the game's in-air frame, looped: TASK_PLAY_ANIM_WITH_FLAGS(ped, anim, dict, speed, loop, flags))
+  const auto playing = Invoke(ctx, base, "IS_CHAR_PLAYING_ANIM", {game.ped, 0, 0}, -1, 0, 1, 1, "jump_std", 0, 2,
+                              "jump_inair_l");
+  if (!playing || !playing->r0())
+    Invoke(ctx, base, "TASK_PLAY_ANIM_WITH_FLAGS", {game.ped, 0, 0, Bits(8.0f), 1, 0}, -1, 0, 1, 1, "jump_inair_l", 0,
+           2, "jump_std");
+  if (!m.pose_set && m.log < 20) {
+    ++m.log;
+    REXLOG_INFO("gta4-trainer: suit: the in-air pose asked for (was playing: {})", playing ? playing->r0() : 0);
+  }
+  m.pose_set = true;
+  m.pose_at = now;
+}
+
+void SuitLog(const SuitState& m, std::string_view what) {
+  (void)m;
+  REXLOG_INFO("gta4-trainer: suit: {}", what);
+}
+
+// The gadget wheel's slot under the right stick (8 slots, the first at the
+// top, clockwise), or -1 near the centre.
+int WheelSlot(int16_t rx, int16_t ry) {
+  const float x = Axis(rx), y = Axis(ry);
+  if (x * x + y * y < 0.3f * 0.3f)
+    return -1;
+  float a = std::atan2(x, y);  // 0 up, clockwise
+  if (a < 0.0f)
+    a += 6.2831853f;
+  return int(std::floor((a + 6.2831853f / 16.0f) / (6.2831853f / 8.0f))) % 8;
+}
+
+void SuitStopFlight(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, const char* why) {
+  if (m.flying || m.gliding)
+    SuitLog(m, fmt::format("flight ends: {}", why));
+  m.flying = m.gliding = m.boosting = false;
+  m.lifted = false;
+  SuitFlames(ctx, base, game, m, false);
+  SuitPose(ctx, base, game, m, false, 0);
+  if (m.wings != kWingsFolded) {
+    SuitWings(ctx, base, game, m, kWingsFolded);
+    g_suit_synth.Wings(false);
+  }
+  m.wings_half_until = 0;
+  g_suit_synth.SetTarget(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+void SuitCloak(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, bool on) {
+  if (m.cloaked == on)
+    return;
+  m.cloaked = on;
+  Invoke(ctx, base, "SET_CHAR_VISIBLE", {game.ped, on ? 0u : 1u});
+  if (on)
+    Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
+  g_suit_synth.Cloak(on);
+  SuitVoice(true);
+}
+
+// The grapnel: a line to where the camera looks (as far as the ground or a
+// building stops it, 60 m at most), and he is reeled there on the jets'
+// pose; the line is let go a little short of the anchor.
+bool SuitGrapnel(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, State& s, uint64_t now) {
+  const auto at = PedPosition(ctx, base, game.ped);
+  if (!at)
+    return false;
+  const CameraFrame cam = SuitCamera(ctx, base, at->data());
+  if (!cam.ok)
+    return false;
+  const float pitch = std::max(cam.pitch, -20.0f) * 3.14159265f / 180.0f;
+  const float dir[3] = {cam.fwd[0] * std::cos(pitch), cam.fwd[1] * std::cos(pitch), std::sin(pitch)};
+  // walk the line out: the first step inside a building (the top surface
+  // over that spot, probed from high up, stands over the line) or into the
+  // ground, or 60 m. The anchor is the last free step, lifted to the roof's
+  // edge when the roof is within reach, so he comes up onto it.
+  float anchor[3] = {(*at)[0] + dir[0] * 60.0f, (*at)[1] + dir[1] * 60.0f, (*at)[2] + 1.0f + dir[2] * 60.0f};
+  float last[3] = {(*at)[0], (*at)[1], (*at)[2] + 1.0f};
+  bool found = false;
+  for (float d = 3.0f; d <= 60.0f; d += 1.5f) {
+    const float p[3] = {(*at)[0] + dir[0] * d, (*at)[1] + dir[1] * d, (*at)[2] + 1.0f + dir[2] * d};
+    const auto top = GroundZ(ctx, base, p[0], p[1], 900.0f);
+    const auto below = GroundZ(ctx, base, p[0], p[1], p[2] + 0.5f);
+    const bool inside = top && *top > p[2] + 0.4f;          // (something stands over this spot)
+    const bool ground = below && *below > p[2] - 0.3f;      // (the line runs into the ground)
+    if (inside || ground) {
+      anchor[0] = last[0], anchor[1] = last[1], anchor[2] = last[2];
+      if (inside && *top < p[2] + 7.0f)
+        anchor[0] = p[0], anchor[1] = p[1], anchor[2] = *top + 1.2f;  // (up onto the roof)
+      else if (ground)
+        anchor[2] = std::max(anchor[2], *below + 1.2f);
+      found = true;
+      break;
+    }
+    last[0] = p[0], last[1] = p[1], last[2] = p[2];
+  }
+  if (!found && dir[2] < 0.15f) {
+    Toast(s, "Grapnel: nothing to latch on. Aim it at a building or up.", 1500);
+    return false;
+  }
+  std::copy(anchor, anchor + 3, m.anchor);
+  m.grapnel_live = true;
+  m.grapnel_since = now;
+  g_suit_synth.GrapnelFire();
+  SuitVoice(true);
+  SuitLog(m, fmt::format("grapnel fired to ({:.1f} {:.1f} {:.1f}), {}", anchor[0], anchor[1], anchor[2],
+                         found ? "latched on" : "open sky"));
+  return true;
+}
+
+void SuitSmoke(PPCContext& ctx, uint8_t* base, const GameContext& game, SuitState& m, uint64_t now) {
+  const auto at = PedPosition(ctx, base, game.ped);
+  if (!at)
+    return;
+  for (auto& f : m.smoke)
+    if (f)
+      Invoke(ctx, base, "STOP_PTFX", {f}), f = 0;
+  // (the game's own smoke effects, whichever this build names; the first
+  // that takes is kept)
+  static const char* const kSmokes[] = {"weap_smoke_grenade", "exp_smoke_grenade", "smoke_grenade", "ambient_smoke"};
+  int placed = 0;
+  for (size_t k = 0; k < m.smoke.size(); ++k) {
+    const float ox = (k == 1 ? 1.5f : k == 2 ? -1.5f : 0.0f), oy = (k == 0 ? 0.0f : 0.8f);
+    for (const char* name : kSmokes) {
+      const auto r = Invoke(ctx, base, "START_PTFX",
+                            {0, Bits((*at)[0] + ox), Bits((*at)[1] + oy), Bits((*at)[2] - 0.8f), 0, 0, 0, Bits(2.5f)},
+                            -1, 0, 1, 0, name);
+      if (r && r->r0()) {
+        m.smoke[k] = r->r0();
+        ++placed;
+        break;
+      }
+    }
+  }
+  m.smoke_until = now + 9000;
+  Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
+  SuitLog(m, fmt::format("smoke: {} cloud(s) placed", placed));
+}
+
+// Every pass while the suit is worn (and a look a few times a second to
+// put it back when the game changes his clothes). Returns the buttons the
+// suit took.
+uint32_t SuitTick(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, uint16_t buttons,
+                  const DrivePad& pad) {
+  auto& m = g_suit;
+  const uint64_t now = NowMs();
+  const float dt = m.last_ms ? std::clamp(float(now - m.last_ms) / 1000.0f, 0.0f, 0.1f) : 0.016f;
+  m.last_ms = now;
+  const uint16_t pressed = buttons & uint16_t(~m.prev_buttons);
+  const uint16_t released = m.prev_buttons & uint16_t(~buttons);
+  m.prev_buttons = buttons;
+  uint32_t keep = 0;
+  if (s.suit_toggle) {
+    s.suit_toggle = false;
+    if (gta4::addons::SuitInstalled() <= 0) {
+      Toast(s, "The Beyond suit is not installed (addons/beyondsuit is missing from the app folder).", 4000);
+    } else {
+      m.worn = !m.worn;
+      if (m.worn)
+        m.wings = kWingsFolded;
+      else
+        SuitStopFlight(ctx, base, game, m, "the suit comes off");
+      SuitDress(ctx, base, game, m, m.worn);
+      SuitWeapons(ctx, base, game, m, m.worn);
+      SuitCloak(ctx, base, game, m, false);
+      g_suit_synth.Suit(m.worn);
+      SuitVoice(true);
+      g_suit_worn.store(m.worn, std::memory_order_relaxed);
+      m.energy = kSuitEnergyMax;
+      Toast(s, m.worn ? "Beyond suit on. Double-tap jump to fly; hold L1 for the gadgets." : "Beyond suit off.", 3000);
+      SuitLog(m, m.worn ? "on" : "off");
+    }
+  }
+  if (!m.worn) {
+    m.next_probe = now + 400;
+    SuitVoice(false);
+    PublishSuitHud({});
+    return 0;
+  }
+  // The clothes put back when something changed them (a wardrobe, a
+  // cutscene's outfit, a reload), looked at twice a second.
+  if (now >= m.next_dress_check) {
+    m.next_dress_check = now + 500;
+    const auto d = Invoke(ctx, base, "GET_CHAR_DRAWABLE_VARIATION", {game.ped, 1});
+    if (d && int(d->r0()) != kSuitComponent[1]) {
+      SuitLog(m, "the suit was changed by the game; put back");
+      SuitDress(ctx, base, game, m, true);
+    }
+    // a gun that found its way into his hands (a mission's gift, a pickup):
+    // put aside with the others
+    for (uint32_t slot = 1; slot < m.weapons.size(); ++slot) {
+      const auto w = Invoke(ctx, base, "GET_CHAR_WEAPON_IN_SLOT", {game.ped, slot, 0, 0, 0}, 2, 0, 3);
+      if (w && w->words[0] && w->words[0] < 60) {
+        if (!m.weapons[slot].first)
+          m.weapons[slot] = {w->words[0], w->words[1]};
+        Invoke(ctx, base, "REMOVE_ALL_CHAR_WEAPONS", {game.ped});
+        break;
+      }
+    }
+  }
+  const auto in_car = CurrentVehicle(ctx, base, game);
+  const auto at = PedPosition(ctx, base, game.ped);
+  if (in_car || !at) {
+    if (m.flying || m.gliding)
+      SuitStopFlight(ctx, base, game, m, "in a vehicle");
+    m.energy = std::min(kSuitEnergyMax, m.energy + 10.0f * dt);
+    SuitHudModel hud;
+    hud.visible = !in_car;
+    hud.energy = m.energy / kSuitEnergyMax;
+    hud.picked = m.picked;
+    PublishSuitHud(hud);
+    g_suit_synth.SetTarget(0.0f, 0.0f, 0.0f, 1.0f);
+    SuitVoice(false);
+    return 0;
+  }
+  const auto gz = GroundZ(ctx, base, (*at)[0], (*at)[1], (*at)[2] + 0.5f);
+  const float height = gz ? (*at)[2] - *gz : 0.0f;  // (his origin stands about a metre over the ground)
+  const auto in_air_r = Invoke(ctx, base, "IS_CHAR_IN_AIR", {game.ped});
+  const bool in_air = (in_air_r && in_air_r->r0()) || height > 2.2f;
+  std::array<float, 3> vel{};
+  if (const auto v = Invoke(ctx, base, "GET_CHAR_VELOCITY", {game.ped, 0, 0, 0}, 1, 0, 3))
+    vel = {v->f(0), v->f(1), v->f(2)};
+
+  // ---- the gadget wheel: L1 held opens it, the right stick picks, the release chooses; a tap uses
+  const bool l1 = buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  keep |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  if (pressed & X_INPUT_GAMEPAD_LEFT_SHOULDER)
+    m.l1_down_at = now;
+  if (l1 && !m.wheel_open && now >= m.l1_down_at + 220) {
+    m.wheel_open = true;
+    m.hover = -1;
+  }
+  bool use = false;
+  if (m.wheel_open) {
+    const int slot = WheelSlot(pad.rx, pad.ry);
+    if (slot >= 0)
+      m.hover = slot;
+    if (!l1) {
+      m.wheel_open = false;
+      if (m.hover >= 0 && m.hover < int(Gadget::kCount)) {
+        m.picked = m.hover;
+        g_suit_gadget.store(m.picked, std::memory_order_relaxed);
+        Toast(s, fmt::format("{} selected. Tap L1 to use it.", kGadgetNames[m.picked]), 1500);
+      }
+    }
+  } else if ((released & X_INPUT_GAMEPAD_LEFT_SHOULDER) && now < m.l1_down_at + 220) {
+    use = true;
+  }
+  // d-pad left and right go through the gadgets (the game's weapon switch
+  // has nothing to switch while the suit is on), masked from the game
+  keep |= X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT;
+  if (pressed & (X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT)) {
+    const int n = int(Gadget::kCount);
+    m.picked = (m.picked + ((pressed & X_INPUT_GAMEPAD_DPAD_RIGHT) ? 1 : n - 1)) % n;
+    g_suit_gadget.store(m.picked, std::memory_order_relaxed);
+    Toast(s, fmt::format("{} selected. Tap L1 to use it.", kGadgetNames[m.picked]), 1200);
+  }
+  if (use) {
+    switch (Gadget(m.picked)) {
+      case Gadget::kGrapnel:
+        if (m.energy > 5.0f)
+          SuitGrapnel(ctx, base, game, m, s, now);
+        break;
+      case Gadget::kSmoke:
+        SuitSmoke(ctx, base, game, m, now);
+        break;
+      case Gadget::kCloak:
+        if (m.cloaked || m.energy > 10.0f)
+          SuitCloak(ctx, base, game, m, !m.cloaked);
+        break;
+      case Gadget::kBatmobile:
+        if (g_have_beyond)
+          s.beyond_summon = true;
+        else
+          Toast(s, "The Beyond Batmobile is not installed.", 2000);
+        break;
+      case Gadget::kThrusters:
+        if (m.flying)
+          SuitStopFlight(ctx, base, game, m, "thrusters off");
+        else if (m.energy > 5.0f)
+          m.flying = true, m.gliding = false, SuitLog(m, "thrusters on (the wheel)");
+        break;
+      case Gadget::kWings:
+        if (in_air || m.flying) {
+          m.gliding = !m.gliding;
+          m.wings_opening = m.gliding;
+          m.wings_half_until = now + 140;
+          g_suit_synth.Wings(m.gliding);
+          SuitVoice(true);
+        } else {
+          Toast(s, "The wings open in the air.", 1500);
+        }
+        break;
+      case Gadget::kBatarang:
+      case Gadget::kSignal:
+        Toast(s, "Coming in the next release.", 1500);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ---- flight: a double tap of jump lifts off; circle cuts the jets; triangle the wings
+  if (pressed & X_INPUT_GAMEPAD_X) {
+    if (!m.flying && now < m.x_tap_at + 350 && m.energy > 5.0f) {
+      m.flying = true;
+      m.gliding = false;
+      m.x_tap_at = 0;
+      SuitLog(m, "lift-off (double tap)");
+    } else {
+      m.x_tap_at = now;
+    }
+  }
+  if ((m.flying || m.gliding) && (pressed & X_INPUT_GAMEPAD_B)) {
+    SuitStopFlight(ctx, base, game, m, "circle");
+    keep |= X_INPUT_GAMEPAD_B;
+  }
+  if ((in_air || m.flying) && (pressed & X_INPUT_GAMEPAD_Y)) {
+    m.gliding = !m.gliding;
+    m.wings_opening = m.gliding;
+    m.wings_half_until = now + 140;
+    g_suit_synth.Wings(m.gliding);
+    SuitVoice(true);
+    if (m.gliding)
+      m.flying = false;
+    SuitLog(m, m.gliding ? "wings out" : "wings folded");
+  }
+  if (in_air || m.flying || m.gliding)
+    keep |= X_INPUT_GAMEPAD_Y;
+  // a long fall with no jets: the wings open by themselves
+  if (in_air && !m.flying && !m.gliding && vel[2] < -12.0f && height > 12.0f) {
+    m.gliding = true;
+    m.wings_opening = true;
+    m.wings_half_until = now + 140;
+    g_suit_synth.Wings(true);
+    SuitVoice(true);
+    SuitLog(m, "wings out (a long fall)");
+  }
+  // the wings' frames
+  if (m.wings_half_until) {
+    if (now < m.wings_half_until)
+      SuitWings(ctx, base, game, m, kWingsHalf);
+    else {
+      SuitWings(ctx, base, game, m, m.wings_opening ? kWingsOpen : kWingsFolded);
+      m.wings_half_until = 0;
+    }
+  } else {
+    SuitWings(ctx, base, game, m, m.gliding ? kWingsOpen : kWingsFolded);
+  }
+
+  // ---- the energy
+  m.boosting = m.flying && (buttons & X_INPUT_GAMEPAD_X) && now > m.x_tap_at + 350;
+  if (m.flying)
+    m.energy -= (m.boosting ? 6.0f : 2.8f) * dt;
+  if (m.cloaked)
+    m.energy -= 3.0f * dt;
+  if (!m.flying && !in_air)
+    m.energy = std::min(kSuitEnergyMax, m.energy + 12.0f * dt);
+  if (m.energy <= 0.0f) {
+    m.energy = 0.0f;
+    if (m.flying) {
+      m.flying = false;
+      g_suit_synth.Warn();
+      Toast(s, "Suit energy spent: the jets are out.", 2000);
+      if (height > 8.0f && !m.gliding) {
+        m.gliding = true, m.wings_opening = true, m.wings_half_until = now + 140;
+        g_suit_synth.Wings(true);
+      }
+    }
+    if (m.cloaked)
+      SuitCloak(ctx, base, game, m, false);
+  }
+
+  // ---- the grapnel's pull
+  if (m.grapnel_live) {
+    float to[3], len = 0.0f;
+    for (int a = 0; a < 3; ++a) {
+      to[a] = m.anchor[a] - (*at)[a];
+      len += to[a] * to[a];
+    }
+    len = std::sqrt(len);
+    const float age = float(now - m.grapnel_since) / 1000.0f;
+    if (age < 0.25f) {
+      // the line flies out (the game shows nothing of it yet: a light marks the anchor)
+    } else if (len < 2.2f || age > 6.0f) {
+      m.grapnel_live = false;
+      g_suit_synth.Reel(0.0f);
+      SuitLog(m, len < 2.2f ? "grapnel: arrived" : "grapnel: let go");
+      if (!m.flying && height > 2.0f) {
+        // let go in the air: a short hop of the jets so he lands on his feet
+        m.flying = true;
+        m.vel[0] = m.vel[1] = 0.0f;
+        m.vel[2] = 1.0f;
+      }
+    } else {
+      if (age < 0.3f) {
+        g_suit_synth.GrapnelLatch();
+        g_suit_synth.Reel(14.0f);
+      }
+      const float speed = std::min(16.0f, 4.0f + len * 1.5f);
+      float v[3];
+      for (int a = 0; a < 3; ++a)
+        v[a] = to[a] / len * speed;
+      v[2] += 1.5f;  // (a little lift, so he clears the edge he is pulled to)
+      Invoke(ctx, base, "SET_CHAR_VELOCITY", {game.ped, Bits(v[0]), Bits(v[1]), Bits(v[2])});
+      std::copy(v, v + 3, m.vel);
+      m.flying = false;
+      m.gliding = false;
+      SuitPose(ctx, base, game, m, true, now);
+      g_suit_synth.SetTarget(0.0f, speed, 0.0f, 1.0f);
+      SuitVoice(true);
+    }
+    Invoke(ctx, base, "DRAW_LIGHT_WITH_RANGE",
+           {Bits(m.anchor[0]), Bits(m.anchor[1]), Bits(m.anchor[2]), 255, 40, 40, Bits(3.0f), Bits(4.0f)});
+  }
+
+  // ---- flying and gliding: the velocity flown every frame
+  if ((m.flying || m.gliding) && !m.grapnel_live) {
+    const CameraFrame cam = SuitCamera(ctx, base, at->data());
+    const float lx = Axis(pad.lx), ly = Axis(pad.ly);
+    float want[3] = {0.0f, 0.0f, 0.0f};
+    if (m.flying) {
+      const float speed = m.boosting ? kSuitBoost : kSuitCruise;
+      want[0] = (cam.fwd[0] * ly + cam.right[0] * lx) * speed;
+      want[1] = (cam.fwd[1] * ly + cam.right[1] * lx) * speed;
+      want[2] = (float(pad.right_trigger) - float(pad.left_trigger)) / 255.0f * kSuitClimb;
+      // the first moment: up off the ground (a nudge, so the ground's hold
+      // on him breaks, then the jets)
+      if (height < 1.5f && want[2] <= 0.0f)
+        want[2] = 4.0f;
+      if (!m.lifted) {
+        m.lifted = true;
+        Invoke(ctx, base, "SET_CHAR_COORDINATES_NO_OFFSET",
+               {game.ped, Bits((*at)[0]), Bits((*at)[1]), Bits((*at)[2] + 0.45f)});
+        m.vel[2] = std::max(m.vel[2], 3.0f);
+      }
+      const float accel = (m.boosting ? 30.0f : 18.0f) * dt;
+      for (int a = 0; a < 3; ++a) {
+        const float d = want[a] - m.vel[a];
+        m.vel[a] += std::clamp(d, -accel, accel);
+      }
+      // the ground: never flown into (hovering a metre over it at the least)
+      if (gz && (*at)[2] + m.vel[2] * dt < *gz + 1.0f && m.vel[2] < 0.0f)
+        m.vel[2] = 0.0f;
+      SuitFlames(ctx, base, game, m, true);
+      const float thrust = std::clamp(0.35f + 0.5f * std::fabs(want[2]) / kSuitClimb +
+                                          0.4f * std::sqrt(want[0] * want[0] + want[1] * want[1]) / kSuitBoost,
+                                      0.3f, 1.0f);
+      g_suit_synth.SetTarget(thrust, std::sqrt(m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2]),
+                             0.0f, 1.0f);
+    } else {
+      // the glide: carried forward where he faces, the stick steering, sinking;
+      // pulling back lifts the nose (slower, less sink), pushing dives
+      SuitFlames(ctx, base, game, m, false);
+      float fwd[2] = {m.vel[0], m.vel[1]};
+      float sp = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1]);
+      if (sp < 1.0f) {
+        fwd[0] = cam.fwd[0], fwd[1] = cam.fwd[1], sp = 1.0f;
+      }
+      fwd[0] /= sp, fwd[1] /= sp;
+      // turn with the stick (left/right), 1.6 rad/s at most
+      const float turn = -lx * 1.6f * dt;
+      const float c = std::cos(turn), sn = std::sin(turn);
+      const float nf[2] = {fwd[0] * c - fwd[1] * sn, fwd[0] * sn + fwd[1] * c};
+      const float dive = std::clamp(-ly, -1.0f, 1.0f);  // (forward on the stick dives)
+      const float speed = kGlideSpeed * (1.0f + 0.45f * dive);
+      const float sink = kGlideSink * (1.0f + 1.5f * std::max(dive, 0.0f)) * (1.0f - 0.5f * std::max(-dive, 0.0f));
+      const float wantv[3] = {nf[0] * speed, nf[1] * speed, -sink};
+      for (int a = 0; a < 3; ++a)
+        m.vel[a] += std::clamp(wantv[a] - m.vel[a], -12.0f * dt, 12.0f * dt);
+      g_suit_synth.SetTarget(0.0f, speed, 1.0f, 1.0f);
+      // down to the ground: the glide ends a metre over it, on his feet
+      if (gz && (*at)[2] < *gz + 1.6f) {
+        SuitStopFlight(ctx, base, game, m, "glided down");
+        g_suit_synth.Land(3.0f);
+      }
+    }
+    if (m.flying || m.gliding) {
+      Invoke(ctx, base, "SET_CHAR_VELOCITY", {game.ped, Bits(m.vel[0]), Bits(m.vel[1]), Bits(m.vel[2])});
+      const float hs = std::sqrt(m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1]);
+      if (hs > 1.5f) {
+        m.heading = std::atan2(-m.vel[0], m.vel[1]) * 180.0f / 3.14159265f;
+        Invoke(ctx, base, "SET_CHAR_HEADING", {game.ped, Bits(m.heading)});
+      }
+      SuitPose(ctx, base, game, m, true, now);
+      SuitVoice(true);
+      keep |= X_INPUT_GAMEPAD_X | X_INPUT_GAMEPAD_A;
+      // a landing: the jets on, the ground close, nothing asked of them
+      if (m.flying && height < 1.3f && want[2] <= 0.0f && std::fabs(lx) < 0.1f && std::fabs(ly) < 0.1f &&
+          pad.right_trigger < 20) {
+        SuitStopFlight(ctx, base, game, m, "set down");
+        g_suit_synth.Land(2.0f);
+      }
+    }
+  } else if (!m.grapnel_live) {
+    SuitFlames(ctx, base, game, m, false);
+    g_suit_synth.SetTarget(0.0f, in_air ? std::fabs(vel[2]) : 0.0f, 0.0f, 1.0f);
+    std::copy(vel.begin(), vel.end(), m.vel);
+  }
+
+  // ---- the strength: no fall hurts him; his jumps go higher; his punches throw
+  if (in_air && !m.was_in_air) {
+    m.fall_from = (*at)[2];
+    if (const auto h = Invoke(ctx, base, "GET_CHAR_HEALTH", {game.ped}))
+      m.health_keep = int(h->r0());
+    // a jump: more of it (the game's own takes him up at about 4 m/s)
+    if (!m.flying && !m.gliding && vel[2] > 2.0f && vel[2] < 6.0f && now > m.x_tap_at && now < m.x_tap_at + 400) {
+      Invoke(ctx, base, "SET_CHAR_VELOCITY", {game.ped, Bits(vel[0] * 1.3f), Bits(vel[1] * 1.3f), Bits(vel[2] + 3.5f)});
+    }
+  }
+  if (!in_air && m.was_in_air && !m.flying && !m.gliding) {
+    const float fell = m.fall_from - (*at)[2];
+    if (fell > 1.5f) {
+      g_suit_synth.Land(std::clamp(fell * 0.9f, 1.0f, 14.0f));
+      SuitVoice(true);
+      if (m.health_keep > 0)
+        Invoke(ctx, base, "SET_CHAR_HEALTH", {game.ped, uint32_t(m.health_keep)});
+      if (const auto rag = Invoke(ctx, base, "IS_PED_RAGDOLL", {game.ped}); rag && rag->r0())
+        Invoke(ctx, base, "SWITCH_PED_TO_ANIMATED", {game.ped, 1});
+      m.next_punch_look = now;  // (the thud: anyone close is knocked over)
+    }
+  }
+  m.was_in_air = in_air;
+  m.last_vz = vel[2];
+  if (now >= m.next_punch_look) {
+    m.next_punch_look = now + 120;
+    const auto near = Invoke(ctx, base, "GET_CLOSEST_CHAR",
+                             {Bits((*at)[0]), Bits((*at)[1]), Bits((*at)[2]), Bits(2.4f), 1, 1, 0}, 6, 0, 1, -1, {}, 1);
+    if (near && near->words[0] && near->words[1] && near->words[1] != game.ped) {
+      const uint32_t other = near->words[1];
+      const auto hit = Invoke(ctx, base, "HAS_CHAR_BEEN_DAMAGED_BY_CHAR", {other, game.ped});
+      if (hit && hit->r0()) {
+        Invoke(ctx, base, "CLEAR_CHAR_LAST_DAMAGE_ENTITY", {other});
+        if (const auto op = PedPosition(ctx, base, other)) {
+          float d[2] = {(*op)[0] - (*at)[0], (*op)[1] - (*at)[1]};
+          const float l = std::max(std::sqrt(d[0] * d[0] + d[1] * d[1]), 0.3f);
+          d[0] /= l, d[1] /= l;
+          Invoke(ctx, base, "SWITCH_PED_TO_RAGDOLL", {other, 1500, 3000, 0, 1, 1, 0});
+          Invoke(ctx, base, "SET_CHAR_VELOCITY", {other, Bits(d[0] * 13.0f), Bits(d[1] * 13.0f), Bits(5.5f)});
+          AddHeat(0.15f);
+        }
+      }
+    }
+  }
+
+  // ---- the cloak and the smoke hold
+  if (m.cloaked && now >= m.next_wanted_clear) {
+    m.next_wanted_clear = now + 400;
+    const auto wanted = Invoke(ctx, base, "IS_WANTED_LEVEL_GREATER", {game.player, 0});
+    if (wanted && wanted->r0())
+      Invoke(ctx, base, "CLEAR_WANTED_LEVEL", {game.player});
+  }
+  if (m.smoke_until && now >= m.smoke_until) {
+    m.smoke_until = 0;
+    for (auto& f : m.smoke)
+      if (f)
+        Invoke(ctx, base, "STOP_PTFX", {f}), f = 0;
+  }
+
+  // ---- the panel
+  SuitHudModel hud;
+  hud.visible = true;
+  hud.wheel = m.wheel_open;
+  hud.flying = m.flying;
+  hud.gliding = m.gliding;
+  hud.cloaked = m.cloaked;
+  hud.energy = m.energy / kSuitEnergyMax;
+  hud.picked = m.picked;
+  hud.hover = m.hover;
+  hud.kmh = int(std::sqrt(m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2]) * 3.6f + 0.5f);
+  hud.height = int(std::max(height - 1.0f, 0.0f) + 0.5f);
+  PublishSuitHud(hud);
+  if (!m.flying && !m.gliding && !m.grapnel_live && !m.cloaked)
+    SuitVoice(false);
+  else
+    SuitVoice(true);
+  m.next_probe = now + 50;
+  return keep;
+}
+
 // The TCD and the speedometer as the overlay shows them.
 void PublishTcd(const State& s) {
   const auto& m = g_tm;
@@ -10940,6 +11886,13 @@ void Perform(PPCContext& ctx, uint8_t* base, const GameContext& game, State& s, 
       Invoke(ctx, base, "RELEASE_WEATHER", {});
       Toast(s, "Weather released.");
       break;
+    case Action::kToggleSuit:
+      s.suit_toggle = true;
+      break;
+    case Action::kSuitGadget:
+      Toast(s, fmt::format("{} selected. Tap L1 to use it.", kGadgetNames[g_suit_gadget.load(std::memory_order_relaxed)]),
+            1500);
+      break;
     case Action::kToggleSnow: {
       const bool on = !gta4::addons::SnowWanted();
       if (!gta4::addons::SetSnowWanted(on)) {
@@ -10979,6 +11932,12 @@ void Adjust(State& s, int direction) {
     case Page::kPlayer:
       if (items[size_t(s.selected)].action == Action::kWantedApply)
         s.wanted_target = std::clamp(s.wanted_target + direction, 0, 6);
+      else if (items[size_t(s.selected)].action == Action::kSuitGadget) {
+        const int n = int(Gadget::kCount);
+        const int picked = (g_suit_gadget.load(std::memory_order_relaxed) + direction + n) % n;
+        g_suit_gadget.store(picked, std::memory_order_relaxed);
+        g_suit.picked = picked;
+      }
       break;
     case Page::kWorld:
       if (s.selected == 0)
@@ -11085,6 +12044,8 @@ void PublishDraw(const State& s, size_t native_total, size_t native_missing,
         std::string text{items[size_t(i)].label};
         if (s.page == Page::kPlayer && items[size_t(i)].action == Action::kWantedApply)
           text = "Wanted Level: " + std::to_string(s.wanted_target);
+        if (s.page == Page::kPlayer && items[size_t(i)].action == Action::kSuitGadget)
+          text = std::string("Suit Gadget: ") + kGadgetNames[g_suit_gadget.load(std::memory_order_relaxed)];
         if (s.page == Page::kWorld) {
           if (i == 0) text = "Hour: " + std::to_string(s.hour);
           if (i == 1) text = "Minute: " + std::to_string(s.minute);
@@ -11352,7 +12313,7 @@ void PollMenu(PPCContext& ctx, uint8_t* base) {
     std::lock_guard lock(g_drive_mutex);
     g_drive_previous = g_drive_pad;
     g_drive_pad = DrivePad{buttons, pad.gamepad.left_trigger, pad.gamepad.right_trigger,
-                           pad.gamepad.thumb_lx, pad.gamepad.thumb_ly};
+                           pad.gamepad.thumb_lx, pad.gamepad.thumb_ly, pad.gamepad.thumb_rx, pad.gamepad.thumb_ry};
   }
   g_pad.last = buttons;
   g_input_owned.store(s.open, std::memory_order_relaxed);
@@ -11634,6 +12595,8 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
                                             now >= g_beyond.next_probe);
   const bool beyond_canopy_due =
       g_have_beyond && (CanopyBusy(g_beyond_canopy) || now >= g_beyond_canopy.next_probe);
+  // The Beyond suit (v1.7.46): every frame while worn, a look a few times a second otherwise.
+  const bool suit_due = g_have_suit && (g_suit.worn || s.suit_toggle || now >= g_suit.next_probe);
   const bool bat_engine_due = g_have_batmobile && (g_bat_engine.in_car || g_bat_engine.running ||
                                                    now >= g_bat_engine.next_probe);
   const bool deimos_engine_due = g_have_deimos && (g_deimos_engine.in_car || g_deimos_engine.running ||
@@ -11668,7 +12631,7 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
       s.pending_model < 0 && !jet_due && !rain_due &&
       !popup_due && !nexus_popup_due && !doors_due && !lights_due && !drive_due && !lazar_ramps_due && !lazar_due &&
       !tm_due && !seat_due && !map_due && !creatures_due && !guard_due && !beyond_due && !beyond_canopy_due &&
-      g_addons_probed)
+      !suit_due && g_addons_probed)
     return;
   // No world yet (menus, loading): look again in half a second, not every frame.
   static uint64_t s_world_retry = 0;
@@ -11725,12 +12688,13 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     g_have_bttf2h = installed("DELHOV");
     g_have_beyond = installed("BEYOND");
     g_have_hellcat = installed("HELLCAT");
+    g_have_suit = gta4::addons::SuitInstalled() > 0;
     REXLOG_INFO("gta4-trainer: add-ons present: Batmobile {}, F-16 {}, Batwing {}, Deimos {}, Dominator 645 {}, "
                 "Nexus {}, Arbiter X {}, Lazar 3 {}, Gauntlet Classic {}, DMC-12 {}, time machines {}/{}/{} "
-                "(v1.7.21 flying form {}), Beyond Batmobile {}, Hellcat {}",
+                "(v1.7.21 flying form {}), Beyond Batmobile {}, Hellcat {}, Beyond suit {} ({} files)",
                 g_have_batmobile, g_have_f16, g_have_batwing, g_have_deimos, g_have_dominator, g_have_nexus,
                 g_have_arbiter, g_have_lazar, g_have_gauntlet, g_have_dmc12, g_have_bttf1, g_have_bttf2, g_have_bttf3,
-                g_have_bttf2h, g_have_beyond, g_have_hellcat);
+                g_have_bttf2h, g_have_beyond, g_have_hellcat, g_have_suit, gta4::addons::SuitInstalled());
   }
 
   bool acted = false;
@@ -11835,6 +12799,14 @@ void RunActions(PPCContext& ctx, uint8_t* base) {
     if (g_beyond.exit_pulse)
       buttons |= X_INPUT_GAMEPAD_Y;
     vehicle_mask |= Canopy(ctx, base, game, s, buttons, kBeyondCanopy, g_beyond_canopy);
+  }
+  if (suit_due) {
+    DrivePad pad;
+    {
+      std::lock_guard lock(g_drive_mutex);
+      pad = g_drive_pad;
+    }
+    vehicle_mask |= SuitTick(ctx, base, game, s, g_gadget_buttons.load(std::memory_order_relaxed), pad);
   }
   if (any_engine_due) {
     DrivePad pad;
@@ -12110,6 +13082,87 @@ void DrawBeyondHud(ImGuiIO& io) {
       std::snprintf(text, sizeof(text), "RELOAD %d s", b.reload_s);
     dl->AddText(font, small * 1.05f, ImVec2(lamp.x + h * 0.25f, lamp.y + small * 0.15f),
                 b.missile_ready ? IM_COL32(255, 120, 100, 255) : IM_COL32(150, 80, 70, 255), text);
+  }
+}
+
+// The Beyond suit's panel (bottom left: ENERGY, the gadget picked, the
+// wings and the jets, speed and height in the air) and its gadget wheel
+// while L1 is held (eight slots round the centre of the screen, the one
+// under the right stick lit).
+void DrawSuitHud(ImGuiIO& io) {
+  SuitHudModel m;
+  {
+    std::lock_guard lock(g_suit_hud_mutex);
+    m = g_suit_hud;
+  }
+  if (!m.visible)
+    return;
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  ImFont* font = ImGui::GetFont();
+  const float scale = std::max(0.75f, io.DisplaySize.y / 1080.0f);
+  const float h = 22.0f * scale, small = 11.0f * scale, pad = h * 0.5f;
+  const ImU32 red = IM_COL32(255, 38, 28, 255), dim = IM_COL32(120, 30, 26, 255), label = IM_COL32(170, 150, 150, 255);
+  const ImU32 back = IM_COL32(10, 9, 11, 236), edge = IM_COL32(160, 28, 24, 255);
+  // the panel
+  const float panel_w = h * 9.0f, panel_h = h * 3.2f;
+  const ImVec2 o(36.0f * scale, io.DisplaySize.y - panel_h - 40.0f * scale);
+  dl->AddRectFilled(o, ImVec2(o.x + panel_w, o.y + panel_h), back, 6.0f * scale);
+  dl->AddRect(o, ImVec2(o.x + panel_w, o.y + panel_h), edge, 6.0f * scale, 0, 2.0f * scale);
+  dl->AddText(font, small * 1.35f, ImVec2(o.x + pad, o.y + pad * 0.6f), red, "BEYOND SUIT");
+  {
+    const char* state = m.cloaked ? "CLOAKED" : m.gliding ? "GLIDING" : m.flying ? "THRUSTERS" : "";
+    if (*state) {
+      const bool blink = (NowMs() / 500) % 2 == 0;
+      dl->AddText(font, small * 1.35f, ImVec2(o.x + pad + h * 4.6f, o.y + pad * 0.6f), blink || !m.cloaked ? red : dim,
+                  state);
+    }
+  }
+  const float y1 = o.y + pad * 0.6f + small * 1.9f;
+  dl->AddText(font, small, ImVec2(o.x + pad, y1), label, "ENERGY");
+  {
+    const ImVec2 bar(o.x + pad + h * 2.2f, y1 + small * 0.1f), bar2(bar.x + h * 5.8f, bar.y + small * 0.9f);
+    dl->AddRectFilled(bar, bar2, IM_COL32(40, 14, 12, 255), 2.0f * scale);
+    const float e = std::clamp(m.energy, 0.0f, 1.0f);
+    dl->AddRectFilled(bar, ImVec2(bar.x + (bar2.x - bar.x) * e, bar2.y),
+                      e < 0.2f ? IM_COL32(255, 120, 40, 255) : red, 2.0f * scale);
+  }
+  const float y2 = y1 + small * 1.6f;
+  dl->AddText(font, small, ImVec2(o.x + pad, y2), label, "GADGET");
+  dl->AddText(font, small * 1.15f, ImVec2(o.x + pad + h * 2.2f, y2 - small * 0.1f), red,
+              kGadgetNames[std::clamp(m.picked, 0, int(Gadget::kCount) - 1)]);
+  if (m.flying || m.gliding) {
+    char text[48];
+    std::snprintf(text, sizeof(text), "%d KM/H   %d M", m.kmh, m.height);
+    dl->AddText(font, small * 1.15f, ImVec2(o.x + pad + h * 5.4f, y2 - small * 0.1f), label, text);
+  }
+  // the wheel
+  if (!m.wheel) {
+    return;
+  }
+  const ImVec2 c(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+  const float r_out = 150.0f * scale, r_in = 62.0f * scale;
+  dl->AddCircleFilled(c, r_out + 6.0f * scale, IM_COL32(10, 9, 11, 200), 64);
+  for (int k = 0; k < 8; ++k) {
+    // slot k spans its wedge, the first centred at the top, clockwise
+    const float a0 = (-0.5f + k) * 6.2831853f / 8.0f - 1.5707963f, a1 = a0 + 6.2831853f / 8.0f;
+    const bool lit = k == m.hover, picked = k == m.picked;
+    const ImU32 fill = lit ? IM_COL32(160, 28, 24, 230) : picked ? IM_COL32(60, 16, 14, 230) : IM_COL32(24, 18, 20, 220);
+    dl->PathClear();
+    dl->PathArcTo(c, r_out, a0 + 0.02f, a1 - 0.02f, 24);
+    dl->PathArcTo(c, r_in, a1 - 0.03f, a0 + 0.03f, 16);
+    dl->PathFillConvex(fill);
+    const float am = (a0 + a1) * 0.5f, rm = (r_out + r_in) * 0.5f;
+    const char* name = k < int(Gadget::kCount) ? kGadgetNames[k] : "";
+    const ImVec2 size = font->CalcTextSizeA(small * 1.05f, FLT_MAX, 0.0f, name);
+    dl->AddText(font, small * 1.05f, ImVec2(c.x + std::cos(am) * rm - size.x * 0.5f, c.y + std::sin(am) * rm - size.y * 0.5f),
+                lit ? IM_COL32(255, 235, 225, 255) : picked ? red : label, name);
+  }
+  dl->AddCircle(c, r_out + 6.0f * scale, edge, 64, 2.0f * scale);
+  dl->AddCircleFilled(c, r_in - 4.0f * scale, back, 48);
+  {
+    const char* name = kGadgetNames[std::clamp(m.hover >= 0 ? m.hover : m.picked, 0, int(Gadget::kCount) - 1)];
+    const ImVec2 size = font->CalcTextSizeA(small * 1.1f, FLT_MAX, 0.0f, name);
+    dl->AddText(font, small * 1.1f, ImVec2(c.x - size.x * 0.5f, c.y - size.y * 0.5f), red, name);
   }
 }
 
@@ -12622,7 +13675,8 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
   // and the flash fades: drawn every frame then)
   bool WantsContinuousRepaint() const override {
     return g_tcd_active.load(std::memory_order_relaxed) || g_hud_active.load(std::memory_order_relaxed) ||
-           g_beyond_hud_active.load(std::memory_order_relaxed) || g_menu_visible.load(std::memory_order_relaxed);
+           g_beyond_hud_active.load(std::memory_order_relaxed) || g_suit_hud_active.load(std::memory_order_relaxed) ||
+           g_menu_visible.load(std::memory_order_relaxed);
   }
   void OnDraw(ImGuiIO& io) override {
     if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f)
@@ -12633,6 +13687,8 @@ class TrainerOverlay final : public rex::ui::ImGuiDialog {
       DrawTcd(io);
     if (g_beyond_hud_active.load(std::memory_order_relaxed))
       DrawBeyondHud(io);
+    if (g_suit_hud_active.load(std::memory_order_relaxed))
+      DrawSuitHud(io);
     DrawModel model;
     {
       std::lock_guard lock(g_draw_mutex);

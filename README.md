@@ -139,6 +139,40 @@ keeps going while you browse.
   kept) and its time cycle when its columns are the console's. The switch
   is a file the installer reads at launch (`liberty_menu_snow.txt`), so a
   change takes the next launch; the menu says which state this launch is in
+- **Beyond Suit** (v1.7.46, Player page): Niko in the Batman Beyond suit, the
+  user's GTA V ped mod converted to the console's player components
+  (`tools/ped/pedconv.py`: the mesh turned to IV's axes, its bones mapped to
+  Niko's skeleton joint by joint and the vertices moved by the two bind
+  poses' offsets, cut into geometries of 25 bones, the stock ped shader
+  cloned, the normal and specular maps embedded, the colour map as the
+  slot's `.xtd`; its textures touched up by `tools/ped/pedtex.py` the way the
+  Batmobile's were). The installer copies the components into the unpacked
+  `playerped` folder and, when the archive is still there, mounts a rebuilt
+  `playerped.rpf` with them added (`WriteRpfAdded`). With the suit on, his
+  guns are kept aside and the suit's powers are the controls:
+  - **flight** on the boot thrusters: double-tap jump to lift off; left stick
+    moves as the camera looks, R2 climbs, L2 descends, square held boosts,
+    circle cuts the jets; the thrusters' flames at his boots, a mid-air pose
+    held, the velocity flown every frame; the jets drain the suit's energy,
+    which comes back on the ground
+  - **the glide**: triangle in the air opens the wings (the mod's own, a
+    half-open frame on the way) and the air carries him, the stick steering,
+    pushing forward dives; triangle folds them; a long fall opens them by
+    itself
+  - **strength**: his punches throw whoever he hits (ragdolled and launched),
+    his jumps go higher, no fall hurts him
+  - **the gadget wheel**: hold L1 and pick with the right stick (or d-pad
+    left/right), let go to choose, tap L1 to use: **grapnel** (a line to
+    where the camera looks - a roof's edge, a wall's top - and he is reeled
+    there), **smoke** (a cloud; the police lose him), **cloak** (unseen, the
+    wanted level cleared while it holds), **Batmobile** (the Beyond car
+    summoned), **thrusters** and **wings** as items too; batarangs and the
+    Bat-Signal come with their models in the next release
+  - every sound synthesized (`src/gta4_suit_sound.h`): the jets, the air,
+    the wings' snap, the grapnel's pop, line, latch and reel, the cloak's
+    shimmer, landings, the suit sealing round him
+  - the overlay: a panel (energy, the gadget picked, the state, speed and
+    height in the air) and the wheel while L1 is held
 - **Weapons** — full loadout with ammo, or strip all weapons
 - **Chaos**: raining cars (random cars dropped around you), gravity on/off
 - **Headlights on D-pad Left** (on by default, the one option that is):
@@ -218,6 +252,16 @@ network session.
 
 ## Changes
 
+- **v1.7.46**: **Beyond Suit** (above): the suit, its flight, glide, strength
+  and gadget wheel. The ped converter (`tools/ped/`: `pedconv.py` with its
+  `PedDrawable` on the vehicle converter's bones, `pedtex.py`, `pedcheck.py`,
+  `specs/beyond.json`), `pcwrite.Drawable.geometry(..., skin=)` for
+  four-weight skinning, `pc2x360/rpf2.py` (RPF2 archives listed, extracted
+  and rebuilt with files added), `Invoke`'s second string argument (an
+  animation and its dictionary). The installer: `FindSuit`, `WriteRpfAdded`,
+  `BuildSuitShadow`, `CopySuitIntoFolder`, `SuitInstalled()`. The
+  General Lee's Dixie horn synthesizer (`tools/car/dixie_horn.py`) for the
+  Charger pack to come.
 - **v1.7.45**: **Snow Mode** (above). The installer
   (`gta4_addon_install.cpp`): `FindSnow` reads `addons/snow`; the common.rpf
   shadow takes the mod's `materials.dat` and `vehiclefx.dat` rows
@@ -879,6 +923,8 @@ the folder whole brings the app's install page back, asking for the ISO.
   Arbiter X.
 - **jumbo8**: GTA 4 Snow Mod v2.0 (the snow mode's textures, snowfall,
   surfaces and time cycle).
+- The author of the **Batman Beyond (Animated)** GTA V ped mod (made for
+  JulioNIB's Batman script): the Beyond suit's model and textures.
 - **Ddiaz Design**: the Dodge Challenger SRT Hellcat. This work is based on
   "2019 Dodge Challenger SRT Hellcat"
   (https://sketchfab.com/3d-models/2019-dodge-challenger-srt-hellcat-f210ad5e17e04b2389b1c3628477105c)

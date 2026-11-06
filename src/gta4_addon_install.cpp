@@ -2653,6 +2653,306 @@ std::optional<fs::path> BuildSnowGtxd(const fs::path& game, const std::vector<ui
   return destination;
 }
 
+// ---------------------------------------------------------------------------
+// The Beyond suit (v1.7.46): the player's outfit components converted from
+// the user's Batman Beyond mod (tools/ped/pedconv.py) in addons/beyondsuit/
+// playerped: <slot>_NNN_<u|r>.xdr and <slot>_diff_NNN_a_<uni|whi>.xtd, stored
+// as the console's playerped.rpf stores them (a little-endian RSC header,
+// then the LZX body). They go where the game reads the player's clothes,
+// both ways the install may stand:
+//  - the unpacked folder game/xbox360/models/cdimages/playerped (the port's
+//    installer unpacks the archive there, and the game's packfile falls back
+//    to the folder): copied in when absent or of another size;
+//  - the archive playerped.rpf when it is still there: a shadow of it with
+//    the files added to its root directory (WriteRpfAdded), mounted in its
+//    place.
+// The game counts a slot's drawables by the files it finds, so the suit is
+// the next index of each slot; the trainer dresses the player in it
+// (SET_CHAR_COMPONENT_VARIATION) and back.
+// ---------------------------------------------------------------------------
+struct SuitFiles {
+  std::vector<std::pair<std::string, fs::path>> files;  // name in the archive, the bundled file
+  uint64_t fingerprint = 0;
+  bool found = false;
+};
+int g_suit_installed = 0;
+
+SuitFiles FindSuit(const fs::path& dir) {
+  SuitFiles out;
+  std::error_code ec;
+  for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::error_code fec;
+    if (!it->is_regular_file(fec))
+      continue;
+    const std::string name = Lower(it->path().filename().string());
+    const std::string ext = Lower(it->path().extension().string());
+    if ((ext == ".xdr" || ext == ".xtd") && SizeOf(it->path()) > 12)
+      out.files.emplace_back(name, it->path());
+  }
+  std::sort(out.files.begin(), out.files.end());
+  uint64_t h = 1469598103934665603ull;
+  for (const auto& [name, path] : out.files) {
+    const uint64_t size = SizeOf(path);
+    h = Fnv1a(h, name.data(), name.size());
+    h = Fnv1a(h, &size, sizeof(size));
+  }
+  out.fingerprint = h;
+  out.found = !out.files.empty();
+  return out;
+}
+
+// The archive written again (RPF2, one directory) with files added to its
+// root: every entry's stored bytes carried over, the table rebuilt (the
+// children in name order, as the game searches them), a resource's type and
+// flags read from its little-endian RSC header.
+bool WriteRpfAdded(const fs::path& source, const Rpf& rpf, const std::vector<uint8_t>& key,
+                   const std::vector<EditedFile>& added, const fs::path& destination) {
+  const uint8_t* toc = rpf.toc.data();
+  const size_t names_at = size_t(rpf.count) * 16;
+  if (rpf.count < 1 || !(Le32(toc + 8) & 0x80000000u) || (Le32(toc + 8) & 0x7FFFFFFFu) != 1 ||
+      (Le32(toc + 12) & 0x0FFFFFFFu) != rpf.count - 1)
+    return false;  // (only a flat archive: the root's children are all its entries)
+  auto name_of = [&](uint32_t i) {
+    const uint32_t at = Le32(toc + i * 16);
+    if (names_at + at >= rpf.toc.size())
+      return std::string();
+    return std::string(reinterpret_cast<const char*>(toc + names_at + at),
+                       strnlen(reinterpret_cast<const char*>(toc + names_at + at), rpf.toc.size() - names_at - at));
+  };
+  struct Item {
+    std::string name, lower;
+    uint32_t w1 = 0, w2 = 0, w3 = 0;  // the entry's words but for the offset
+    uint64_t src_offset = 0, stored = 0;  // the original's bytes, or
+    const std::vector<uint8_t>* data = nullptr;  // the added file's
+    bool resource = false;
+    uint32_t rtype = 0;
+  };
+  std::vector<Item> items;
+  std::set<std::string> replaced;
+  for (const auto& [name, data] : added)
+    replaced.insert(Lower(name));
+  for (uint32_t i = 1; i < rpf.count; ++i) {
+    const uint8_t* e = toc + i * 16;
+    if (Le32(e + 8) & 0x80000000u)
+      return false;  // (a nested directory)
+    Item it;
+    it.name = name_of(i);
+    it.lower = Lower(it.name);
+    if (it.name.empty() || replaced.count(it.lower))
+      continue;
+    it.w1 = Le32(e + 4);
+    const uint32_t w2 = Le32(e + 8), w3 = Le32(e + 12);
+    it.resource = (w3 & 0xC0000000u) == 0xC0000000u;
+    it.w3 = w3;
+    if (it.resource) {
+      it.rtype = w2 & 0xFF;
+      it.src_offset = w2 & 0x7FFFFF00u;
+      it.stored = it.w1;
+    } else {
+      it.src_offset = w2;
+      it.stored = w3 & 0xBFFFFFFFu;
+    }
+    if (it.src_offset + it.stored > rpf.file_size)
+      return false;
+    items.push_back(std::move(it));
+  }
+  for (const auto& [name, data] : added) {
+    Item it;
+    it.name = Lower(name);
+    it.lower = it.name;
+    it.data = &data;
+    it.stored = data.size();
+    it.w1 = uint32_t(data.size());
+    if (data.size() >= 12 && Le32(data.data()) == 0x05435352u) {
+      it.resource = true;
+      it.rtype = Le32(data.data() + 4) & 0xFF;
+      it.w3 = Le32(data.data() + 8);
+      if ((it.w3 & 0xC0000000u) != 0xC0000000u)
+        return false;
+    } else {
+      it.w3 = uint32_t(data.size());  // (plain, stored as is)
+    }
+    items.push_back(std::move(it));
+  }
+  std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.lower < b.lower; });
+  // the table: the root, its children, the names
+  const std::string root_name = name_of(0);
+  std::vector<uint8_t> names;
+  auto put_name = [&](const std::string& n) {
+    const uint32_t at = uint32_t(names.size());
+    names.insert(names.end(), n.begin(), n.end());
+    names.push_back(0);
+    return at;
+  };
+  const uint32_t count = uint32_t(items.size()) + 1;
+  std::vector<uint8_t> table(size_t(count) * 16);
+  PutLe32(table.data(), put_name(root_name));
+  PutLe32(table.data() + 4, 0);
+  PutLe32(table.data() + 8, 1u | 0x80000000u);
+  PutLe32(table.data() + 12, uint32_t(items.size()));
+  std::vector<uint32_t> name_offsets;
+  for (const auto& it : items)
+    name_offsets.push_back(put_name(it.name));
+  size_t toc_size = table.size() + names.size();
+  toc_size = (toc_size + 15) / 16 * 16;
+  const uint64_t data_at = (kRpfTocOffset + toc_size + kRpfBlock - 1) / kRpfBlock * kRpfBlock;
+  std::ifstream in(source, std::ios::binary);
+  std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+  if (!in || !out)
+    return false;
+  std::vector<char> zeros(kRpfBlock, 0);
+  for (uint64_t at = 0; at < data_at; at += kRpfBlock)
+    out.write(zeros.data(), std::streamsize(std::min<uint64_t>(kRpfBlock, data_at - at)));
+  uint64_t at = data_at;
+  std::vector<uint8_t> buffer;
+  for (size_t k = 0; k < items.size(); ++k) {
+    const Item& it = items[k];
+    if (at + it.stored >= 0x80000000ull || (it.resource && (at & 0xFF)))
+      return false;
+    if (it.data) {
+      out.write(reinterpret_cast<const char*>(it.data->data()), std::streamsize(it.data->size()));
+    } else {
+      buffer.resize(size_t(it.stored));
+      in.seekg(std::streamoff(it.src_offset));
+      if (!in.read(reinterpret_cast<char*>(buffer.data()), std::streamsize(buffer.size())))
+        return false;
+      out.write(reinterpret_cast<const char*>(buffer.data()), std::streamsize(buffer.size()));
+    }
+    uint8_t* e = table.data() + 16 * (k + 1);
+    PutLe32(e, name_offsets[k]);
+    PutLe32(e + 4, it.w1);
+    PutLe32(e + 8, it.resource ? (uint32_t(at) | it.rtype) : uint32_t(at));
+    PutLe32(e + 12, it.w3);
+    const uint64_t next = (at + it.stored + kRpfBlock - 1) / kRpfBlock * kRpfBlock;
+    for (uint64_t pad = at + it.stored; pad < next; pad += kRpfBlock)
+      out.write(zeros.data(), std::streamsize(std::min<uint64_t>(kRpfBlock, next - pad)));
+    at = next;
+  }
+  if (!out)
+    return false;
+  std::vector<uint8_t> whole(toc_size, 0);
+  std::memcpy(whole.data(), table.data(), table.size());
+  std::memcpy(whole.data() + table.size(), names.data(), names.size());
+  if (rpf.encrypted)
+    CryptBlocks(whole.data(), whole.size(), key, true);
+  std::array<uint8_t, 20> header{};
+  PutLe32(header.data(), kRpf2Magic);
+  PutLe32(header.data() + 4, uint32_t(toc_size));
+  PutLe32(header.data() + 8, count);
+  PutLe32(header.data() + 12, 0);
+  PutLe32(header.data() + 16, rpf.encrypted ? 1u : 0u);
+  out.seekp(0);
+  out.write(reinterpret_cast<const char*>(header.data()), std::streamsize(header.size()));
+  out.seekp(std::streamoff(kRpfTocOffset));
+  out.write(reinterpret_cast<const char*>(whole.data()), std::streamsize(whole.size()));
+  out.flush();
+  return bool(out);
+}
+
+// Whether a shadow archive carries every suit file at its size.
+bool ArchiveHoldsSuit(const fs::path& archive, const std::vector<uint8_t>& key, const SuitFiles& suit) {
+  const auto rpf = ReadRpf(archive, key);
+  if (!rpf)
+    return false;
+  for (const auto& [name, path] : suit.files) {
+    const RpfFile* f = rpf->Find("/" + name);
+    if (!f || !f->resource || f->size != SizeOf(path))
+      return false;
+  }
+  return true;
+}
+
+std::optional<fs::path> BuildSuitShadow(const fs::path& source, const std::vector<uint8_t>& key,
+                                        const SuitFiles& suit, const fs::path& cache) {
+  std::error_code ec;
+  const fs::path destination = cache / ("suit-playerped-" + Hex64(suit.fingerprint) + ".rpf");
+  if (fs::exists(destination, ec) && ArchiveHoldsSuit(destination, key, suit)) {
+    REXLOG_INFO("gta4-addons: suit: shadow of {} up to date: {}", source.string(), destination.string());
+    return destination;
+  }
+  const auto rpf = ReadRpf(source, key);
+  if (!rpf) {
+    REXLOG_WARN("gta4-addons: suit: {} could not be read", source.string());
+    return std::nullopt;
+  }
+  std::vector<EditedFile> added;
+  for (const auto& [name, path] : suit.files) {
+    std::vector<uint8_t> data;
+    if (!ReadAll(path, data) || data.size() < 12 || Le32(data.data()) != 0x05435352u) {
+      REXLOG_WARN("gta4-addons: suit: {} is not a resource file; the suit stays out", path.string());
+      return std::nullopt;
+    }
+    added.emplace_back(name, std::move(data));
+  }
+  for (auto it = fs::directory_iterator(cache, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::error_code fec;
+    const std::string name = it->path().filename().string();
+    if (it->is_regular_file(fec) && name.rfind("suit-playerped-", 0) == 0 && it->path() != destination)
+      fs::remove(it->path(), fec);
+  }
+  const fs::path temporary = destination.string() + ".tmp";
+  fs::remove(temporary, ec);
+  if (!WriteRpfAdded(source, *rpf, key, added, temporary) || !ArchiveHoldsSuit(temporary, key, suit)) {
+    fs::remove(temporary, ec);
+    REXLOG_WARN("gta4-addons: suit: the shadow of {} could not be built", source.string());
+    return std::nullopt;
+  }
+  fs::rename(temporary, destination, ec);
+  if (ec) {
+    REXLOG_WARN("gta4-addons: suit: {} could not be put in place: {}", destination.string(), ec.message());
+    return std::nullopt;
+  }
+  REXLOG_INFO("gta4-addons: suit: built a shadow of {} with {} files added: {}", source.string(), added.size(),
+              destination.string());
+  return destination;
+}
+
+// The suit's files copied into the unpacked player folder (absent or of
+// another size); how many are there afterwards.
+int CopySuitIntoFolder(const fs::path& folder, const SuitFiles& suit) {
+  std::error_code ec;
+  int present = 0, copied = 0;
+  for (const auto& [name, path] : suit.files) {
+    const fs::path dest = folder / name;
+    if (fs::exists(dest, ec) && SizeOf(dest) == SizeOf(path)) {
+      ++present;
+      continue;
+    }
+    if (CopyBytes(path, dest)) {
+      ++present;
+      ++copied;
+    } else {
+      REXLOG_WARN("gta4-addons: suit: {} could not be copied to {}", path.string(), dest.string());
+    }
+  }
+  if (copied)
+    REXLOG_INFO("gta4-addons: suit: {} file(s) copied into {}", copied, folder.string());
+  return present;
+}
+
+void InstallSuit(const fs::path& game, const std::vector<uint8_t>& key, const SuitFiles& suit,
+                 const fs::path& cache, std::vector<ShadowArchive>& shadows) {
+  std::error_code ec;
+  const fs::path cdimages = game / "xbox360" / "models" / "cdimages";
+  const fs::path folder = cdimages / "playerped";
+  const fs::path archive = cdimages / "playerped.rpf";
+  int in_place = 0;
+  if (fs::is_directory(folder, ec))
+    in_place = CopySuitIntoFolder(folder, suit);
+  if (fs::exists(archive, ec)) {
+    if (const auto shadow = BuildSuitShadow(archive, key, suit, cache)) {
+      shadows.push_back({"game:\\xbox360\\models\\cdimages\\playerped.rpf", *shadow});
+      in_place = int(suit.files.size());
+    }
+  } else if (!fs::is_directory(folder, ec)) {
+    REXLOG_WARN("gta4-addons: suit: neither {} nor {} exists; the suit stays out", archive.string(),
+                folder.string());
+  }
+  g_suit_installed = in_place;
+  REXLOG_INFO("gta4-addons: suit: {} of {} files in place ({}{})", in_place, suit.files.size(),
+              fs::is_directory(folder, ec) ? "folder" : "", fs::exists(archive, ec) ? " archive shadow" : "");
+}
+
 std::vector<ShadowArchive> BuildShadows(const fs::path& game, const std::vector<uint8_t>& key,
                                         const std::vector<Addon>& addons, std::vector<MapSet>& maps,
                                         const fs::path& cache, const SnowFiles* snow = nullptr) {
@@ -2798,6 +3098,10 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
     REXLOG_INFO("gta4-addons: snow mode off");
   }
   std::vector<ShadowArchive> shadows = BuildShadows(game, key, addons, maps, cache, snow.found ? &snow : nullptr);
+  // The Beyond suit's components, where the player's clothes are read from.
+  g_suit_installed = 0;
+  if (const SuitFiles suit = FindSuit(app_addons / "beyondsuit" / "playerped"); suit.found)
+    InstallSuit(game, key, suit, cache, shadows);
   if (snow.found)
     g_snow_active.store(std::any_of(shadows.begin(), shadows.end(), [](const ShadowArchive& s) {
       return s.guest_path.find("gtxd.img") != std::string::npos;
@@ -2927,6 +3231,7 @@ std::vector<ShadowArchive> InstallBundled(const fs::path& app_addons,
 }
 
 const std::vector<MapInfo>& InstalledMaps() { return g_maps; }
+int SuitInstalled() { return g_suit_installed; }
 
 // Snow mode's switch and state (the header).
 bool SnowActive() { return g_snow_active.load(std::memory_order_relaxed); }
