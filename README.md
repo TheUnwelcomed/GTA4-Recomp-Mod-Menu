@@ -946,6 +946,11 @@ the folder whole brings the app's install page back, asking for the ISO.
 
 ## Credits
 
+- **@TheUnwelcomed** and **Claude** (Anthropic's AI model) — the menu itself, made
+  together as equal contributors. The first 64 commits are authored by Claude alone
+  (to keep the owner's email out of the history); from here on each commit is
+  authored by @TheUnwelcomed with Claude as co-author, so both names are on every
+  one.
 - **OZORDI** — Liberty Recompiled; **vaduur** — the Android fork; **elripalda** — the
   PS5 port this builds on; **ReXGlue** underneath.
 - **sjaak327** — Simple Native Trainer, the model for the menu.
